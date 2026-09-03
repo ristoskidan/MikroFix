@@ -1,0 +1,54 @@
+# MikroFIX - nikoli ne sledi poslovnim ali zasebnim podatkom
+MikroFixData*/
+**/MikroFixData*/
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.mfbak
+*.bak
+
+# Certifikati z zasebnim kljucem in skrivnosti
+*.p12
+*.pfx
+*.key
+*.pem.key
+.env
+.env.*
+!.env.example
+*secret*
+*credentials*
+mikrofix_settings.json
+.mikrofix_backup_secret.dpapi
+
+# Ustvarjeni poslovni dokumenti in priloge
+**/photos/
+**/pdf/
+**/backups/
+*.generated.pdf
+*.receipt.pdf
+
+# Python in lokalna okolja
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Orodja, urejevalniki in OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.temp
+
+# Lokalni paketi in izdaje
+dist/
+build/
+*.zip
