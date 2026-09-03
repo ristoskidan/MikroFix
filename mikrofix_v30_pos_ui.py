@@ -16,8 +16,9 @@ from tkinter import messagebox, simpledialog, ttk
 from mikrofix_printing import preferred_windows_printer, send_pdf_to_windows_printer
 from mikrofix_upnqr import UpnQrError, generate_upnqr_pdf
 from mikrofix_v30_cash import (
-    cash_session_snapshot,close_cash_session,generate_cash_journal_pdf,
-    open_cash_session,record_cash_entry,
+    book_cash_disbursement,cash_session_snapshot,close_cash_session,
+    generate_cash_journal_pdf,open_cash_session,pending_cash_disbursements,
+    record_cash_entry,
 )
 from mikrofix_v30_pos import (
     PosError, PosLine, abandon_pos_draft, calculate_line, dec,
@@ -669,13 +670,104 @@ class PosWindow:
                 output_dir=self.pdf_dir,company=self._company_data())
             if os.name=="nt":os.startfile(str(path))
 
+        def import_pending_disbursement():
+            if not current["session"]:
+                messagebox.showwarning(
+                    "Blagajna", "Pred knjiženjem izdatka odpri blagajno.", parent=win
+                )
+                return
+            try:
+                rows = pending_cash_disbursements(self.service_db)
+            except Exception as exc:
+                messagebox.showerror("Blagajna", str(exc), parent=win)
+                return
+            if not rows:
+                messagebox.showinfo(
+                    "Blagajna", "Ni potrjenih odkupnih izdatkov, ki bi čakali na knjiženje.",
+                    parent=win,
+                )
+                return
+            picker = tk.Toplevel(win)
+            picker.title("Čakajoči blagajniški izdatki odkupa")
+            picker.transient(win)
+            picker.grab_set()
+            picker.geometry("820x430")
+            columns = ("voucher", "buyback", "recipient", "purpose", "amount")
+            pending_tree = ttk.Treeview(
+                picker, columns=columns, show="headings", selectmode="browse"
+            )
+            for key, label, width in (
+                ("voucher", "Izdatek", 110), ("buyback", "Odkup", 120),
+                ("recipient", "Prejemnik", 180), ("purpose", "Namen", 300),
+                ("amount", "Znesek", 90),
+            ):
+                pending_tree.heading(key, text=label)
+                pending_tree.column(key, width=width, stretch=key == "purpose")
+            pending_tree.pack(fill="both", expand=True, padx=12, pady=(12, 8))
+            by_id = {int(row["id"]): row for row in rows}
+            for row in rows:
+                pending_tree.insert(
+                    "", "end", iid=str(row["id"]),
+                    values=(
+                        row["voucher_no"], row["buyback_no"], row["recipient_name"],
+                        row["purpose"], f"{dec(row['amount']):.2f} EUR",
+                    ),
+                )
+
+            def book_selected():
+                selected = pending_tree.selection()
+                if not selected:
+                    return
+                row = by_id[int(selected[0])]
+                if not messagebox.askyesno(
+                    "Knjiži blagajniški izdatek",
+                    f"Izdatek {row['voucher_no']} v znesku {dec(row['amount']):.2f} EUR "
+                    "bo nespremenljivo knjižen v trenutno blagajno. Nadaljujem?",
+                    parent=picker,
+                ):
+                    return
+                try:
+                    result = book_cash_disbursement(
+                        office_db=self.office_db,
+                        service_db=self.service_db,
+                        voucher_id=int(row["id"]),
+                        premise_id=str(self.premise_var.get()),
+                        device_id=self.runtime.electronic_device,
+                        operator_code=self.operator_code,
+                    )
+                    picker.destroy()
+                    refresh()
+                    messagebox.showinfo(
+                        "Blagajna",
+                        f"Izdatek {result['voucher_no']} je knjižen kot vrstica "
+                        f"{result['entry_no']} blagajniškega dnevnika.",
+                        parent=win,
+                    )
+                except Exception as exc:
+                    messagebox.showerror("Blagajna", str(exc), parent=picker)
+
+            picker_buttons = ttk.Frame(picker)
+            picker_buttons.pack(fill="x", padx=12, pady=(0, 12))
+            ttk.Button(
+                picker_buttons, text="KNJIŽI IZBRANI IZDATEK", command=book_selected
+            ).pack(side="right")
+            ttk.Button(
+                picker_buttons, text="ZAPRI BREZ KNJIŽENJA", command=picker.destroy
+            ).pack(side="right", padx=8)
+            pending_tree.bind("<Double-1>", lambda _event: book_selected())
+            first = pending_tree.get_children()
+            if first:
+                pending_tree.selection_set(first[0])
+                pending_tree.focus(first[0])
+
         def close_register():
             session=current["session"]
             if not session:messagebox.showwarning("Blagajna","Blagajna ni odprta.",parent=win);return
             service_connection=sqlite3.connect(str(self.service_db))
             try:
                 pending=service_connection.execute(
-                    "SELECT voucher_no FROM cash_disbursements WHERE status='PREPARED' ORDER BY id"
+                    "SELECT voucher_no FROM cash_disbursements "
+                    "WHERE status IN ('PREPARED','CONFIRMED') ORDER BY id"
                 ).fetchall()
             except sqlite3.Error:
                 pending=[]
@@ -708,6 +800,9 @@ class PosWindow:
         ttk.Button(buttons,text="ODPRI BLAGAJNO",command=open_register).pack(side="left")
         ttk.Button(buttons,text="BLAGAJNIŠKI PREJEMEK",command=lambda:manual_entry(1)).pack(side="left",padx=5)
         ttk.Button(buttons,text="BLAGAJNIŠKI IZDATEK",command=lambda:manual_entry(-1)).pack(side="left")
+        ttk.Button(
+            buttons,text="PRENESI ODKUPNI IZDATEK",command=import_pending_disbursement
+        ).pack(side="left",padx=5)
         ttk.Button(buttons,text="IZVOZI PDF",command=lambda:export(current["session"]["id"]) if current["session"] else None).pack(side="right",padx=5)
         ttk.Button(buttons,text="ZAPRI BLAGAJNO",command=close_register).pack(side="right")
         refresh()

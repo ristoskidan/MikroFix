@@ -187,6 +187,137 @@ def record_cash_entry(
     return int(cur.lastrowid)
 
 
+def _ensure_disbursement_link_columns(
+    c: sqlite3.Connection, schema: str = "svc"
+) -> None:
+    columns = {
+        str(row[1])
+        for row in c.execute(f"PRAGMA {schema}.table_info(cash_disbursements)")
+    }
+    if "cash_session_id" not in columns:
+        c.execute(
+            f"ALTER TABLE {schema}.cash_disbursements ADD COLUMN cash_session_id INTEGER"
+        )
+    if "cash_entry_id" not in columns:
+        c.execute(
+            f"ALTER TABLE {schema}.cash_disbursements ADD COLUMN cash_entry_id INTEGER"
+        )
+    if "booked_at" not in columns:
+        c.execute(
+            f"ALTER TABLE {schema}.cash_disbursements ADD COLUMN booked_at TEXT"
+        )
+
+
+def pending_cash_disbursements(service_db: Path | str) -> list[dict]:
+    """Vrne podpisane gotovinske izdatke odkupa, ki še niso v dnevniku."""
+    c = sqlite3.connect(str(service_db))
+    c.row_factory = sqlite3.Row
+    try:
+        _ensure_disbursement_link_columns(c, "main")
+        c.commit()
+        rows = c.execute(
+            """
+            SELECT id,voucher_no,buyback_id,buyback_no,created_at,confirmed_at,
+                   recipient_name,recipient_address,purpose,amount,operator_code
+            FROM cash_disbursements
+            WHERE status='CONFIRMED' AND cash_entry_id IS NULL
+            ORDER BY confirmed_at,id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        c.close()
+
+
+def book_cash_disbursement(
+    *,
+    office_db: Path | str,
+    service_db: Path | str,
+    voucher_id: int,
+    premise_id: str,
+    device_id: str,
+    operator_code: str,
+) -> dict:
+    """Atomsko knjiži potrjeni odkupni izdatek v odprto blagajno natanko enkrat."""
+    c = sqlite3.connect(str(office_db), timeout=20)
+    c.row_factory = sqlite3.Row
+    try:
+        ensure_cash_schema_connection(c)
+        c.execute("ATTACH DATABASE ? AS svc", (str(service_db),))
+        _ensure_disbursement_link_columns(c, "svc")
+        c.commit()
+        c.execute("BEGIN IMMEDIATE")
+        voucher = c.execute(
+            "SELECT * FROM svc.cash_disbursements WHERE id=?",
+            (int(voucher_id),),
+        ).fetchone()
+        if not voucher:
+            raise CashJournalError("Blagajniški izdatek ni najden.")
+        if str(voucher["status"]) == "BOOKED" and voucher["cash_entry_id"]:
+            entry = c.execute(
+                "SELECT session_id,entry_no FROM cash_journal_entries_v30 WHERE id=?",
+                (int(voucher["cash_entry_id"]),),
+            ).fetchone()
+            c.rollback()
+            return {
+                "voucher_id": int(voucher["id"]),
+                "voucher_no": str(voucher["voucher_no"]),
+                "cash_entry_id": int(voucher["cash_entry_id"]),
+                "cash_session_id": int(entry[0]) if entry else int(voucher["cash_session_id"]),
+                "entry_no": int(entry[1]) if entry else None,
+                "already_booked": True,
+            }
+        if str(voucher["status"]) != "CONFIRMED":
+            raise CashJournalError(
+                "Izdatek je mogoče knjižiti šele po podpisu in potrditvi odkupa."
+            )
+        session_id = require_open_cash_session(
+            c, premise_id=str(premise_id), device_id=str(device_id)
+        )
+        amount = money(voucher["amount"])
+        if amount <= 0:
+            raise CashJournalError("Blagajniški izdatek nima veljavnega zneska.")
+        entry_id = record_cash_entry(
+            c,
+            session_id=session_id,
+            entry_type="CASH_EXPENSE",
+            amount=-amount,
+            reference_type="BUYBACK_CASH_DISBURSEMENT",
+            reference_id=int(voucher["id"]),
+            reference_no=str(voucher["voucher_no"]),
+            description=str(voucher["purpose"]),
+            operator_code=str(operator_code),
+        )
+        now = datetime.now().isoformat(timespec="seconds")
+        updated = c.execute(
+            """
+            UPDATE svc.cash_disbursements
+            SET status='BOOKED',cash_session_id=?,cash_entry_id=?,booked_at=?
+            WHERE id=? AND status='CONFIRMED' AND cash_entry_id IS NULL
+            """,
+            (session_id, entry_id, now, int(voucher_id)),
+        )
+        if updated.rowcount != 1:
+            raise CashJournalError("Izdatka ni bilo mogoče enolično knjižiti.")
+        entry_no = c.execute(
+            "SELECT entry_no FROM cash_journal_entries_v30 WHERE id=?", (entry_id,)
+        ).fetchone()[0]
+        c.commit()
+        return {
+            "voucher_id": int(voucher["id"]),
+            "voucher_no": str(voucher["voucher_no"]),
+            "cash_entry_id": entry_id,
+            "cash_session_id": session_id,
+            "entry_no": int(entry_no),
+            "already_booked": False,
+        }
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
 def cash_session_snapshot(
     office_db: Path | str, *, premise_id: str, device_id: str,
 ) -> tuple[dict|None,list[dict]]:
