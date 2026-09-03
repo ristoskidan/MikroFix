@@ -20,9 +20,11 @@ from mikrofix_v30_cash import (
     open_cash_session,record_cash_entry,
 )
 from mikrofix_v30_pos import (
-    PosError, PosLine, calculate_line, dec, default_service_description, ensure_pos_schema,
+    PosError, PosLine, abandon_pos_draft, calculate_line, dec,
+    default_service_description, ensure_pos_schema,
     generate_pos_pdfs, generate_pos_preview_pdfs, issue_invoice,
-    latest_pending_print, mark_pdf_ready, mark_printed, register_copy,
+    eligible_storned_invoices, latest_pending_print, load_active_pos_draft,
+    mark_pdf_ready, mark_printed, register_copy, save_pos_draft,
     prepare_used_goods_agreement, set_used_goods_agreement_signed,
     storno_invoice,
     search_inventory, service_price,
@@ -76,7 +78,12 @@ class PosWindow:
         self.preview_a4_path = None
         self.preview_receipt_path = None
         self.review_fingerprint = ""
+        self.replacement_of_invoice_id = None
+        self.replacement_of_invoice_no = ""
         self._balancing_payment = False
+        self._restoring_draft = True
+        self._draft_after_id = None
+        self._draft_started = False
         configured_premises = list(
             self.runtime.settings.get("business", {}).get("premises") or []
         )
@@ -96,6 +103,7 @@ class PosWindow:
         self.win.protocol("WM_DELETE_WINDOW", self.close)
         self.win.bind("<F10>", self.on_f10)
         self.win.bind("<F5>", lambda _e: self.new_invoice())
+        self.win.bind("<Shift-F5>", lambda _e: self.choose_replacement_source())
         self.win.bind("<F6>", lambda _e: self.choose_ready_service())
         self.win.bind("<F7>", lambda _e: self.edit_discount())
         self.win.bind("<F8>", self.print_upn_qr)
@@ -108,12 +116,16 @@ class PosWindow:
         self.win.bind("<F12>", lambda _e: self.change_qty(-1))
         self.win.bind("<Delete>", lambda _e: self.remove_line())
         self._build()
+        self._restoring_draft = False
         self.refresh_stock()
         pending = latest_pending_print(self.office_db)
         if pending:
             self._resume_pending_print(pending)
         elif service_id and service_loader:
             self._load_service(service_id)
+            self._save_draft_now()
+        else:
+            self._offer_draft_restore()
         self.search_entry.focus_set()
 
     def _paper_width(self) -> int:
@@ -171,6 +183,7 @@ class PosWindow:
             ("F3  + T1 DELO", lambda: self.add_service("T1")),
             ("F4  + T2 TEREN", lambda: self.add_service("T2")),
             ("F5  NOV RAČUN", self.new_invoice),
+            ("⇄ VEŽI NA STORNO", self.choose_replacement_source),
             ("F6  SERVIS ZA RAČUN", self.choose_ready_service),
             ("F7  RABAT", self.edit_discount),
             ("F8  UPN QR", self.print_upn_qr),
@@ -257,6 +270,11 @@ class PosWindow:
             var.trace_add("write", lambda *_: self.invalidate_review())
         details.columnconfigure(0, weight=1)
         details.columnconfigure(1, weight=1)
+        self.replacement_var = tk.StringVar(value="Nadomestni račun: ni povezave")
+        tk.Label(
+            details, textvariable=self.replacement_var, bg="#F7F9FA", fg=BLUE,
+            font=("Segoe UI", 8, "bold"), anchor="w",
+        ).grid(row=6, column=0, columnspan=2, sticky="ew", padx=9, pady=(0, 7))
 
         payment = tk.Frame(right, bg=PANEL)
         payment.pack(fill="x", padx=12, pady=(0, 7))
@@ -308,6 +326,11 @@ class PosWindow:
         tk.Label(footer, textvariable=self.total_var, bg=PANEL, fg=DARK, font=("Segoe UI", 18, "bold")).pack(side="left", padx=15, pady=10)
         self.state_var = tk.StringVar(value="Dodaj postavke in odpri končni pregled.")
         tk.Label(footer, textvariable=self.state_var, bg=PANEL, fg=GRAY, font=("Segoe UI", 9)).pack(side="left", padx=15)
+        self.autosave_var = tk.StringVar(value="Osnutek: brez sprememb")
+        tk.Label(
+            footer, textvariable=self.autosave_var, bg=PANEL, fg=GREEN,
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=8)
         self.review_btn = ttk.Button(footer, text="KONČNI PREGLED", command=self.review)
         self.review_btn.pack(side="right", padx=8, pady=10)
         self.f10_btn = ttk.Button(footer, text="PREGLED / IZDAJA  F10", command=self.on_f10)
@@ -331,6 +354,188 @@ class PosWindow:
         self.review_fingerprint = ""
         if hasattr(self, "review_btn"):
             self.review_btn.configure(text="KONČNI PREGLED", command=self.review)
+        self._schedule_draft_save()
+
+    def _has_meaningful_draft(self):
+        if self.lines or self.service_id or self.replacement_of_invoice_id:
+            return True
+        if self.customer_name.get().strip() not in {"", "Končni kupec"}:
+            return True
+        return any(
+            value.get().strip()
+            for value in (
+                self.customer_address, self.customer_phone,
+                self.customer_email, self.customer_tax,
+            )
+        )
+
+    def _draft_data(self):
+        return {
+            "schema_version": 1,
+            "lines": [
+                {
+                    "line_kind": line.line_kind,
+                    "name": line.name,
+                    "code": line.code,
+                    "barcode": line.barcode,
+                    "article_id": line.article_id,
+                    "quantity": str(line.quantity),
+                    "base_unit_price": str(line.base_unit_price),
+                    "acquisition_cost": str(line.acquisition_cost),
+                    "requested_discount_pct": str(line.requested_discount_pct),
+                    "service_tier": line.service_tier,
+                    "stock_already_consumed": bool(line.stock_already_consumed),
+                    "origin_kind": line.origin_kind,
+                    "origin_id": line.origin_id,
+                    "source_locked": bool(line.source_locked),
+                }
+                for line in self.lines
+            ],
+            "customer": self.customer_values(),
+            "payment_mode": self.payment_mode.get(),
+            "cash_amount": self.cash_amount.get(),
+            "bank_amount": self.bank_amount.get(),
+            "cash_received": self.cash_received.get(),
+            "bank_received": bool(self.bank_received.get()),
+            "premise_id": self.premise_var.get(),
+            "service_id": self.service_id,
+            "used_device_ids": sorted(self.used_device_ids),
+            "used_agreement_id": self.used_agreement_id,
+            "used_agreement_path": str(self.used_agreement_path or ""),
+            "used_signed": bool(self.used_signed.get()),
+            "payment_reference": self.payment_reference,
+            "replacement_of_invoice_id": self.replacement_of_invoice_id,
+            "replacement_of_invoice_no": self.replacement_of_invoice_no,
+        }
+
+    def _schedule_draft_save(self):
+        if self._restoring_draft or self.issued_id or not hasattr(self, "win"):
+            return
+        if self._draft_after_id is not None:
+            try:
+                self.win.after_cancel(self._draft_after_id)
+            except Exception:
+                pass
+        if hasattr(self, "autosave_var"):
+            self.autosave_var.set("Osnutek: shranjevanje …")
+        self._draft_after_id = self.win.after(350, self._save_draft_now)
+
+    def _save_draft_now(self):
+        self._draft_after_id = None
+        if self._restoring_draft or self.issued_id:
+            return
+        if not self._draft_started and not self._has_meaningful_draft():
+            if hasattr(self, "autosave_var"):
+                self.autosave_var.set("Osnutek: brez sprememb")
+            return
+        self._draft_started = True
+        try:
+            save_pos_draft(
+                self.office_db,
+                issue_token=self.issue_token,
+                operator_code=self.operator_code,
+                premise_id=self.premise_var.get(),
+                device_id=self.runtime.electronic_device,
+                payload=self._draft_data(),
+            )
+            if hasattr(self, "autosave_var"):
+                from datetime import datetime
+                self.autosave_var.set(
+                    f"Osnutek shranjen {datetime.now().strftime('%H:%M:%S')}"
+                )
+        except Exception as exc:
+            if hasattr(self, "autosave_var"):
+                self.autosave_var.set(f"NAPAKA SHRANJEVANJA: {exc}")
+
+    def _offer_draft_restore(self):
+        try:
+            stored = load_active_pos_draft(
+                self.office_db,
+                operator_code=self.operator_code,
+                device_id=self.runtime.electronic_device,
+            )
+        except Exception as exc:
+            messagebox.showerror("Obnovitev osnutka", str(exc), parent=self.win)
+            return
+        if not stored:
+            return
+        if not messagebox.askyesno(
+            "Obnovitev osnutka",
+            "Najden je varno shranjen neizdani račun iz "
+            f"{str(stored['updated_at']).replace('T', ' ')}. Nadaljujem ta osnutek?",
+            parent=self.win,
+        ):
+            abandon_pos_draft(self.office_db, str(stored["issue_token"]))
+            return
+        payload = stored["payload"]
+        try:
+            self._restoring_draft = True
+            self.issue_token = str(stored["issue_token"])
+            self.lines = [
+                PosLine(
+                    line_kind=str(item["line_kind"]),
+                    name=str(item["name"]),
+                    code=str(item.get("code") or ""),
+                    barcode=str(item.get("barcode") or ""),
+                    article_id=item.get("article_id"),
+                    quantity=dec(item.get("quantity")),
+                    base_unit_price=dec(item.get("base_unit_price")),
+                    acquisition_cost=dec(item.get("acquisition_cost")),
+                    requested_discount_pct=dec(item.get("requested_discount_pct")),
+                    service_tier=str(item.get("service_tier") or ""),
+                    stock_already_consumed=bool(item.get("stock_already_consumed")),
+                    origin_kind=str(item.get("origin_kind") or "POS_ADDED"),
+                    origin_id=item.get("origin_id"),
+                    source_locked=bool(item.get("source_locked")),
+                )
+                for item in payload.get("lines", [])
+            ]
+            customer = payload.get("customer") or {}
+            self.customer_name.set(str(customer.get("name") or "Končni kupec"))
+            self.customer_address.set(str(customer.get("address") or ""))
+            self.customer_phone.set(str(customer.get("phone") or ""))
+            self.customer_email.set(str(customer.get("email") or ""))
+            self.customer_tax.set(str(customer.get("tax_number") or ""))
+            premise = str(payload.get("premise_id") or "")
+            if premise in self.premise_choices:
+                self.premise_var.set(premise)
+            self.service_id = payload.get("service_id")
+            self.used_device_ids = {int(value) for value in payload.get("used_device_ids", [])}
+            self.used_agreement_id = payload.get("used_agreement_id")
+            agreement_path = str(payload.get("used_agreement_path") or "")
+            self.used_agreement_path = Path(agreement_path) if agreement_path else None
+            self.used_signed.set(bool(payload.get("used_signed")))
+            self.payment_reference = str(
+                payload.get("payment_reference") or self._reference_for_token(self.issue_token)
+            )
+            self.replacement_of_invoice_id = payload.get("replacement_of_invoice_id")
+            self.replacement_of_invoice_no = str(
+                payload.get("replacement_of_invoice_no") or ""
+            )
+            if self.replacement_of_invoice_id:
+                self.replacement_var.set(
+                    f"Nadomestni račun za {self.replacement_of_invoice_no or '-'}"
+                )
+            self.payment_mode.set(str(payload.get("payment_mode") or "CASH"))
+            self.payment_changed()
+            self.cash_amount.set(str(payload.get("cash_amount") or "0.00"))
+            self.bank_amount.set(str(payload.get("bank_amount") or "0.00"))
+            self.cash_received.set(str(payload.get("cash_received") or "0.00"))
+            self.bank_received.set(bool(payload.get("bank_received")))
+            self.recalc()
+            self._draft_started = True
+            self.autosave_var.set(
+                f"Osnutek obnovljen {str(stored['updated_at']).replace('T', ' ')}"
+            )
+            self.state_var.set("Obnovljen je neizdani račun. Pred izdajo ga ponovno preglej.")
+        except Exception as exc:
+            messagebox.showerror(
+                "Obnovitev osnutka",
+                f"Osnutka ni bilo mogoče obnoviti:\n{exc}",
+                parent=self.win,
+            )
+        finally:
+            self._restoring_draft = False
 
     def _payment_field_changed(self, *_args):
         if self._balancing_payment:
@@ -745,6 +950,7 @@ class PosWindow:
             "used_signed": bool(self.used_signed.get()),
             "service_id": self.service_id,
             "payment_reference": self.payment_reference,
+            "replacement_of_invoice_id": self.replacement_of_invoice_id,
         }
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         return hashlib.sha256(raw).hexdigest()
@@ -777,6 +983,10 @@ class PosWindow:
                 "\nMFT je tip A: račun mora biti izdan v premičnem objektu."
                 if premise == "MFT" else ""
             )
+            replacement_note = (
+                f"\nNadomestni račun za: {self.replacement_of_invoice_no}"
+                if self.replacement_of_invoice_id else ""
+            )
             customer = self.customer_values()
             if not messagebox.askyesno(
                 "Končni pregled",
@@ -786,7 +996,7 @@ class PosWindow:
                 f"Naslov: {customer.get('address') or '-'}\n"
                 f"Telefon/e-pošta: {customer.get('phone') or '-'} / {customer.get('email') or '-'}\n"
                 f"Poslovni prostor / naprava: {premise}/{self.runtime.electronic_device}"
-                f"{premise_note}\n\n"
+                f"{premise_note}{replacement_note}\n\n"
                 "Prvi F10 zdaj izdela nespremenjeni predogled A4 in 80 mm brez izdaje. "
                 "Nadaljujem?",
                 parent=self.win,
@@ -798,6 +1008,7 @@ class PosWindow:
                 company=self._company_data(), premise=premise,
                 device=self.runtime.electronic_device, token=self.issue_token,
                 paper_width_mm=self._paper_width(),
+                replacement_of_invoice_no=self.replacement_of_invoice_no,
             )
             self.review_fingerprint = self._current_fingerprint()
             self.review_ready = True
@@ -869,6 +1080,7 @@ class PosWindow:
                 bank_transfer_received=self.bank_received.get(),
                 payment_reference=self.payment_reference,
                 used_goods_agreement_id=self.used_agreement_id,
+                replacement_of_invoice_id=self.replacement_of_invoice_id,
             )
             self.header_status.set(f"Račun {self.issued_no}  •  {self.total:.2f} EUR  •  TEST/FURS izklopljen")
             self.premise_combo.configure(state="disabled")
@@ -1184,12 +1396,22 @@ class PosWindow:
                 "Blagajna", "Najprej potrdi uspešen tisk že izdanega računa.", parent=self.win
             )
             return
+        if self._draft_after_id is not None:
+            try:
+                self.win.after_cancel(self._draft_after_id)
+            except Exception:
+                pass
+            self._draft_after_id = None
+        abandon_pos_draft(self.office_db, self.issue_token)
         self.lines.clear(); self.used_device_ids.clear(); self.issue_token=str(uuid.uuid4())
         self.payment_reference=self._reference_for_token(self.issue_token)
         self.used_agreement_id=None; self.used_agreement_path=None
         self.issued_id=None; self.issued_no=""; self.review_ready=False; self.service_id=None
         self.print_confirmed=False
         self.preview_a4_path=None; self.preview_receipt_path=None; self.review_fingerprint=""
+        self.replacement_of_invoice_id=None; self.replacement_of_invoice_no=""
+        self.replacement_var.set("Nadomestni račun: ni povezave")
+        self._draft_started=False
         self.customer_name.set("Končni kupec"); self.customer_address.set(""); self.customer_phone.set(""); self.customer_email.set(""); self.customer_tax.set("")
         self.used_signed.set(False); self.payment_mode.set("CASH"); self.cash_received.set("0.00")
         self.bank_received.set(False)
@@ -1208,6 +1430,74 @@ class PosWindow:
             self._resume_pending_print(pending)
             return
         self.recalc(); self.refresh_stock(); self.search_entry.focus_set()
+
+    def choose_replacement_source(self):
+        if self.issued_id:
+            return
+        try:
+            rows = eligible_storned_invoices(self.office_db)
+        except Exception as exc:
+            messagebox.showerror(
+                "Veži na storno", f"Storniranih računov ni mogoče prebrati:\n{exc}",
+                parent=self.win,
+            )
+            return
+        if not rows:
+            messagebox.showinfo(
+                "Veži na storno",
+                "Ni storniranega računa brez že ustvarjenega nadomestnega računa.",
+                parent=self.win,
+            )
+            return
+        dialog = tk.Toplevel(self.win)
+        dialog.title("Veži novi račun na storno")
+        dialog.transient(self.win)
+        dialog.grab_set()
+        dialog.geometry("760x420")
+        tree = ttk.Treeview(
+            dialog, columns=("invoice", "storno", "date", "customer", "total"),
+            show="headings", selectmode="browse",
+        )
+        for key, label, width in (
+            ("invoice", "Stornirani račun", 145), ("storno", "Storno", 125),
+            ("date", "Datum", 100), ("customer", "Kupec", 220),
+            ("total", "Znesek", 90),
+        ):
+            tree.heading(key, text=label)
+            tree.column(key, width=width, stretch=key == "customer")
+        tree.pack(fill="both", expand=True, padx=12, pady=(12, 8))
+        by_id = {int(row["id"]): row for row in rows}
+        for row in rows:
+            tree.insert(
+                "", "end", iid=str(row["id"]),
+                values=(
+                    row["invoice_no"], row["storno_no"], row["date"],
+                    row["customer"], f"{dec(row['invoice_total']):.2f} EUR",
+                ),
+            )
+
+        def select_link():
+            selected = tree.selection()
+            if not selected:
+                return
+            row = by_id[int(selected[0])]
+            self.replacement_of_invoice_id = int(row["id"])
+            self.replacement_of_invoice_no = str(row["invoice_no"])
+            self.replacement_var.set(
+                f"Nadomestni račun za {row['invoice_no']} (storno {row['storno_no']})"
+            )
+            self.invalidate_review()
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(buttons, text="POVEŽI", command=select_link).pack(side="right")
+        ttk.Button(buttons, text="PREKLIČI", command=dialog.destroy).pack(side="right", padx=8)
+        tree.bind("<Double-1>", lambda _event: select_link())
+        first = tree.get_children()
+        if first:
+            tree.selection_set(first[0])
+            tree.focus(first[0])
 
     def _inventory_by_id(self, article_id):
         c=sqlite3.connect(str(self.inventory_db)); c.row_factory=sqlite3.Row
@@ -1376,8 +1666,21 @@ class PosWindow:
             ):
                 return
         if self.issued_id is None and self.lines:
-            if not messagebox.askyesno("Zapri blagajno", "Trenutni neizdani račun bo opuščen. Zaprem blagajno?", parent=self.win):
+            if not messagebox.askyesno(
+                "Zapri blagajno",
+                "Trenutni neizdani račun bo varno shranjen kot osnutek in ponujen ob "
+                "naslednjem odprtju. Zaprem blagajno?",
+                parent=self.win,
+            ):
                 return
+        if self.issued_id is None and self._draft_started:
+            if self._draft_after_id is not None:
+                try:
+                    self.win.after_cancel(self._draft_after_id)
+                except Exception:
+                    pass
+                self._draft_after_id = None
+            self._save_draft_now()
         self.win.destroy()
         if self.on_close_callback:
             self.on_close_callback()

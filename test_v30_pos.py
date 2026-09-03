@@ -5,9 +5,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from mikrofix_v30_pos import (
-    PosError, PosLine, calculate_line, default_service_description,
-    ensure_pos_schema, issue_invoice,
-    latest_pending_print, mark_pdf_ready, mark_printed, register_copy,
+    PosError, PosLine, abandon_pos_draft, calculate_line, default_service_description,
+    eligible_storned_invoices, ensure_pos_schema, invoice_snapshot, issue_invoice,
+    latest_pending_print, load_active_pos_draft, mark_pdf_ready, mark_printed,
+    register_copy, save_pos_draft,
     storno_invoice,
 )
 from mikrofix_v30_cash import open_cash_session
@@ -126,6 +127,78 @@ class V30PosTests(unittest.TestCase):
             "premise_id": premise,
             "electronic_device_id": "PIS",
         }
+
+    def test_pos_draft_is_persistent_verified_and_abandonable(self):
+        payload = {
+            "schema_version": 1,
+            "lines": [{"name": "Zelo dolg testni naziv artikla", "quantity": "1.00"}],
+            "customer": {"name": "Testna stranka"},
+        }
+        save_pos_draft(
+            self.office, issue_token="draft-one", operator_code="DR",
+            premise_id="MFD", device_id="PIS", payload=payload,
+        )
+        loaded = load_active_pos_draft(
+            self.office, operator_code="DR", device_id="PIS"
+        )
+        self.assertEqual(loaded["issue_token"], "draft-one")
+        self.assertEqual(loaded["payload"], payload)
+
+        changed = dict(payload)
+        changed["customer"] = {"name": "Popravljena stranka"}
+        save_pos_draft(
+            self.office, issue_token="draft-one", operator_code="DR",
+            premise_id="MFD", device_id="PIS", payload=changed,
+        )
+        loaded = load_active_pos_draft(
+            self.office, operator_code="DR", device_id="PIS"
+        )
+        self.assertEqual(loaded["payload"]["customer"]["name"], "Popravljena stranka")
+        abandon_pos_draft(self.office, "draft-one")
+        self.assertIsNone(
+            load_active_pos_draft(self.office, operator_code="DR", device_id="PIS")
+        )
+        with self.assertRaisesRegex(PosError, "ni mogoče prepisati"):
+            save_pos_draft(
+                self.office, issue_token="draft-one", operator_code="DR",
+                premise_id="MFD", device_id="PIS", payload=payload,
+            )
+
+    def test_issuing_invoice_atomically_closes_matching_draft(self):
+        save_pos_draft(
+            self.office, issue_token="draft-to-issue", operator_code="DR",
+            premise_id="MFD", device_id="PIS", payload={"lines": ["test"]},
+        )
+        document_id, _number, _total = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="draft-to-issue",
+            **self.fiscal(),
+        )
+        c = sqlite3.connect(self.office)
+        row = c.execute(
+            "SELECT status,final_document_id FROM pos_drafts_v31 WHERE issue_token=?",
+            ("draft-to-issue",),
+        ).fetchone()
+        c.close()
+        self.assertEqual(row, ("ISSUED", document_id))
+        self.assertIsNone(
+            load_active_pos_draft(self.office, operator_code="DR", device_id="PIS")
+        )
+
+    def test_damaged_pos_draft_is_never_restored(self):
+        save_pos_draft(
+            self.office, issue_token="damaged-draft", operator_code="DR",
+            premise_id="MFD", device_id="PIS", payload={"customer": {"name": "A"}},
+        )
+        c = sqlite3.connect(self.office)
+        c.execute(
+            "UPDATE pos_drafts_v31 SET payload_json=? WHERE issue_token=?",
+            ('{"customer":{"name":"B"}}', "damaged-draft"),
+        )
+        c.commit(); c.close()
+        with self.assertRaisesRegex(PosError, "poškodovan"):
+            load_active_pos_draft(self.office, operator_code="DR", device_id="PIS")
 
     def test_article_discount_is_silently_clamped_to_cost_plus_five_percent(self):
         result = calculate_line(self.line(requested_discount_pct=Decimal("100")), 22)
@@ -323,6 +396,82 @@ class V30PosTests(unittest.TestCase):
             ).fetchone()[0]
         )
         c.close()
+
+    def test_split_payment_storno_reverses_every_payment_line(self):
+        invoice_id, _invoice_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 40, "BANK_TRANSFER": 60},
+            customer={"name": "Kupec"}, operator_code="DR", labor_floor=22,
+            issue_token="split-for-storno", bank_transfer_received=True,
+            **self.fiscal(),
+        )
+        mark_printed(self.office, invoice_id, "DR")
+        storno_id, _storno_no = storno_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            document_id=invoice_id, reason="Napačen račun", operator_code="DR",
+        )
+        c = sqlite3.connect(self.office)
+        original = c.execute(
+            "SELECT method,status,amount FROM pos_payments_v30 "
+            "WHERE document_id=? ORDER BY method", (invoice_id,),
+        ).fetchall()
+        reversed_lines = c.execute(
+            "SELECT method,status,amount,reversal_of_id FROM pos_payments_v30 "
+            "WHERE document_id=? ORDER BY method", (storno_id,),
+        ).fetchall()
+        c.close()
+        self.assertEqual(
+            original,
+            [("BANK_TRANSFER", "REVERSED", 60.0), ("CASH", "REVERSED", 40.0)],
+        )
+        self.assertEqual(
+            [(row[0], row[1], row[2]) for row in reversed_lines],
+            [("BANK_TRANSFER", "REVERSED", -60.0), ("CASH", "REVERSED", -40.0)],
+        )
+        self.assertTrue(all(row[3] for row in reversed_lines))
+
+    def test_replacement_invoice_forms_one_traceable_chain(self):
+        original_id, original_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="original-for-replacement",
+            **self.fiscal(),
+        )
+        mark_printed(self.office, original_id, "DR")
+        _storno_id, storno_no = storno_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            document_id=original_id, reason="Napačen naziv", operator_code="DR",
+        )
+        eligible = eligible_storned_invoices(self.office)
+        self.assertEqual([row["id"] for row in eligible], [original_id])
+
+        replacement_id, _replacement_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="replacement",
+            replacement_of_invoice_id=original_id, **self.fiscal(),
+        )
+        doc, _lines, _payments = invoice_snapshot(self.office, replacement_id)
+        self.assertEqual(doc["replacement_of_invoice_id"], original_id)
+        self.assertEqual(doc["replacement_original_no"], original_no)
+        self.assertEqual(doc["replacement_storno_no"], storno_no)
+        self.assertEqual(eligible_storned_invoices(self.office), [])
+
+    def test_replacement_requires_storned_invoice(self):
+        original_id, _original_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="not-yet-storned",
+            **self.fiscal(),
+        )
+        mark_printed(self.office, original_id, "DR")
+        with self.assertRaisesRegex(PosError, "v celoti storniran"):
+            issue_invoice(
+                office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+                lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+                operator_code="DR", labor_floor=22, issue_token="invalid-replacement",
+                replacement_of_invoice_id=original_id, **self.fiscal(),
+            )
 
     def test_fiscal_numbering_is_separate_per_premise_and_snapshotted(self):
         first_id, first_no, _ = issue_invoice(

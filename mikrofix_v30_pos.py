@@ -166,6 +166,7 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             "storno_at": "TEXT",
             "storno_by": "TEXT",
             "linked_invoice_id": "INTEGER",
+            "replacement_of_invoice_id": "INTEGER",
             "payment_reference": "TEXT",
             "cash_session_id": "INTEGER",
         }
@@ -248,6 +249,23 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_used_agreement_token_v30
                 ON used_goods_agreements_v30(issue_token,id);
+            CREATE TABLE IF NOT EXISTS pos_drafts_v31(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                issue_token TEXT NOT NULL UNIQUE,
+                operator_code TEXT NOT NULL,
+                premise_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                payload_json TEXT NOT NULL,
+                payload_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                final_document_id INTEGER,
+                abandoned_at TEXT,
+                FOREIGN KEY(final_document_id) REFERENCES documents(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pos_drafts_recovery_v31
+                ON pos_drafts_v31(status,operator_code,updated_at);
             """
         )
         ensure_cash_schema_connection(c)
@@ -258,6 +276,122 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             c.execute("ALTER TABLE pos_payments_v30 ADD COLUMN reversed_at TEXT")
         if "reversal_of_id" not in payment_cols:
             c.execute("ALTER TABLE pos_payments_v30 ADD COLUMN reversal_of_id INTEGER")
+        c.commit()
+    finally:
+        c.close()
+
+
+def _draft_payload(payload: dict) -> tuple[str, str]:
+    try:
+        raw = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    except (TypeError, ValueError) as exc:
+        raise PosError("Osnutka računa ni mogoče zapisati.") from exc
+    return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def save_pos_draft(
+    office_db: Path | str,
+    *,
+    issue_token: str,
+    operator_code: str,
+    premise_id: str,
+    device_id: str,
+    payload: dict,
+) -> None:
+    """Atomsko shrani trenutni POS osnutek brez izdaje ali vpliva na zalogo."""
+    ensure_pos_schema(office_db)
+    token = str(issue_token or "").strip()
+    if not token:
+        raise PosError("Osnutek računa nima enolične oznake.")
+    payload_json, digest = _draft_payload(payload)
+    now = datetime.now().isoformat(timespec="seconds")
+    c = sqlite3.connect(str(office_db))
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            "SELECT status FROM pos_drafts_v31 WHERE issue_token=?", (token,)
+        ).fetchone()
+        if row and str(row[0]) != "ACTIVE":
+            raise PosError("Zaključenega ali opuščenega osnutka ni mogoče prepisati.")
+        c.execute(
+            """
+            INSERT INTO pos_drafts_v31(
+                issue_token,operator_code,premise_id,device_id,status,
+                payload_json,payload_sha256,created_at,updated_at
+            ) VALUES(?,?,?,?,'ACTIVE',?,?,?,?)
+            ON CONFLICT(issue_token) DO UPDATE SET
+                operator_code=excluded.operator_code,
+                premise_id=excluded.premise_id,
+                device_id=excluded.device_id,
+                payload_json=excluded.payload_json,
+                payload_sha256=excluded.payload_sha256,
+                updated_at=excluded.updated_at
+            WHERE pos_drafts_v31.status='ACTIVE'
+            """,
+            (
+                token, str(operator_code or "-").strip() or "-",
+                str(premise_id or "").strip(), str(device_id or "").strip(),
+                payload_json, digest, now, now,
+            ),
+        )
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def load_active_pos_draft(
+    office_db: Path | str,
+    *,
+    operator_code: str,
+    device_id: str,
+) -> dict | None:
+    """Naloži zadnji neizdani osnutek in preveri njegov kontrolni povzetek."""
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        row = c.execute(
+            """
+            SELECT * FROM pos_drafts_v31
+            WHERE status='ACTIVE' AND operator_code=? AND device_id=?
+            ORDER BY updated_at DESC,id DESC LIMIT 1
+            """,
+            (str(operator_code or "-").strip() or "-", str(device_id or "").strip()),
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        raw = str(result["payload_json"])
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        if digest != str(result["payload_sha256"]):
+            raise PosError(
+                "Shranjeni osnutek računa je poškodovan. Program ga ne bo samodejno uporabil."
+            )
+        try:
+            result["payload"] = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise PosError("Shranjeni osnutek računa ni veljaven JSON.") from exc
+        return result
+    finally:
+        c.close()
+
+
+def abandon_pos_draft(office_db: Path | str, issue_token: str) -> None:
+    """Označi osnutek kot opuščen; zapis ostane v revizijski sledi."""
+    ensure_pos_schema(office_db)
+    now = datetime.now().isoformat(timespec="seconds")
+    c = sqlite3.connect(str(office_db))
+    try:
+        c.execute(
+            "UPDATE pos_drafts_v31 SET status='ABANDONED',abandoned_at=?,updated_at=? "
+            "WHERE issue_token=? AND status='ACTIVE'",
+            (now, now, str(issue_token)),
+        )
         c.commit()
     finally:
         c.close()
@@ -730,6 +864,7 @@ def issue_invoice(
     bank_transfer_received: bool = False,
     payment_reference: str = "",
     used_goods_agreement_id: int | None = None,
+    replacement_of_invoice_id: int | None = None,
 ) -> tuple[int, str, Decimal]:
     ensure_pos_schema(office_db)
     token = issue_token or str(uuid.uuid4())
@@ -796,6 +931,39 @@ def issue_invoice(
         if existing:
             c.rollback()
             return int(existing[0]), str(existing[1]), dec(existing[2])
+
+        replacement_source = None
+        if replacement_of_invoice_id is not None:
+            replacement_source = c.execute(
+                "SELECT id,doc_type,status,COALESCE(fiscal_invoice_no,doc_no) "
+                "FROM documents WHERE id=?",
+                (int(replacement_of_invoice_id),),
+            ).fetchone()
+            if (
+                not replacement_source
+                or str(replacement_source[1]) != "IZDANI RAČUN"
+                or str(replacement_source[2]) != "STORNIRANO"
+            ):
+                raise PosError(
+                    "Novi račun je mogoče vezati samo na v celoti storniran izdani račun."
+                )
+            storno_document = c.execute(
+                "SELECT id FROM documents WHERE doc_type='STORNO RAČUNA' "
+                "AND linked_invoice_id=? AND status='KNJIŽENO' ORDER BY id DESC LIMIT 1",
+                (int(replacement_of_invoice_id),),
+            ).fetchone()
+            if not storno_document:
+                raise PosError("Stornirani račun nima povezanega knjiženega storno dokumenta.")
+            existing_replacement = c.execute(
+                "SELECT COALESCE(fiscal_invoice_no,doc_no) FROM documents "
+                "WHERE doc_type='IZDANI RAČUN' AND replacement_of_invoice_id=? "
+                "ORDER BY id LIMIT 1",
+                (int(replacement_of_invoice_id),),
+            ).fetchone()
+            if existing_replacement:
+                raise PosError(
+                    f"Stornirani račun že ima nadomestni račun {existing_replacement[0]}."
+                )
         pending_print = c.execute(
             """
             SELECT COALESCE(fiscal_invoice_no, doc_no) FROM documents
@@ -884,7 +1052,8 @@ def issue_invoice(
                 operator_tax_number_snapshot, fiscal_issued_at
                 ,payment_reference
                 ,cash_session_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ,replacement_of_invoice_id
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 invoice_no, "IZDANI RAČUN", customer_name, customer_address,
@@ -898,6 +1067,7 @@ def issue_invoice(
                 operator, operator_tax, now,
                 str(payment_reference or "").strip(),
                 cash_session_id,
+                int(replacement_of_invoice_id) if replacement_of_invoice_id is not None else None,
             ),
         )
         document_id = int(cur.lastrowid)
@@ -1036,6 +1206,19 @@ def issue_invoice(
                 operator, now,
             ),
         )
+        if replacement_source:
+            c.execute(
+                "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    document_id,
+                    "REPLACEMENT_INVOICE_LINKED",
+                    f"replacement_of={int(replacement_of_invoice_id)}; "
+                    f"original_no={replacement_source[3]}",
+                    operator,
+                    now,
+                ),
+            )
         if linked_service_id and service_attached:
             _complete_linked_service(
                 c,
@@ -1044,6 +1227,11 @@ def issue_invoice(
                 invoice_no=fiscal_invoice_no,
                 document_id=document_id,
             )
+        c.execute(
+            "UPDATE pos_drafts_v31 SET status='ISSUED',final_document_id=?,updated_at=? "
+            "WHERE issue_token=? AND status='ACTIVE'",
+            (document_id, now, token),
+        )
         c.commit()
         return document_id, fiscal_invoice_no, total
     except Exception:
@@ -1146,9 +1334,22 @@ def invoice_snapshot(office_db: Path | str, document_id: int) -> tuple[dict, lis
         doc = c.execute("SELECT * FROM documents WHERE id=?", (int(document_id),)).fetchone()
         if not doc:
             raise PosError("Račun ni najden.")
+        result = dict(doc)
+        if result.get("replacement_of_invoice_id"):
+            source = c.execute(
+                "SELECT COALESCE(fiscal_invoice_no,doc_no) FROM documents WHERE id=?",
+                (int(result["replacement_of_invoice_id"]),),
+            ).fetchone()
+            storno = c.execute(
+                "SELECT doc_no FROM documents WHERE doc_type='STORNO RAČUNA' "
+                "AND linked_invoice_id=? ORDER BY id DESC LIMIT 1",
+                (int(result["replacement_of_invoice_id"]),),
+            ).fetchone()
+            result["replacement_original_no"] = str(source[0]) if source else ""
+            result["replacement_storno_no"] = str(storno[0]) if storno else ""
         lines = c.execute("SELECT * FROM document_items WHERE document_id=? ORDER BY id", (int(document_id),)).fetchall()
         payments = c.execute("SELECT * FROM pos_payments_v30 WHERE document_id=? ORDER BY id", (int(document_id),)).fetchall()
-        return dict(doc), [dict(r) for r in lines], [dict(r) for r in payments]
+        return result, [dict(r) for r in lines], [dict(r) for r in payments]
     finally:
         c.close()
 
@@ -1170,6 +1371,48 @@ def latest_pending_print(office_db: Path | str) -> dict | None:
             """
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        c.close()
+
+
+def eligible_storned_invoices(office_db: Path | str) -> list[dict]:
+    """Vrne stornirane račune, ki še nimajo svojega nadomestnega računa."""
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        rows = c.execute(
+            """
+            SELECT d.id,
+                   COALESCE(d.fiscal_invoice_no,d.doc_no) AS invoice_no,
+                   d.date,
+                   COALESCE(d.partner_name_snapshot,'Končni kupec') AS customer,
+                   COALESCE(d.invoice_total,0) AS invoice_total,
+                   (
+                       SELECT s.doc_no FROM documents s
+                       WHERE s.doc_type='STORNO RAČUNA'
+                         AND s.linked_invoice_id=d.id
+                         AND s.status='KNJIŽENO'
+                       ORDER BY s.id DESC LIMIT 1
+                   ) AS storno_no
+            FROM documents d
+            WHERE d.doc_type='IZDANI RAČUN'
+              AND d.status='STORNIRANO'
+              AND EXISTS(
+                  SELECT 1 FROM documents s
+                  WHERE s.doc_type='STORNO RAČUNA'
+                    AND s.linked_invoice_id=d.id
+                    AND s.status='KNJIŽENO'
+              )
+              AND NOT EXISTS(
+                  SELECT 1 FROM documents r
+                  WHERE r.doc_type='IZDANI RAČUN'
+                    AND r.replacement_of_invoice_id=d.id
+              )
+            ORDER BY d.id DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
     finally:
         c.close()
 
@@ -1344,14 +1587,6 @@ def storno_invoice(
                 "UPDATE pos_payments_v30 SET status='REVERSED',reversed_at=? WHERE id=?",
                 (now,int(payment["id"])),
             )
-        if storno_cash_session_id and original_cash > 0:
-            record_cash_entry(
-                c,session_id=storno_cash_session_id,entry_type="CASH_REFUND",
-                amount=-original_cash,reference_type="POS_STORNO",
-                reference_id=storno_id,reference_no=storno_no,
-                description=f"Vračilo gotovine – storno računa {doc['fiscal_invoice_no'] or doc['doc_no']}",
-                operator_code=operator_code,
-            )
             c.execute(
                 "INSERT INTO pos_payments_v30(document_id,method,amount,status,created_at,reversed_at,reversal_of_id) "
                 "VALUES(?,?,?,'REVERSED',?,?,?)",
@@ -1359,6 +1594,14 @@ def storno_invoice(
                     storno_id,payment["method"],-float(dec(payment["amount"])),
                     now,now,int(payment["id"]),
                 ),
+            )
+        if storno_cash_session_id and original_cash > 0:
+            record_cash_entry(
+                c,session_id=storno_cash_session_id,entry_type="CASH_REFUND",
+                amount=-original_cash,reference_type="POS_STORNO",
+                reference_id=storno_id,reference_no=storno_no,
+                description=f"Vračilo gotovine – storno računa {doc['fiscal_invoice_no'] or doc['doc_no']}",
+                operator_code=operator_code,
             )
 
         c.execute(
@@ -1500,6 +1743,16 @@ def generate_pos_pdfs(
         ),
         Spacer(1, 5 * mm),
     ]
+    if doc.get("replacement_of_invoice_id"):
+        story.extend([
+            Paragraph(
+                "Nadomestni račun za stornirani račun "
+                f"<b>{escape(str(doc.get('replacement_original_no') or '-'))}</b> "
+                f"(storno {escape(str(doc.get('replacement_storno_no') or '-'))}).",
+                body,
+            ),
+            Spacer(1, 3 * mm),
+        ])
     rows = [["Postavka", "Kol.", "Cena", "Rabat", "Znesek"]]
     for line in lines:
         rows.append([
@@ -1554,6 +1807,16 @@ def generate_pos_pdfs(
         ),
         Spacer(1, 2*mm),
     ]
+    if doc.get("replacement_of_invoice_id"):
+        rstory.extend([
+            Paragraph(
+                "Nadomestni za: "
+                f"{escape(str(doc.get('replacement_original_no') or '-'))}<br/>"
+                f"Storno: {escape(str(doc.get('replacement_storno_no') or '-'))}",
+                ParagraphStyle("RReplacement", parent=small, alignment=1),
+            ),
+            Spacer(1, 2*mm),
+        ])
     rrows = [["Postavka", "Kol.", "Rabat", "Znesek"]]
     for line in lines:
         rrows.append([
@@ -1615,6 +1878,7 @@ def generate_pos_preview_pdfs(
     *, lines: Iterable[PosLine], payments: dict[str, object], customer: dict[str, str],
     labor_floor: object, output_dir: Path | str, company: dict,
     premise: str, device: str, token: str, paper_width_mm: int = 80,
+    replacement_of_invoice_no: str = "",
 ) -> tuple[Path, Path]:
     """Izdela jasno označen predogled brez številke, knjiženja ali zalogovnega učinka."""
     from reportlab.lib import colors
@@ -1676,6 +1940,15 @@ def generate_pos_preview_pdfs(
         ),
         Spacer(1, 4 * mm),
     ]
+    if str(replacement_of_invoice_no or "").strip():
+        story.extend([
+            Paragraph(
+                "Po izdaji bo to nadomestni račun za stornirani račun "
+                f"<b>{escape(str(replacement_of_invoice_no).strip())}</b>.",
+                body,
+            ),
+            Spacer(1, 3 * mm),
+        ])
     table = Table(
         rows, colWidths=[24*mm, 66*mm, 15*mm, 22*mm, 22*mm, 25*mm], repeatRows=1
     )
@@ -1711,6 +1984,14 @@ def generate_pos_preview_pdfs(
         ),
         Spacer(1, 2*mm),
     ]
+    if str(replacement_of_invoice_no or "").strip():
+        receipt_story.extend([
+            Paragraph(
+                "Nadomestni za: " + escape(str(replacement_of_invoice_no).strip()),
+                ParagraphStyle("PreviewReplacement", parent=small, alignment=1),
+            ),
+            Spacer(1, 2*mm),
+        ])
     receipt_rows = [["Postavka", "Kol.", "Rabat", "Znesek"]]
     for item in calculated:
         receipt_rows.append([
