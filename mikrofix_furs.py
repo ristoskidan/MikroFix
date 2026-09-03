@@ -591,7 +591,6 @@ class FursTestClient:
     def _request(self, url: str, body: dict[str, Any], bundle: CertificateBundle) -> dict[str, Any]:
         _assert_test_url(url)
         try:
-            import requests
             from cryptography.hazmat.primitives.serialization import (
                 Encoding,
                 NoEncryption,
@@ -602,6 +601,18 @@ class FursTestClient:
                 "HTTP_DEPENDENCY_MISSING",
                 "Manjka varnostna spletna knjižnica. Znova zaženi namesti_v28.bat.",
             ) from exc
+
+        if self.session_factory is None:
+            try:
+                import requests
+            except ImportError as exc:
+                raise FursTestError(
+                    "HTTP_DEPENDENCY_MISSING",
+                    "Manjka varnostna spletna knjižnica. Znova zaženi namesti_v30.bat.",
+                ) from exc
+            factory = requests.Session
+        else:
+            factory = self.session_factory
 
         verify: bool | str = True
         if self.ca_bundle_path:
@@ -626,7 +637,6 @@ class FursTestClient:
                 self.protect_file(cert_path)
                 self.protect_file(key_path)
 
-            factory = self.session_factory or requests.Session
             session = factory()
             if hasattr(session, "trust_env"):
                 session.trust_env = False

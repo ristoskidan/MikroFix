@@ -6,7 +6,9 @@ from mikrofix_auth import (
     ALL_PERMISSIONS,
     AuthStore,
     PERMISSION_CASHIER,
+    PERMISSION_OFFICE,
     PERMISSION_SERVICE,
+    required_office_entry_permission,
     validate_pin_format,
 )
 
@@ -24,6 +26,16 @@ class V30AuthTests(unittest.TestCase):
         self.assertTrue(validate_pin_format("482951"))
         self.assertTrue(validate_pin_format("48295173016428"))
         self.assertFalse(validate_pin_format("482951730164287"))
+
+    def test_direct_office_entry_requires_the_selected_module_permission(self):
+        self.assertEqual(
+            required_office_entry_permission(pos_requested=False),
+            PERMISSION_OFFICE,
+        )
+        self.assertEqual(
+            required_office_entry_permission(pos_requested=True),
+            PERMISSION_CASHIER,
+        )
 
     def test_new_user_pin_is_temporary_and_permissions_are_enforced(self):
         with tempfile.TemporaryDirectory() as folder:

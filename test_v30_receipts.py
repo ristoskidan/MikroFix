@@ -264,6 +264,19 @@ class V30ReceiptTests(unittest.TestCase):
                 external_document_no="D-101", invoice_external_no="R-101",
             )
 
+    def test_attachment_archive_uses_content_extension_not_source_extension(self):
+        receipt_id, _ = create_draft(self.office)
+        disguised = self.root / "dobaviteljev-racun.exe"
+        disguised.write_bytes(b"%PDF-1.4\n% MikroFIX test\n")
+        self.confirm(receipt_id, attachment_paths=[disguised])
+        connection = sqlite3.connect(self.office)
+        archived_path = connection.execute(
+            "SELECT archived_path FROM receipt_attachments_v30 WHERE receipt_id=?",
+            (receipt_id,),
+        ).fetchone()[0]
+        connection.close()
+        self.assertEqual(Path(archived_path).suffix, ".pdf")
+
     def test_full_storno_reverses_released_stock_and_keeps_document(self):
         receipt_id, _ = create_draft(self.office)
         self.confirm(receipt_id)

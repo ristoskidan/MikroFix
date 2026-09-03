@@ -263,7 +263,7 @@ def _archive_attachments(
             source = Path(raw_path).resolve()
             mime = _mime_from_content(source)
             digest = hashlib.sha256(source.read_bytes()).hexdigest()
-            suffix = source.suffix.lower() or {
+            suffix = {
                 "application/pdf": ".pdf", "image/jpeg": ".jpg",
                 "image/png": ".png", "image/heic": ".heic",
             }[mime]

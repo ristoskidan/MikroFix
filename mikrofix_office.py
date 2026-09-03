@@ -22,6 +22,7 @@ from mikrofix_auth import (
     PERMISSION_MANAGE_INVENTORY,
     PERMISSION_MANAGE_PRICES,
     PERMISSION_MANAGE_USERS,
+    required_office_entry_permission,
 )
 from mikrofix_user_ui import SessionAuthUI
 from mikrofix_runtime import APP_VERSION, load_runtime
@@ -5540,53 +5541,63 @@ elif handoff_provided and not handoff_accepted:
     )
     root.destroy()
 elif handoff_accepted or run_pin_login(root):
-    apply_office_permissions()
     service_invoice_request = requested_service_id()
     pos_requested = bool(requested_new_invoice() or service_invoice_request)
-    if not pos_requested:
-        root.deiconify()
-        try:
-            root.state("zoomed")
-        except Exception:
-            pass
-    if pos_requested:
-        root.after(
-            0,
-            lambda sid=service_invoice_request: open_pos(
-                root,
-                runtime=RUNTIME,
-                office_db=OFFICE_DB,
-                inventory_db=INVENTORY_DB,
-                service_db=SERVICE_DB,
-                pdf_dir=PDF_DIR,
-                operator_code=RUNTIME.operator_code,
-                service_id=sid,
-                service_loader=load_service_invoice_seed,
-                service_finalizer=globals().get("MIKROFIX_FINALIZE_SERVICE_PDF"),
-            ),
+    required_permission = required_office_entry_permission(pos_requested=pos_requested)
+    if not AUTH_SESSION.has_permission(required_permission):
+        denied_module = "CASHIER" if pos_requested else "OFFICE"
+        audit_event("PERMISSION_DENIED", "module", denied_module)
+        messagebox.showwarning(
+            "MikroFIX - dostop zavrnjen",
+            "Prijavljeni uporabnik nima dovoljenja za izbrani modul.",
+            parent=root,
         )
+        root.destroy()
     else:
-        tab_request = requested_open_tab()
-        tab_map = {
-            "receipts": tab_documents,
-            "stock": tab_stock_control,
-            "used": tab_used_devices,
-            "pricing": tab_price_profiles,
-            "documents": tab_documents,
-            "partners": tab_partners,
-            "articles": tab_articles,
-            "reports": tab_reports,
-        }
-        if tab_request in tab_map:
-            root.after(200, lambda tab=tab_map[tab_request]: nb.select(tab))
-            if tab_request == "receipts":
-                root.after(250, lambda: documents_workspace.select(tab_document_receipts))
-    if WEEKLY_SETTINGS.get("enabled", False):
-        root.after(1200, run_monday_weekly_report_if_due)
-    if EMBEDDED_IN_MAIN:
-        MIKROFIX_PARENT.wait_window(root)
-    else:
-        root.mainloop()
+        apply_office_permissions()
+        if pos_requested:
+            root.after(
+                0,
+                lambda sid=service_invoice_request: open_pos(
+                    root,
+                    runtime=RUNTIME,
+                    office_db=OFFICE_DB,
+                    inventory_db=INVENTORY_DB,
+                    service_db=SERVICE_DB,
+                    pdf_dir=PDF_DIR,
+                    operator_code=RUNTIME.operator_code,
+                    service_id=sid,
+                    service_loader=load_service_invoice_seed,
+                    service_finalizer=globals().get("MIKROFIX_FINALIZE_SERVICE_PDF"),
+                ),
+            )
+        else:
+            root.deiconify()
+            try:
+                root.state("zoomed")
+            except Exception:
+                pass
+            tab_request = requested_open_tab()
+            tab_map = {
+                "receipts": tab_documents,
+                "stock": tab_stock_control,
+                "used": tab_used_devices,
+                "pricing": tab_price_profiles,
+                "documents": tab_documents,
+                "partners": tab_partners,
+                "articles": tab_articles,
+                "reports": tab_reports,
+            }
+            if tab_request in tab_map:
+                root.after(200, lambda tab=tab_map[tab_request]: nb.select(tab))
+                if tab_request == "receipts":
+                    root.after(250, lambda: documents_workspace.select(tab_document_receipts))
+        if WEEKLY_SETTINGS.get("enabled", False):
+            root.after(1200, run_monday_weekly_report_if_due)
+        if EMBEDDED_IN_MAIN:
+            MIKROFIX_PARENT.wait_window(root)
+        else:
+            root.mainloop()
 else:
     root.destroy()
 

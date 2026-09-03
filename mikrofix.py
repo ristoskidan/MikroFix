@@ -93,6 +93,12 @@ from mikrofix_backup_runtime import (
     save_backup_passphrase,
     update_backup_settings,
 )
+from mikrofix_attachments import (
+    ServiceImageError,
+    archive_service_image,
+    load_service_image,
+    resolve_service_image_path,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 RUNTIME = load_runtime(APP_DIR)
@@ -2094,7 +2100,6 @@ def add_photos():
         title="Dodaj fotografije naprave",
         filetypes=[
             ("Slike", "*.jpg *.jpeg *.png *.webp *.bmp"),
-            ("Vse datoteke", "*.*")
         ]
     )
     if not paths:
@@ -2124,27 +2129,28 @@ def remove_selected_photo():
 
 def copy_photos_for_service(service_id, service_no, c):
     if not pending_photos:
-        return
+        return []
     target_dir = PHOTOS_DIR / service_no
     target_dir.mkdir(parents=True, exist_ok=True)
-
-    for idx, item in enumerate(pending_photos, 1):
-        src = Path(item["path"])
-        if not src.exists():
-            continue
-        ext = src.suffix.lower() or ".jpg"
-        safe_name = f"{idx:02d}_{item['stage']}{ext}"
-        dest = target_dir / safe_name
-        counter = 1
-        while dest.exists():
-            dest = target_dir / f"{idx:02d}_{item['stage']}_{counter}{ext}"
-            counter += 1
-        shutil.copy2(src, dest)
-        rel = dest.relative_to(APP_DIR)
-        c.execute(
-            "INSERT INTO service_photos(service_id, stage, rel_path) VALUES(?,?,?)",
-            (service_id, item["stage"], str(rel))
-        )
+    created = []
+    try:
+        for idx, item in enumerate(pending_photos, 1):
+            dest = archive_service_image(
+                Path(item["path"]),
+                target_dir,
+                f"{idx:02d}_{item['stage']}",
+            )
+            created.append(dest)
+            rel = dest.relative_to(RUNTIME.data_dir)
+            c.execute(
+                "INSERT INTO service_photos(service_id, stage, rel_path) VALUES(?,?,?)",
+                (service_id, item["stage"], str(rel)),
+            )
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    return created
 
 
 service_save_in_progress = False
@@ -2211,6 +2217,7 @@ def save():
     backup_db("before_save")
 
     c = connect()
+    created_photo_paths = []
     try:
         c.execute("ATTACH DATABASE ? AS inventorydb", (str(INVENTORY_DB),))
         ensure_lot_schema(c, "inventorydb")
@@ -2373,7 +2380,7 @@ def save():
                     VALUES(?,?,?,?)
                 """, (service_id, stage, test_name, test_status))
 
-        copy_photos_for_service(service_id, no, c)
+        created_photo_paths = copy_photos_for_service(service_id, no, c)
         link_service_result(
             c, int(active_service_order_id), int(service_id), commit=False
         )
@@ -2381,6 +2388,8 @@ def save():
     except Exception as exc:
         c.rollback()
         c.close()
+        for photo_path in created_photo_paths:
+            photo_path.unlink(missing_ok=True)
         service_save_in_progress = False
         if "service_save_button" in globals():
             service_save_button.configure(state="normal", text="PRIPRAVI SERVIS ZA RAČUN")
@@ -3931,14 +3940,27 @@ def add_claim(service_id, parent=None):
 
 
 def open_photo(rel_path):
-    p = APP_DIR / rel_path
-    if not p.exists():
-        messagebox.showwarning("MikroFix", f"Fotografija ne obstaja:\n{p}")
-        return
     try:
-        os.startfile(str(p))
-    except AttributeError:
-        subprocess.Popen(["xdg-open", str(p)])
+        p = resolve_service_image_path(
+            rel_path,
+            data_dir=RUNTIME.data_dir,
+            app_dir=APP_DIR,
+        )
+        image = load_service_image(p)
+        image.thumbnail((1100, 760))
+        from PIL import ImageTk
+
+        win = tk.Toplevel(root)
+        win.title(f"Servisna fotografija - {p.name}")
+        win.configure(bg=BG)
+        preview = ImageTk.PhotoImage(image)
+        image.close()
+        label = tk.Label(win, image=preview, bg=BG)
+        label.image = preview
+        label.pack(fill="both", expand=True, padx=12, pady=12)
+        ttk.Button(win, text="ZAPRI", command=win.destroy).pack(pady=(0, 12))
+    except ServiceImageError as exc:
+        messagebox.showwarning("MikroFix", str(exc))
 
 
 def register_pdf_font():

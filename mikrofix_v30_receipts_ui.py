@@ -819,7 +819,7 @@ class ReceiptDialogV30:
     def add_attachments(self):
         paths = filedialog.askopenfilenames(
             parent=self.window, title="Priloge dokumenta",
-            filetypes=[("Dokumenti", "*.pdf *.jpg *.jpeg *.png *.heic"), ("Vse", "*.*")],
+            filetypes=[("Dokumenti", "*.pdf *.jpg *.jpeg *.png *.heic")],
         )
         for path in paths:
             if path not in self.attachments:
