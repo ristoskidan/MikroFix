@@ -1,0 +1,9 @@
+# MikroFIX v29 TEST - Windows x64, Python 3.13.
+reportlab>=4.4.9,<6
+Pillow>=12.3,<13
+cryptography>=46,<51
+requests>=2.32,<3
+pywin32>=312,<400
+# pymobiledevice3 na Pythonu 3.13 potrebuje lzfse; zato so potrebna MSVC C++ Build Tools.
+lzfse==0.4.2
+pymobiledevice3>=10.8.1,<11

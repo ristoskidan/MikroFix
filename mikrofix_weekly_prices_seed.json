@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-27T12:00:00+02:00",
+  "description": "Začetni javni viri za zasebno tedensko odkupno poročilo MikroFIX.",
+  "entries": [
+    {
+      "model": "iPhone 11",
+      "storage": "64 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 229.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 219.41, "url": "https://www.refurbed.si/p/iphone-11/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 8.41, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-11/baterija-za-iphone-11-3110mah-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 12",
+      "storage": "64 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 199.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 213.80, "url": "https://www.refurbed.si/p/iphone-12/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 17.83, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-12/baterija-za-iphone-12-12-pro-2815mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 12 Pro",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 265.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 345.28, "url": "https://www.refurbed.si/p/iphone-12-pro/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 17.83, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-12/baterija-za-iphone-12-12-pro-2815mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 13 mini",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 255.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 345.99, "url": "https://www.refurbed.si/p/iphone-13-mini/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 19.82, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-13-mini/baterija-za-iphone-13-mini-2406mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 13",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 269.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 339.99, "url": "https://www.refurbed.si/p/iphone-13/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 19.82, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-13/baterija-za-iphone-13-3227mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 14",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 329.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 360.00, "url": "https://www.refurbed.si/p/iphone-14/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 18.83, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-14/baterija-za-iphone-14-3279mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 15",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 445.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 485.21, "url": "https://www.refurbed.si/p/iphone-15/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 19.82, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-15/baterija-za-iphone-15-3367mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 16",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 589.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-08-27", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 647.00, "url": "https://www.refurbed.si/p/iphone-16/", "kind": "refurbed_storage", "observed_on": "2026-08-27", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 17.83, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-16/baterija-za-iphone-16-3561mah-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
+      "seal_material_eur": 2.46
+    }
+  ]
+}

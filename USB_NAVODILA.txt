@@ -1,0 +1,26 @@
+MIKROFIX WINDOWS - R9 DEV, 3. 9. 2026
+=====================================
+
+Ta mapa vsebuje razpakirano zadnjo razvojno revizijo programa MikroFIX.
+Poslovne in testne baze namenoma niso vključucene, da se med servisom,
+zalogo, Office in Blagajno ne prenese delno ali neusklajeno stanje.
+
+Prvi zagon na Windows neposredno s kljucka:
+1. Za namestitev potrebnih dodatkov zazeni namesti_v30.bat.
+2. Nato zazeni preveri_v30.bat.
+3. Program odpri z zazeni_mikrofix_z_usb.bat.
+
+Posebni USB-zaganjalnik shrani zive poslovne baze v lokalno mapo
+%USERPROFILE%\Documents\MikroFixData_V30. Tako program lahko ostane na USB,
+Kingston pa ni hkrati edina lokacija zivih baz in njihove varnostne kopije.
+Zunanji cilj za sifrirane dnevne kopije je E:\MikroFix_Backup.
+Na zacetnem zaslonu je treba enkrat nastaviti obnovitveno geslo.
+
+OPOZORILO
+---------
+To je razvojna TEST revizija. Ni dovoljena za produkcijsko izdajo racunov,
+dokler ni koncan rocni sprejemni preizkus in posebej potrjena produkcijska
+FURS povezava.
+
+Mapa MikroFix linux je rezervirana za prihodnjo Linux migracijo in mora do
+takrat ostati prazna.

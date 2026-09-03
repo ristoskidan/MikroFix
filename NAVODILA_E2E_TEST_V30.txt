@@ -1,0 +1,78 @@
+MIKROFIX v30 – IZOLIRANI CELOVITI TEST
+======================================
+
+Zagon:
+1. Zaganjalnik najprej uporabi lokalni .venv, na tem računalniku pa zna uporabiti
+   tudi že nameščeno okolje prejšnje v30 testne izdaje.
+2. Za vse spodnje preizkuse uporabljaj samo zazeni_mikrofix_v30_E2E_TEST.bat.
+3. Ob prvem zagonu si nastavi svoj TEST PIN. PIN ni vnaprej vpisan v bazo.
+
+Varnost:
+- podatki so samo v mapi MikroFixData_V30_E2E_TEST;
+- FURS produkcija je izključena in produkcijsko potrdilo ni nastavljeno;
+- lokalni računi imajo stanje TEST_DISABLED in napis TEST;
+- zavihek FURS TEST je ločen; ne uporablja se med običajnim E2E pregledom;
+- vsi osebni podatki so izmišljeni in označeni [TEST E2E].
+
+Priporočen vrstni red ročnega pregleda
+-------------------------------------
+
+1. OFFICE – PREJEM BLAGA IN PREJETI RAČUNI
+- odpri knjiženi skupni dokument TEST-DOB-RA-001 / TEST-PR-001;
+- preveri dobavitelja, vse postavke, DDV dobavitelja, prevoz, LOT in prilogo;
+- odpri TEST-DOB-002: stanje mora biti PENDING_INVOICE;
+- artikel TEST-E2E-PENDING-CAMERA ne sme biti na voljo v blagajni.
+
+2. ZALOGA
+- poišči [TEST E2E];
+- preveri dobavitelja, barkodo, nabavno vrednost s prevozom, prodajno ceno in LOT;
+- poišči TEST-E2E-LONG-0001; naziv ima 279 znakov;
+- obnovljena naprava je unikaten artikel iz zaključenega odkupa in obnove;
+- donorska naprava je v karanteni in ni umetno razdeljena v množico artiklov.
+
+3. SERVIS
+- odprto je naročilo za namizni računalnik z ročnim prepisom identitete;
+- servis MF-TEST-2026-0001 ima T1 in že porabljen zaslon ter čaka na račun;
+- v SERVISU ga označi in izberi ODPRI BLAGAJNO ZA IZBRANI SERVIS; enak seznam
+  je vedno dosegljiv tudi v BLAGAJNI z gumbom SERVISI ZA RAČUN;
+- ob izdaji računa se vgrajeni zaslon ne sme drugič odšteti iz zaloge;
+- reklamacija REK-TEST-2026-0001 mora biti samo V_OBDELAVI.
+
+4. ODKUP IN OBNOVA
+- en gotovinski odkup je CONTRACT_READY in ima pripravljen blagajniški izdatek;
+- do podpisa in izplačila ne sme ustvariti zaloge;
+- en zaključen odkup je obnovljena naprava za prodajo;
+- en zaključen odkup je donorska naprava v karanteni.
+
+5. BLAGAJNA – SAMOSTOJNA PRODAJA
+- dodaj TEST-E2E-LONG-0001 in izpolni vsa polja kupca;
+- poskusi 100 % rabat: program ga mora tiho omejiti na nabavno vrednost + 5 %;
+- F10 izda TEST račun; ponovno F10 potrdi originalni tisk;
+- Epson TM-T20II se izbere samodejno in PDF se ne sme sam odpreti;
+- preveri A4 in 80-mm PDF, slovenski naziv plačila, rabat, šumnike in prelom
+  279-znakovnega naziva;
+- naslednji izpis istega računa mora biti oštevilčena kopija.
+
+6. BLAGAJNA – SERVIS
+- iz zaključenega servisa prenesi ročne postavke v blagajno;
+- preveri T1, vgrajeni del, kupca, telefon in e-pošto;
+- izdaj račun in potrdi tisk;
+- servis mora postati zaključen šele po izdaji računa.
+
+7. BLAGAJNA – OBNOVLJENA NAPRAVA
+- dodaj obnovljeno napravo;
+- potrdi ločeni 12-mesečni dogovor za rabljeno blago;
+- preizkusi MFT in razdeljeno plačilo;
+- vsota mora biti do centa natančna, TRR del pa potrjeno prejet.
+
+8. NEGATIVNI PREIZKUSI
+- nov račun mora biti blokiran, dokler original prejšnjega ni potrjeno natisnjen;
+- isti servis se ne sme zaračunati dvakrat;
+- artikel brez zaloge se ne sme prodati;
+- delno ali previsoko plačilo ni dovoljeno;
+- noben lokalni E2E račun ne sme samodejno dobiti pravega ali testnega EOR.
+
+Ponovna čista priprava:
+pripravi_v30_e2e_test.py --rebuild
+
+Stara E2E baza se pri tem ne izbriše, ampak se preimenuje v časovno označen arhiv.

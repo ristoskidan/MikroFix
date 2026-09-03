@@ -1,0 +1,41 @@
+MIKROFIX v30.0-dev5 - KRATEK ROCNI TEST BLAGAJNE
+=================================================
+
+To je TEST. Dokumentov ne uporabljaj kot prave racune.
+
+1. Zazeni zazeni_mikrofix_v30.bat in se prijavi.
+2. Odpri PRODAJA / BLAGAJNA.
+3. Pri KRAJ IZDAJE RACUNA izberi MFD.
+   - odpri BLAGAJNISKI DNEVNIK in blagajno z izbranim zacetnim stanjem;
+4. Dodaj testni artikel in po potrebi T1 ali T2.
+5. Preveri gotovino:
+   - skupni znesek mora biti pravilen;
+   - vecji prejeti bankovec sme spremeniti samo vracilo;
+   - prvi F10 izdela predogled, ki ni racun;
+   - drugi F10 izda racun in ga poslje tiskalniku;
+   - uspesen zakljucek mora potrditi Windows tiskalniska vrsta, brez tretjega
+     rocnega potrjevanja.
+6. Odpri zgodovino dokumentov v Office. Racun mora biti prikazan kot MFD-PIS-1.
+7. Odpri novi racun, izberi MFT in preveri opozorilo, da je MFT premicni objekt.
+   Dokument mora dobiti lastno zaporedje MFT-PIS-1.
+8. Preveri razdeljeno placilo:
+   - gotovina + TRR morata biti tocno enaka skupnemu znesku;
+   - brez oznake, da je TRR del dejansko prejet, F10 ne sme nadaljevati;
+   - po potrditvi prejema mora biti racun izdan samo enkrat.
+9. Na A4 in 80-mm PDF-ju preveri:
+   - pravilno stevilko MFD/MFT-PIS;
+   - prostor, napravo PIS in operaterja DR;
+   - pravilne crke c, s in z s stresicami;
+   - oznako TEST in odsotnost izmisljene kode ZOI/EOR.
+10. Previsok rabat mora program tiho omejiti:
+   - artikel na najmanj nabavna cena + 5 %;
+   - T1/T2 na najmanj L0.
+11. Pri obnovljeni napravi pripravi A4 dogovor, ga natisni, oznaci podpis in
+    preveri, da brez tega izdaja ni dovoljena.
+12. F8 mora pripraviti UPN QR z natancnim zneskom. Nato preveri ostevilceno
+    kopijo in celotni storno z vrnitvijo zaloge.
+13. Zapri blagajno z dejansko prestetim stanjem. Preveri skupne prejemke,
+    izdatke, pricakovano stanje, razliko, cas odprtja/zaprtja in A4 PDF dnevnika.
+
+Ce test odkrije napako, zapisi tocni zaslon, izbrani prostor, postavke,
+nacin placila, kateri pritisk F10 je bil uporabljen in prikazano sporocilo.
