@@ -51,6 +51,19 @@ def _require_columns(
         )
 
 
+def _ensure_cash_disbursement_links(connection: sqlite3.Connection) -> None:
+    columns = _columns(connection, "main", "cash_disbursements")
+    for name, definition in {
+        "cash_session_id": "INTEGER",
+        "cash_entry_id": "INTEGER",
+        "booked_at": "TEXT",
+    }.items():
+        if name not in columns:
+            connection.execute(
+                f"ALTER TABLE cash_disbursements ADD COLUMN {name} {definition}"
+            )
+
+
 def _next_prefixed_number(
     connection: sqlite3.Connection,
     *,
@@ -139,6 +152,8 @@ def complete_buyback_atomic(
 
         connection.execute("ATTACH DATABASE ? AS office", (str(office_db),))
         connection.execute("ATTACH DATABASE ? AS inv", (str(inventory_db),))
+        _ensure_cash_disbursement_links(connection)
+        connection.commit()
         _require_columns(
             connection, "main", "buybacks",
             {"id", "buyback_no", "status", "payment_status", "purchase_price",
@@ -225,29 +240,47 @@ def complete_buyback_atomic(
                 {"id", "session_id", "entry_no", "amount", "balance_after",
                  "reference_type", "reference_id", "entry_type"},
             )
-            session = connection.execute(
-                """
-                SELECT id,opening_cash FROM office.cash_sessions_v30
-                WHERE premise_id=? AND device_id=? AND status='OPEN'
-                ORDER BY id DESC LIMIT 1
-                """,
-                (str(premise_id), str(device_id)),
+            voucher = connection.execute(
+                "SELECT voucher_no,buyback_no FROM cash_disbursements WHERE buyback_id=?",
+                (int(buyback_id),),
             ).fetchone()
-            if not session:
-                raise AtomicTransactionError(
-                    "Gotovinskega odkupa ni mogoče zaključiti brez odprte blagajne."
-                )
+            if not voucher:
+                raise AtomicTransactionError("Odkup nima povezanega blagajniškega izdatka.")
             existing_cash = connection.execute(
                 """
-                SELECT id FROM office.cash_journal_entries_v30
+                SELECT id,session_id,amount,reference_no
+                FROM office.cash_journal_entries_v30
                 WHERE reference_type='BUYBACK' AND reference_id=?
                   AND entry_type='CASH_BUYBACK'
                 """,
                 (int(buyback_id),),
             ).fetchone()
             if existing_cash:
+                expected_references = {
+                    str(voucher[0] or "").strip(), str(voucher[1] or "").strip()
+                }
+                if (
+                    _money(existing_cash[2]) != -_money(record["purchase_price"])
+                    or str(existing_cash[3] or "").strip() not in expected_references
+                ):
+                    raise AtomicTransactionError(
+                        "Obstoječi blagajniški izdatek odkupa se ne ujema z listino."
+                    )
                 cash_entry_id = int(existing_cash[0])
+                cash_session_id = int(existing_cash[1])
             else:
+                session = connection.execute(
+                    """
+                    SELECT id,opening_cash FROM office.cash_sessions_v30
+                    WHERE premise_id=? AND device_id=? AND status='OPEN'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (str(premise_id), str(device_id)),
+                ).fetchone()
+                if not session:
+                    raise AtomicTransactionError(
+                        "Gotovinskega odkupa ni mogoče zaključiti brez odprte blagajne."
+                    )
                 totals = connection.execute(
                     """
                     SELECT COALESCE(MAX(entry_no),0),COALESCE(SUM(amount),0)
@@ -261,10 +294,6 @@ def complete_buyback_atomic(
                     raise AtomicTransactionError(
                         "Blagajniški izdatek bi ustvaril negativno stanje gotovine."
                     )
-                voucher = connection.execute(
-                    "SELECT voucher_no FROM cash_disbursements WHERE buyback_id=?",
-                    (int(buyback_id),),
-                ).fetchone()
                 cursor = connection.execute(
                     """
                     INSERT INTO office.cash_journal_entries_v30(
@@ -275,20 +304,27 @@ def complete_buyback_atomic(
                     (
                         int(session[0]), int(totals[0]) + 1, now, float(amount),
                         float(balance), int(buyback_id),
-                        str(voucher[0] if voucher else record["buyback_no"]),
+                        str(voucher[0]),
                         f"Gotovinski odkup {record['buyback_no']}",
                         str(operator_code),
                     ),
                 )
                 cash_entry_id = int(cursor.lastrowid)
+                cash_session_id = int(session[0])
             updated = connection.execute(
                 """
-                UPDATE cash_disbursements SET status='CONFIRMED',confirmed_at=?
-                WHERE buyback_id=? AND status='PREPARED'
+                UPDATE cash_disbursements
+                SET status='BOOKED',confirmed_at=COALESCE(confirmed_at,?),
+                    cash_session_id=?,cash_entry_id=?,booked_at=COALESCE(booked_at,?)
+                WHERE buyback_id=? AND status IN ('PREPARED','CONFIRMED','BOOKED')
+                  AND (cash_entry_id IS NULL OR cash_entry_id=?)
                 """,
-                (now, int(buyback_id)),
+                (
+                    now, cash_session_id, cash_entry_id, now,
+                    int(buyback_id), cash_entry_id,
+                ),
             )
-            if updated.rowcount not in {0, 1}:
+            if updated.rowcount != 1:
                 raise AtomicTransactionError("Neveljaven blagajniški izdatek odkupa.")
 
         existing_device = connection.execute(
@@ -397,3 +433,4 @@ def complete_buyback_atomic(
         raise
     finally:
         connection.close()
+

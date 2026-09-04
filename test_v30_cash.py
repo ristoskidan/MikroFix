@@ -87,7 +87,11 @@ class CashJournalTests(unittest.TestCase):
             self.db,premise_id="MFD",device_id="PIS",operator_code="DR",opening_cash=100
         )
         self.assertEqual(
-            [row["voucher_no"] for row in pending_cash_disbursements(service_db)],
+            [
+                row["voucher_no"] for row in pending_cash_disbursements(
+                    office_db=self.db, service_db=service_db
+                )
+            ],
             ["BI-2026-0001"],
         )
         first = book_cash_disbursement(
@@ -102,7 +106,10 @@ class CashJournalTests(unittest.TestCase):
         self.assertTrue(second["already_booked"])
         self.assertEqual(first["cash_entry_id"], second["cash_entry_id"])
         self.assertEqual(first["cash_session_id"], session_id)
-        self.assertEqual(pending_cash_disbursements(service_db), [])
+        self.assertEqual(
+            pending_cash_disbursements(office_db=self.db, service_db=service_db),
+            [],
+        )
         c = sqlite3.connect(self.db)
         rows = c.execute(
             "SELECT amount,reference_no FROM cash_journal_entries_v30"
@@ -115,6 +122,128 @@ class CashJournalTests(unittest.TestCase):
         ).fetchone()
         c.close()
         self.assertEqual(status, ("BOOKED", session_id, first["cash_entry_id"]))
+
+    def test_legacy_atomic_buyback_entry_is_linked_without_second_debit(self):
+        service_db = Path(self.tmp.name) / "legacy-service.db"
+        c = sqlite3.connect(service_db)
+        c.executescript(
+            """
+            CREATE TABLE cash_disbursements(
+                id INTEGER PRIMARY KEY, voucher_no TEXT, buyback_id INTEGER UNIQUE,
+                buyback_no TEXT, created_at TEXT, confirmed_at TEXT, status TEXT,
+                recipient_name TEXT, recipient_address TEXT, purpose TEXT,
+                amount REAL, operator_code TEXT
+            );
+            INSERT INTO cash_disbursements VALUES(
+                1,'BI-LEGACY',41,'ODK-41','2026-09-01','2026-09-01','CONFIRMED',
+                'Prodajalec','Naslov','Gotovinski odkup',75,'DR'
+            );
+            """
+        )
+        c.commit(); c.close()
+        session_id, _ = open_cash_session(
+            self.db, premise_id="MFD", device_id="PIS",
+            operator_code="DR", opening_cash=100,
+        )
+        c = sqlite3.connect(self.db)
+        c.execute("BEGIN IMMEDIATE")
+        entry_id = record_cash_entry(
+            c, session_id=session_id, entry_type="CASH_BUYBACK", amount=-75,
+            reference_type="BUYBACK", reference_id=41,
+            reference_no="BI-LEGACY", description="Stari atomski odkup",
+            operator_code="DR",
+        )
+        c.commit(); c.close()
+        self.assertEqual(
+            pending_cash_disbursements(office_db=self.db, service_db=service_db),
+            [],
+        )
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM cash_journal_entries_v30").fetchone()[0],
+            1,
+        )
+        c.close()
+        c = sqlite3.connect(service_db)
+        self.assertEqual(
+            c.execute(
+                "SELECT status,cash_session_id,cash_entry_id FROM cash_disbursements WHERE id=1"
+            ).fetchone(),
+            ("BOOKED", session_id, entry_id),
+        )
+        c.close()
+
+    def test_legacy_buyback_with_wrong_amount_is_not_silently_linked(self):
+        service_db = Path(self.tmp.name) / "legacy-mismatch.db"
+        c = sqlite3.connect(service_db)
+        c.executescript(
+            """
+            CREATE TABLE cash_disbursements(
+                id INTEGER PRIMARY KEY, voucher_no TEXT, buyback_id INTEGER UNIQUE,
+                buyback_no TEXT, created_at TEXT, confirmed_at TEXT, status TEXT,
+                recipient_name TEXT, recipient_address TEXT, purpose TEXT,
+                amount REAL, operator_code TEXT
+            );
+            INSERT INTO cash_disbursements VALUES(
+                1,'BI-MISMATCH',51,'ODK-51','2026-09-01','2026-09-01','CONFIRMED',
+                'Prodajalec','Naslov','Gotovinski odkup',75,'DR'
+            );
+            """
+        )
+        c.commit(); c.close()
+        session_id, _ = open_cash_session(
+            self.db, premise_id="MFD", device_id="PIS",
+            operator_code="DR", opening_cash=100,
+        )
+        c = sqlite3.connect(self.db)
+        c.execute("BEGIN IMMEDIATE")
+        record_cash_entry(
+            c, session_id=session_id, entry_type="CASH_BUYBACK", amount=-70,
+            reference_type="BUYBACK", reference_id=51,
+            reference_no="BI-MISMATCH", description="Napačen stari znesek",
+            operator_code="DR",
+        )
+        c.commit(); c.close()
+        self.assertEqual(
+            len(pending_cash_disbursements(office_db=self.db, service_db=service_db)),
+            1,
+        )
+        with self.assertRaisesRegex(CashJournalError, "drugačen znesek"):
+            book_cash_disbursement(
+                office_db=self.db, service_db=service_db, voucher_id=1,
+                premise_id="MFD", device_id="PIS", operator_code="DR",
+            )
+        c = sqlite3.connect(self.db)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM cash_journal_entries_v30").fetchone()[0],
+            1,
+        )
+        c.close()
+
+    def test_booked_voucher_with_broken_cash_link_fails_closed(self):
+        service_db = Path(self.tmp.name) / "broken-booked-link.db"
+        c = sqlite3.connect(service_db)
+        c.executescript(
+            """
+            CREATE TABLE cash_disbursements(
+                id INTEGER PRIMARY KEY, voucher_no TEXT, buyback_id INTEGER UNIQUE,
+                buyback_no TEXT, created_at TEXT, confirmed_at TEXT, status TEXT,
+                recipient_name TEXT, recipient_address TEXT, purpose TEXT,
+                amount REAL, operator_code TEXT, cash_session_id INTEGER,
+                cash_entry_id INTEGER, booked_at TEXT
+            );
+            INSERT INTO cash_disbursements VALUES(
+                1,'BI-BROKEN',61,'ODK-61','2026-09-01','2026-09-01','BOOKED',
+                'Prodajalec','Naslov','Gotovinski odkup',75,'DR',123,999,'2026-09-01'
+            );
+            """
+        )
+        c.commit(); c.close()
+        with self.assertRaisesRegex(CashJournalError, "ni veljavno povezan"):
+            book_cash_disbursement(
+                office_db=self.db, service_db=service_db, voucher_id=1,
+                premise_id="MFD", device_id="PIS", operator_code="DR",
+            )
 
     def test_unconfirmed_or_unfunded_disbursement_is_not_booked(self):
         service_db = Path(self.tmp.name) / "service-errors.db"
@@ -165,3 +294,4 @@ class CashJournalTests(unittest.TestCase):
 
 
 if __name__=="__main__": unittest.main()
+

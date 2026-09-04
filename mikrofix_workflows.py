@@ -177,10 +177,25 @@ def ensure_workflow_schema(connection) -> None:
             purpose TEXT NOT NULL,
             amount REAL NOT NULL,
             operator_code TEXT NOT NULL,
+            cash_session_id INTEGER,
+            cash_entry_id INTEGER,
+            booked_at TEXT,
             FOREIGN KEY(buyback_id) REFERENCES buybacks(id)
         )
         """
     )
+    cash_disbursement_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(cash_disbursements)")
+    }
+    for name, definition in {
+        "cash_session_id": "INTEGER",
+        "cash_entry_id": "INTEGER",
+        "booked_at": "TEXT",
+    }.items():
+        if name not in cash_disbursement_columns:
+            connection.execute(
+                f"ALTER TABLE cash_disbursements ADD COLUMN {name} {definition}"
+            )
     for table in ("service_orders", "buybacks"):
         columns = {
             row[1] for row in connection.execute(f"PRAGMA table_info({table})")
@@ -1205,3 +1220,4 @@ def generate_buyback_pdf(
         onLaterPages=lambda c, d: _footer(c, d, record["buyback_no"], BUYBACK_VERSION),
     )
     return path
+

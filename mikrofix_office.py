@@ -5566,6 +5566,9 @@ elif handoff_accepted or run_pin_login(root):
                     service_db=SERVICE_DB,
                     pdf_dir=PDF_DIR,
                     operator_code=RUNTIME.operator_code,
+                    authenticated_username=AUTH_SESSION.username,
+                    action_permissions=AUTH_SESSION.permissions,
+                    audit_event=audit_event,
                     service_id=sid,
                     service_loader=load_service_invoice_seed,
                     service_finalizer=globals().get("MIKROFIX_FINALIZE_SERVICE_PDF"),
@@ -5603,3 +5606,4 @@ else:
 
 if OFFICE_EXIT_CODE:
     raise SystemExit(OFFICE_EXIT_CODE)
+

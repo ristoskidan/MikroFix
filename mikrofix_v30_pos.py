@@ -24,6 +24,7 @@ from mikrofix_v30_cash import (
 
 
 CENT = Decimal("0.01")
+STORNO_DOCUMENT_PERMISSION = "STORNO_DOCUMENT"
 
 PAYMENT_METHOD_LABELS = {
     "CASH": "Gotovina",
@@ -49,6 +50,23 @@ def payment_status_label(value: object) -> str:
 
 class PosError(RuntimeError):
     pass
+
+
+def _actor_username(value: object) -> str:
+    actor = str(value or "").strip()
+    if not actor:
+        raise PosError("Dejanski prijavljeni uporabnik ni znan.")
+    return actor
+
+
+def _require_action_permission(
+    action_permissions: Iterable[str] | None, permission: str
+) -> None:
+    granted = {
+        str(value or "").strip().upper() for value in (action_permissions or ())
+    }
+    if permission not in granted:
+        raise PosError("Prijavljeni uporabnik nima dovoljenja za storno dokumentov.")
 
 
 def dec(value: object) -> Decimal:
@@ -222,6 +240,7 @@ def ensure_pos_schema(office_db: Path | str) -> None:
                 event_type TEXT NOT NULL,
                 detail TEXT,
                 operator_code TEXT NOT NULL,
+                actor_username TEXT,
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS inventory_operation_locks_v30(
@@ -253,6 +272,7 @@ def ensure_pos_schema(office_db: Path | str) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 issue_token TEXT NOT NULL UNIQUE,
                 operator_code TEXT NOT NULL,
+                actor_username TEXT,
                 premise_id TEXT NOT NULL,
                 device_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -276,6 +296,16 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             c.execute("ALTER TABLE pos_payments_v30 ADD COLUMN reversed_at TEXT")
         if "reversal_of_id" not in payment_cols:
             c.execute("ALTER TABLE pos_payments_v30 ADD COLUMN reversal_of_id INTEGER")
+        audit_cols = {row[1] for row in c.execute("PRAGMA table_info(pos_audit_v30)")}
+        if "actor_username" not in audit_cols:
+            c.execute("ALTER TABLE pos_audit_v30 ADD COLUMN actor_username TEXT")
+        draft_cols = {row[1] for row in c.execute("PRAGMA table_info(pos_drafts_v31)")}
+        if "actor_username" not in draft_cols:
+            c.execute("ALTER TABLE pos_drafts_v31 ADD COLUMN actor_username TEXT")
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pos_drafts_actor_recovery_v31 "
+            "ON pos_drafts_v31(status,actor_username,device_id,updated_at)"
+        )
         c.commit()
     finally:
         c.close()
@@ -296,6 +326,7 @@ def save_pos_draft(
     *,
     issue_token: str,
     operator_code: str,
+    actor_username: str,
     premise_id: str,
     device_id: str,
     payload: dict,
@@ -305,33 +336,41 @@ def save_pos_draft(
     token = str(issue_token or "").strip()
     if not token:
         raise PosError("Osnutek računa nima enolične oznake.")
+    actor = _actor_username(actor_username)
     payload_json, digest = _draft_payload(payload)
     now = datetime.now().isoformat(timespec="seconds")
     c = sqlite3.connect(str(office_db))
     try:
         c.execute("BEGIN IMMEDIATE")
         row = c.execute(
-            "SELECT status FROM pos_drafts_v31 WHERE issue_token=?", (token,)
+            "SELECT status,actor_username,device_id FROM pos_drafts_v31 WHERE issue_token=?",
+            (token,),
         ).fetchone()
-        if row and str(row[0]) != "ACTIVE":
-            raise PosError("Zaključenega ali opuščenega osnutka ni mogoče prepisati.")
+        if row:
+            if str(row[0]) != "ACTIVE":
+                raise PosError("Zaključenega ali opuščenega osnutka ni mogoče prepisati.")
+            if not row[1] or str(row[1]) != actor or str(row[2]) != str(device_id or "").strip():
+                raise PosError("Osnutek pripada drugemu uporabniku ali drugi napravi.")
         c.execute(
             """
             INSERT INTO pos_drafts_v31(
-                issue_token,operator_code,premise_id,device_id,status,
+                issue_token,operator_code,actor_username,premise_id,device_id,status,
                 payload_json,payload_sha256,created_at,updated_at
-            ) VALUES(?,?,?,?,'ACTIVE',?,?,?,?)
+            ) VALUES(?,?,?,?,?,'ACTIVE',?,?,?,?)
             ON CONFLICT(issue_token) DO UPDATE SET
                 operator_code=excluded.operator_code,
+                actor_username=excluded.actor_username,
                 premise_id=excluded.premise_id,
                 device_id=excluded.device_id,
                 payload_json=excluded.payload_json,
                 payload_sha256=excluded.payload_sha256,
                 updated_at=excluded.updated_at
             WHERE pos_drafts_v31.status='ACTIVE'
+              AND pos_drafts_v31.actor_username=excluded.actor_username
+              AND pos_drafts_v31.device_id=excluded.device_id
             """,
             (
-                token, str(operator_code or "-").strip() or "-",
+                token, str(operator_code or "-").strip() or "-", actor,
                 str(premise_id or "").strip(), str(device_id or "").strip(),
                 payload_json, digest, now, now,
             ),
@@ -347,21 +386,22 @@ def save_pos_draft(
 def load_active_pos_draft(
     office_db: Path | str,
     *,
-    operator_code: str,
+    actor_username: str,
     device_id: str,
 ) -> dict | None:
     """Naloži zadnji neizdani osnutek in preveri njegov kontrolni povzetek."""
     ensure_pos_schema(office_db)
+    actor = _actor_username(actor_username)
     c = sqlite3.connect(str(office_db))
     c.row_factory = sqlite3.Row
     try:
         row = c.execute(
             """
             SELECT * FROM pos_drafts_v31
-            WHERE status='ACTIVE' AND operator_code=? AND device_id=?
+            WHERE status='ACTIVE' AND actor_username=? AND device_id=?
             ORDER BY updated_at DESC,id DESC LIMIT 1
             """,
-            (str(operator_code or "-").strip() or "-", str(device_id or "").strip()),
+            (actor, str(device_id or "").strip()),
         ).fetchone()
         if not row:
             return None
@@ -381,18 +421,30 @@ def load_active_pos_draft(
         c.close()
 
 
-def abandon_pos_draft(office_db: Path | str, issue_token: str) -> None:
+def abandon_pos_draft(
+    office_db: Path | str, issue_token: str, *, actor_username: str, device_id: str
+) -> bool:
     """Označi osnutek kot opuščen; zapis ostane v revizijski sledi."""
     ensure_pos_schema(office_db)
+    actor = _actor_username(actor_username)
     now = datetime.now().isoformat(timespec="seconds")
     c = sqlite3.connect(str(office_db))
     try:
-        c.execute(
+        row = c.execute(
+            "SELECT status,actor_username,device_id FROM pos_drafts_v31 WHERE issue_token=?",
+            (str(issue_token),),
+        ).fetchone()
+        if not row:
+            return False
+        if not row[1] or str(row[1]) != actor or str(row[2]) != str(device_id or "").strip():
+            raise PosError("Osnutek pripada drugemu uporabniku ali drugi napravi.")
+        updated = c.execute(
             "UPDATE pos_drafts_v31 SET status='ABANDONED',abandoned_at=?,updated_at=? "
-            "WHERE issue_token=? AND status='ACTIVE'",
-            (now, now, str(issue_token)),
+            "WHERE issue_token=? AND status='ACTIVE' AND actor_username=? AND device_id=?",
+            (now, now, str(issue_token), actor, str(device_id or "").strip()),
         )
         c.commit()
+        return updated.rowcount == 1
     finally:
         c.close()
 
@@ -865,7 +917,12 @@ def issue_invoice(
     payment_reference: str = "",
     used_goods_agreement_id: int | None = None,
     replacement_of_invoice_id: int | None = None,
+    authenticated_username: str | None = None,
+    action_permissions: Iterable[str] | None = None,
 ) -> tuple[int, str, Decimal]:
+    actor = _actor_username(authenticated_username)
+    if replacement_of_invoice_id is not None:
+        _require_action_permission(action_permissions, STORNO_DOCUMENT_PERMISSION)
     ensure_pos_schema(office_db)
     token = issue_token or str(uuid.uuid4())
     premise = _fiscal_identifier(premise_id, "Oznaka poslovnega prostora")
@@ -902,6 +959,18 @@ def issue_invoice(
             c.execute("ATTACH DATABASE ? AS servicedb", (str(service_db),))
         c.execute("BEGIN IMMEDIATE")
         ensure_lot_schema(c, "inv")
+        draft = c.execute(
+            "SELECT status,actor_username,device_id FROM pos_drafts_v31 WHERE issue_token=?",
+            (token,),
+        ).fetchone()
+        if draft and (
+            not draft[1]
+            or str(draft[1]) != actor
+            or str(draft[2]) != device
+        ):
+            raise PosError("Osnutek računa pripada drugemu uporabniku ali drugi napravi.")
+        if draft and str(draft[0]) == "ABANDONED":
+            raise PosError("Opuščenega osnutka ni dovoljeno izdati.")
         full_inventory = c.execute(
             """
             SELECT reference FROM inventory_operation_locks_v30
@@ -1199,23 +1268,23 @@ def issue_invoice(
                 operator_code=operator,
             )
         c.execute(
-            "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,created_at) VALUES(?,?,?,?,?)",
+            "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,actor_username,created_at) VALUES(?,?,?,?,?,?)",
             (
                 document_id, "INVOICE_ISSUED",
                 f"fiscal={fiscal_invoice_no}; internal={invoice_no}; total={total}; token={token}",
-                operator, now,
+                operator, actor, now,
             ),
         )
         if replacement_source:
             c.execute(
-                "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,created_at) "
-                "VALUES(?,?,?,?,?)",
+                "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,actor_username,created_at) "
+                "VALUES(?,?,?,?,?,?)",
                 (
                     document_id,
                     "REPLACEMENT_INVOICE_LINKED",
                     f"replacement_of={int(replacement_of_invoice_id)}; "
                     f"original_no={replacement_source[3]}",
-                    operator,
+                    operator, actor,
                     now,
                 ),
             )
@@ -1227,11 +1296,14 @@ def issue_invoice(
                 invoice_no=fiscal_invoice_no,
                 document_id=document_id,
             )
-        c.execute(
-            "UPDATE pos_drafts_v31 SET status='ISSUED',final_document_id=?,updated_at=? "
-            "WHERE issue_token=? AND status='ACTIVE'",
-            (document_id, now, token),
-        )
+        if draft:
+            updated_draft = c.execute(
+                "UPDATE pos_drafts_v31 SET status='ISSUED',final_document_id=?,updated_at=? "
+                "WHERE issue_token=? AND status='ACTIVE' AND actor_username=? AND device_id=?",
+                (document_id, now, token, actor, device),
+            )
+            if str(draft[0]) == "ACTIVE" and updated_draft.rowcount != 1:
+                raise PosError("Osnutka računa ni bilo mogoče varno zaključiti.")
         c.commit()
         return document_id, fiscal_invoice_no, total
     except Exception:
@@ -1420,8 +1492,12 @@ def eligible_storned_invoices(office_db: Path | str) -> list[dict]:
 def storno_invoice(
     *, office_db: Path | str, inventory_db: Path | str, service_db: Path | str,
     document_id: int, reason: str, operator_code: str,
+    authenticated_username: str | None = None,
+    action_permissions: Iterable[str] | None = None,
 ) -> tuple[int, str]:
     """V celoti stornira račun, povrne njegove LOT-e in ohrani obe listini."""
+    actor = _actor_username(authenticated_username)
+    _require_action_permission(action_permissions, STORNO_DOCUMENT_PERMISSION)
     ensure_pos_schema(office_db)
     reason = str(reason or "").strip()
     if len(reason) < 3:
@@ -1453,6 +1529,53 @@ def storno_invoice(
             raise PosError("Račun je že storniran.")
         if str(doc["status"]) != "KNJIŽENO":
             raise PosError("Stornirati je mogoče samo knjižen račun.")
+
+        linked_service_order_id = None
+        if doc["linked_service_id"]:
+            if not service_attached:
+                raise PosError(
+                    "Servisna baza ni dosegljiva; povezanega računa ni dovoljeno stornirati."
+                )
+            if not _table_exists(c, "servicedb", "service"):
+                raise PosError("Servisna baza nima tabele povezanih servisov.")
+            service_columns = {
+                row[1] for row in c.execute("PRAGMA servicedb.table_info(service)")
+            }
+            if not {"id", "invoice_no", "office_invoice_id"}.issubset(service_columns):
+                raise PosError("Servisna baza nima vseh polj za varen storno.")
+            select_order = ",service_order_id" if "service_order_id" in service_columns else ",NULL"
+            linked_service = c.execute(
+                "SELECT invoice_no,office_invoice_id" + select_order
+                + " FROM servicedb.service WHERE id=?",
+                (int(doc["linked_service_id"]),),
+            ).fetchone()
+            if (
+                not linked_service
+                or int(linked_service[1] or 0) != int(document_id)
+                or str(linked_service[0] or "").strip()
+                != str(doc["fiscal_invoice_no"] or doc["doc_no"]).strip()
+            ):
+                raise PosError(
+                    "Povezava računa s servisom ni skladna; storno je ustavljen brez sprememb."
+                )
+            linked_service_order_id = (
+                int(linked_service[2]) if linked_service[2] is not None else None
+            )
+            if linked_service_order_id is not None:
+                if not _table_exists(c, "servicedb", "service_orders"):
+                    raise PosError("Servisna baza nima povezanega servisnega naročila.")
+                linked_order = c.execute(
+                    "SELECT status,service_id FROM servicedb.service_orders WHERE id=?",
+                    (linked_service_order_id,),
+                ).fetchone()
+                if (
+                    not linked_order
+                    or str(linked_order[0]) != "COMPLETED"
+                    or int(linked_order[1] or 0) != int(doc["linked_service_id"])
+                ):
+                    raise PosError(
+                        "Povezano servisno naročilo ni skladno; storno je ustavljen brez sprememb."
+                    )
 
         original_cash = dec(c.execute(
             "SELECT COALESCE(SUM(amount),0) FROM pos_payments_v30 "
@@ -1609,30 +1732,41 @@ def storno_invoice(
             "sale_document_id=NULL,warranty_until=NULL,updated_at=? WHERE sale_document_id=?",
             (now,int(document_id)),
         )
-        if doc["linked_service_id"] and service_attached:
+        if doc["linked_service_id"]:
             service_id = int(doc["linked_service_id"])
-            c.execute(
-                "UPDATE servicedb.service SET invoice_no=NULL,office_invoice_id=NULL WHERE id=?",
-                (service_id,),
+            service_update = c.execute(
+                """
+                UPDATE servicedb.service SET invoice_no=NULL,office_invoice_id=NULL
+                WHERE id=? AND office_invoice_id=? AND trim(COALESCE(invoice_no,''))<>''
+                """,
+                (service_id, int(document_id)),
             )
-            if _table_exists(c,"servicedb","service_orders"):
-                c.execute(
-                    "UPDATE servicedb.service_orders SET status='OPEN',completed_at=NULL "
-                    "WHERE service_id=? AND status='COMPLETED'",
-                    (service_id,),
+            if service_update.rowcount != 1:
+                raise PosError("Servisa ni bilo mogoče enolično ponovno odpreti.")
+            if linked_service_order_id is not None:
+                order_update = c.execute(
+                    """
+                    UPDATE servicedb.service_orders SET status='OPEN',completed_at=NULL
+                    WHERE id=? AND service_id=? AND status='COMPLETED'
+                    """,
+                    (linked_service_order_id, service_id),
                 )
+                if order_update.rowcount != 1:
+                    raise PosError(
+                        "Servisnega naročila ni bilo mogoče enolično ponovno odpreti."
+                    )
         c.execute(
             "UPDATE documents SET status='STORNIRANO',storno_reason=?,storno_at=?,"
             "storno_by=?,updated_at=? WHERE id=?",
-            (reason,now,operator_code,now,int(document_id)),
+            (reason,now,actor,now,int(document_id)),
         )
         c.execute(
-            "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,created_at) "
-            "VALUES(?,?,?,?,?)",
+            "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,actor_username,created_at) "
+            "VALUES(?,?,?,?,?,?)",
             (
                 int(document_id),"INVOICE_STORNIRANO",
                 f"storno_document={storno_id}; storno_no={storno_no}; reason={reason}",
-                operator_code,now,
+                operator_code,actor,now,
             ),
         )
         c.commit()
@@ -2026,3 +2160,4 @@ def generate_pos_preview_pdfs(
         rightMargin=4*mm, topMargin=4*mm, bottomMargin=4*mm,
     ).build(receipt_story)
     return a4_path, receipt_path
+

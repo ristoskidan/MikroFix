@@ -5328,6 +5328,9 @@ def launch_pos(service_id=None):
             service_db=DB,
             pdf_dir=PDF_DIR,
             operator_code=RUNTIME.operator_code,
+            authenticated_username=AUTH_SESSION.username,
+            action_permissions=AUTH_SESSION.permissions,
+            audit_event=audit_event,
             service_id=service_id,
             service_loader=load_service_invoice_seed,
             service_finalizer=generate_pdf,
@@ -7557,3 +7560,4 @@ elif run_pin_login(root):
     root.mainloop()
 else:
     root.destroy()
+

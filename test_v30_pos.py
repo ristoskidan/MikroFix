@@ -126,6 +126,7 @@ class V30PosTests(unittest.TestCase):
             "operator_tax_number": "84514841",
             "premise_id": premise,
             "electronic_device_id": "PIS",
+            "authenticated_username": "daniel",
         }
 
     def test_pos_draft_is_persistent_verified_and_abandonable(self):
@@ -136,10 +137,11 @@ class V30PosTests(unittest.TestCase):
         }
         save_pos_draft(
             self.office, issue_token="draft-one", operator_code="DR",
+            actor_username="daniel",
             premise_id="MFD", device_id="PIS", payload=payload,
         )
         loaded = load_active_pos_draft(
-            self.office, operator_code="DR", device_id="PIS"
+            self.office, actor_username="daniel", device_id="PIS"
         )
         self.assertEqual(loaded["issue_token"], "draft-one")
         self.assertEqual(loaded["payload"], payload)
@@ -148,25 +150,32 @@ class V30PosTests(unittest.TestCase):
         changed["customer"] = {"name": "Popravljena stranka"}
         save_pos_draft(
             self.office, issue_token="draft-one", operator_code="DR",
+            actor_username="daniel",
             premise_id="MFD", device_id="PIS", payload=changed,
         )
         loaded = load_active_pos_draft(
-            self.office, operator_code="DR", device_id="PIS"
+            self.office, actor_username="daniel", device_id="PIS"
         )
         self.assertEqual(loaded["payload"]["customer"]["name"], "Popravljena stranka")
-        abandon_pos_draft(self.office, "draft-one")
+        abandon_pos_draft(
+            self.office, "draft-one", actor_username="daniel", device_id="PIS"
+        )
         self.assertIsNone(
-            load_active_pos_draft(self.office, operator_code="DR", device_id="PIS")
+            load_active_pos_draft(
+                self.office, actor_username="daniel", device_id="PIS"
+            )
         )
         with self.assertRaisesRegex(PosError, "ni mogoče prepisati"):
             save_pos_draft(
                 self.office, issue_token="draft-one", operator_code="DR",
+                actor_username="daniel",
                 premise_id="MFD", device_id="PIS", payload=payload,
             )
 
     def test_issuing_invoice_atomically_closes_matching_draft(self):
         save_pos_draft(
             self.office, issue_token="draft-to-issue", operator_code="DR",
+            actor_username="daniel",
             premise_id="MFD", device_id="PIS", payload={"lines": ["test"]},
         )
         document_id, _number, _total = issue_invoice(
@@ -183,12 +192,15 @@ class V30PosTests(unittest.TestCase):
         c.close()
         self.assertEqual(row, ("ISSUED", document_id))
         self.assertIsNone(
-            load_active_pos_draft(self.office, operator_code="DR", device_id="PIS")
+            load_active_pos_draft(
+                self.office, actor_username="daniel", device_id="PIS"
+            )
         )
 
     def test_damaged_pos_draft_is_never_restored(self):
         save_pos_draft(
             self.office, issue_token="damaged-draft", operator_code="DR",
+            actor_username="daniel",
             premise_id="MFD", device_id="PIS", payload={"customer": {"name": "A"}},
         )
         c = sqlite3.connect(self.office)
@@ -198,7 +210,60 @@ class V30PosTests(unittest.TestCase):
         )
         c.commit(); c.close()
         with self.assertRaisesRegex(PosError, "poškodovan"):
-            load_active_pos_draft(self.office, operator_code="DR", device_id="PIS")
+            load_active_pos_draft(
+                self.office, actor_username="daniel", device_id="PIS"
+            )
+
+    def test_pos_drafts_are_isolated_by_authenticated_user_and_device(self):
+        save_pos_draft(
+            self.office, issue_token="daniel-only", operator_code="DR",
+            actor_username="daniel", premise_id="MFD", device_id="PIS",
+            payload={"customer": {"name": "Zasebni osnutek"}},
+        )
+        self.assertIsNone(
+            load_active_pos_draft(
+                self.office, actor_username="drugi", device_id="PIS"
+            )
+        )
+        with self.assertRaisesRegex(PosError, "drugemu uporabniku"):
+            save_pos_draft(
+                self.office, issue_token="daniel-only", operator_code="DR",
+                actor_username="drugi", premise_id="MFD", device_id="PIS",
+                payload={"customer": {"name": "Prevzem"}},
+            )
+        with self.assertRaisesRegex(PosError, "drugemu uporabniku"):
+            issue_invoice(
+                office_db=self.office, inventory_db=self.inventory,
+                service_db=self.service, lines=[self.line()], payments={"CASH": 100},
+                customer={"name": "Drugi"}, operator_code="DR", labor_floor=22,
+                issue_token="daniel-only", authenticated_username="drugi",
+                operator_tax_number="84514841", premise_id="MFD",
+                electronic_device_id="PIS",
+            )
+        with self.assertRaisesRegex(PosError, "drugemu uporabniku"):
+            abandon_pos_draft(
+                self.office, "daniel-only", actor_username="drugi", device_id="PIS"
+            )
+
+    def test_legacy_unowned_pos_draft_is_not_automatically_restored(self):
+        c = sqlite3.connect(self.office)
+        raw = '{"customer":{"name":"Stari osnutek"}}'
+        import hashlib
+        c.execute(
+            """
+            INSERT INTO pos_drafts_v31(
+                issue_token,operator_code,actor_username,premise_id,device_id,status,
+                payload_json,payload_sha256,created_at,updated_at
+            ) VALUES('legacy','DR',NULL,'MFD','PIS','ACTIVE',?,?,?,?)
+            """,
+            (raw, hashlib.sha256(raw.encode("utf-8")).hexdigest(), "2026-01-01", "2026-01-01"),
+        )
+        c.commit(); c.close()
+        self.assertIsNone(
+            load_active_pos_draft(
+                self.office, actor_username="daniel", device_id="PIS"
+            )
+        )
 
     def test_article_discount_is_silently_clamped_to_cost_plus_five_percent(self):
         result = calculate_line(self.line(requested_discount_pct=Decimal("100")), 22)
@@ -371,6 +436,8 @@ class V30PosTests(unittest.TestCase):
         storno_id, storno_no = storno_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             document_id=invoice_id, reason="Napačen račun", operator_code="DR",
+            authenticated_username="daniel",
+            action_permissions={"STORNO_DOCUMENT"},
         )
         self.assertTrue(storno_no.startswith("STR-"))
         c = sqlite3.connect(self.office)
@@ -397,6 +464,63 @@ class V30PosTests(unittest.TestCase):
         )
         c.close()
 
+    def test_linked_service_invoice_storno_fails_closed_without_service_database(self):
+        invoice_id, _invoice_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="service-storno-offline",
+            linked_service_id=7, **self.fiscal(),
+        )
+        mark_printed(self.office, invoice_id, "DR")
+        unavailable = self.service.with_suffix(".offline")
+        self.service.rename(unavailable)
+        try:
+            with self.assertRaisesRegex(PosError, "ni dosegljiva"):
+                storno_invoice(
+                    office_db=self.office, inventory_db=self.inventory,
+                    service_db=self.service, document_id=invoice_id,
+                    reason="Preizkus manjkajoče baze", operator_code="DR",
+                    authenticated_username="daniel",
+                    action_permissions={"STORNO_DOCUMENT"},
+                )
+        finally:
+            unavailable.rename(self.service)
+        c = sqlite3.connect(self.office)
+        self.assertEqual(
+            c.execute("SELECT status FROM documents WHERE id=?", (invoice_id,)).fetchone()[0],
+            "KNJIŽENO",
+        )
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
+        c.close()
+        c = sqlite3.connect(self.inventory)
+        self.assertEqual(c.execute("SELECT stock_qty FROM inventory_items WHERE id=1").fetchone()[0], 2)
+        c.close()
+
+    def test_linked_service_invoice_storno_reopens_service_atomically(self):
+        invoice_id, _invoice_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="service-storno-success",
+            linked_service_id=7, **self.fiscal(),
+        )
+        mark_printed(self.office, invoice_id, "DR")
+        storno_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            document_id=invoice_id, reason="Pravilna razveljavitev", operator_code="DR",
+            authenticated_username="daniel",
+            action_permissions={"STORNO_DOCUMENT"},
+        )
+        c = sqlite3.connect(self.service)
+        self.assertEqual(
+            c.execute("SELECT invoice_no,office_invoice_id FROM service WHERE id=7").fetchone(),
+            (None, None),
+        )
+        self.assertEqual(
+            c.execute("SELECT status,completed_at FROM service_orders WHERE id=70").fetchone(),
+            ("OPEN", None),
+        )
+        c.close()
+
     def test_split_payment_storno_reverses_every_payment_line(self):
         invoice_id, _invoice_no, _ = issue_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
@@ -409,6 +533,8 @@ class V30PosTests(unittest.TestCase):
         storno_id, _storno_no = storno_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             document_id=invoice_id, reason="Napačen račun", operator_code="DR",
+            authenticated_username="daniel",
+            action_permissions={"STORNO_DOCUMENT"},
         )
         c = sqlite3.connect(self.office)
         original = c.execute(
@@ -430,6 +556,36 @@ class V30PosTests(unittest.TestCase):
         )
         self.assertTrue(all(row[3] for row in reversed_lines))
 
+    def test_cashier_without_storno_permission_cannot_change_invoice(self):
+        invoice_id, _invoice_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="protected-storno",
+            **self.fiscal(),
+        )
+        mark_printed(self.office, invoice_id, "DR")
+        with self.assertRaisesRegex(PosError, "nima dovoljenja"):
+            storno_invoice(
+                office_db=self.office, inventory_db=self.inventory,
+                service_db=self.service, document_id=invoice_id,
+                reason="Napačen račun", operator_code="DR",
+                authenticated_username="blagajnik", action_permissions={"CASHIER"},
+            )
+        c = sqlite3.connect(self.office)
+        self.assertEqual(
+            c.execute("SELECT status FROM documents WHERE id=?", (invoice_id,)).fetchone()[0],
+            "KNJIŽENO",
+        )
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
+        self.assertEqual(
+            c.execute("SELECT COUNT(*) FROM pos_payments_v30 WHERE reversal_of_id IS NOT NULL").fetchone()[0],
+            0,
+        )
+        c.close()
+        c = sqlite3.connect(self.inventory)
+        self.assertEqual(c.execute("SELECT stock_qty FROM inventory_items WHERE id=1").fetchone()[0], 2)
+        c.close()
+
     def test_replacement_invoice_forms_one_traceable_chain(self):
         original_id, original_no, _ = issue_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
@@ -441,6 +597,8 @@ class V30PosTests(unittest.TestCase):
         _storno_id, storno_no = storno_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             document_id=original_id, reason="Napačen naziv", operator_code="DR",
+            authenticated_username="daniel",
+            action_permissions={"STORNO_DOCUMENT"},
         )
         eligible = eligible_storned_invoices(self.office)
         self.assertEqual([row["id"] for row in eligible], [original_id])
@@ -449,13 +607,50 @@ class V30PosTests(unittest.TestCase):
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
             operator_code="DR", labor_floor=22, issue_token="replacement",
-            replacement_of_invoice_id=original_id, **self.fiscal(),
+            replacement_of_invoice_id=original_id,
+            action_permissions={"STORNO_DOCUMENT"}, **self.fiscal(),
         )
         doc, _lines, _payments = invoice_snapshot(self.office, replacement_id)
         self.assertEqual(doc["replacement_of_invoice_id"], original_id)
         self.assertEqual(doc["replacement_original_no"], original_no)
         self.assertEqual(doc["replacement_storno_no"], storno_no)
         self.assertEqual(eligible_storned_invoices(self.office), [])
+        c = sqlite3.connect(self.office)
+        audit = c.execute(
+            "SELECT operator_code,actor_username FROM pos_audit_v30 "
+            "WHERE document_id=? AND event_type='REPLACEMENT_INVOICE_LINKED'",
+            (replacement_id,),
+        ).fetchone()
+        c.close()
+        self.assertEqual(audit, ("DR", "daniel"))
+
+    def test_replacement_invoice_requires_storno_permission(self):
+        original_id, _original_no, _ = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
+            operator_code="DR", labor_floor=22, issue_token="replacement-permission-source",
+            **self.fiscal(),
+        )
+        mark_printed(self.office, original_id, "DR")
+        storno_invoice(
+            office_db=self.office, inventory_db=self.inventory, service_db=self.service,
+            document_id=original_id, reason="Napačen račun", operator_code="DR",
+            authenticated_username="daniel", action_permissions={"STORNO_DOCUMENT"},
+        )
+        with self.assertRaisesRegex(PosError, "nima dovoljenja"):
+            issue_invoice(
+                office_db=self.office, inventory_db=self.inventory,
+                service_db=self.service, lines=[self.line()], payments={"CASH": 100},
+                customer={"name": "Kupec"}, operator_code="DR", labor_floor=22,
+                issue_token="unauthorized-replacement",
+                replacement_of_invoice_id=original_id,
+                authenticated_username="blagajnik", action_permissions={"CASHIER"},
+                operator_tax_number="84514841", premise_id="MFD",
+                electronic_device_id="PIS",
+            )
+        c = sqlite3.connect(self.office)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 2)
+        c.close()
 
     def test_replacement_requires_storned_invoice(self):
         original_id, _original_no, _ = issue_invoice(
@@ -470,7 +665,8 @@ class V30PosTests(unittest.TestCase):
                 office_db=self.office, inventory_db=self.inventory, service_db=self.service,
                 lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
                 operator_code="DR", labor_floor=22, issue_token="invalid-replacement",
-                replacement_of_invoice_id=original_id, **self.fiscal(),
+                replacement_of_invoice_id=original_id,
+                action_permissions={"STORNO_DOCUMENT"}, **self.fiscal(),
             )
 
     def test_fiscal_numbering_is_separate_per_premise_and_snapshotted(self):
@@ -533,3 +729,4 @@ class V30PosTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

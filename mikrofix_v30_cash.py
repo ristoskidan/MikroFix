@@ -208,23 +208,65 @@ def _ensure_disbursement_link_columns(
         )
 
 
-def pending_cash_disbursements(service_db: Path | str) -> list[dict]:
-    """Vrne podpisane gotovinske izdatke odkupa, ki še niso v dnevniku."""
-    c = sqlite3.connect(str(service_db))
+def pending_cash_disbursements(
+    *, office_db: Path | str, service_db: Path | str
+) -> list[dict]:
+    """Vrne še neknjižene izdatke in varno poveže stare že knjižene odkupe."""
+    c = sqlite3.connect(str(office_db), timeout=20)
     c.row_factory = sqlite3.Row
     try:
-        _ensure_disbursement_link_columns(c, "main")
+        ensure_cash_schema_connection(c)
+        c.execute("ATTACH DATABASE ? AS svc", (str(service_db),))
+        _ensure_disbursement_link_columns(c, "svc")
         c.commit()
-        rows = c.execute(
+        c.execute("BEGIN IMMEDIATE")
+        candidates = c.execute(
             """
-            SELECT id,voucher_no,buyback_id,buyback_no,created_at,confirmed_at,
-                   recipient_name,recipient_address,purpose,amount,operator_code
-            FROM cash_disbursements
+            SELECT * FROM svc.cash_disbursements
             WHERE status='CONFIRMED' AND cash_entry_id IS NULL
             ORDER BY confirmed_at,id
             """
         ).fetchall()
-        return [dict(row) for row in rows]
+        pending: list[dict] = []
+        now = datetime.now().isoformat(timespec="seconds")
+        for voucher in candidates:
+            legacy = c.execute(
+                """
+                SELECT id,session_id,amount,reference_no
+                FROM cash_journal_entries_v30
+                WHERE reference_type='BUYBACK' AND reference_id=?
+                  AND entry_type='CASH_BUYBACK'
+                ORDER BY id LIMIT 1
+                """,
+                (int(voucher["buyback_id"]),),
+            ).fetchone()
+            expected_references = {
+                str(voucher["voucher_no"] or "").strip(),
+                str(voucher["buyback_no"] or "").strip(),
+            }
+            if (
+                legacy
+                and money(legacy["amount"]) == -money(voucher["amount"])
+                and str(legacy["reference_no"] or "").strip() in expected_references
+            ):
+                c.execute(
+                    """
+                    UPDATE svc.cash_disbursements
+                    SET status='BOOKED',cash_session_id=?,cash_entry_id=?,booked_at=?
+                    WHERE id=? AND status='CONFIRMED' AND cash_entry_id IS NULL
+                    """,
+                    (
+                        int(legacy["session_id"]), int(legacy["id"]), now,
+                        int(voucher["id"]),
+                    ),
+                )
+            else:
+                pending.append(dict(voucher))
+        c.commit()
+        return pending
+    except Exception:
+        c.rollback()
+        raise
     finally:
         c.close()
 
@@ -253,30 +295,110 @@ def book_cash_disbursement(
         ).fetchone()
         if not voucher:
             raise CashJournalError("Blagajniški izdatek ni najden.")
-        if str(voucher["status"]) == "BOOKED" and voucher["cash_entry_id"]:
+        if str(voucher["status"]) == "BOOKED":
+            if not voucher["cash_entry_id"] or not voucher["cash_session_id"]:
+                raise CashJournalError(
+                    "Knjiženi izdatek nima popolne povezave z blagajniškim dnevnikom."
+                )
             entry = c.execute(
-                "SELECT session_id,entry_no FROM cash_journal_entries_v30 WHERE id=?",
+                """
+                SELECT session_id,entry_no,entry_type,amount,reference_type,
+                       reference_id,reference_no
+                FROM cash_journal_entries_v30 WHERE id=?
+                """,
                 (int(voucher["cash_entry_id"]),),
             ).fetchone()
+            expected_reference_numbers = {
+                str(voucher["voucher_no"] or "").strip(),
+                str(voucher["buyback_no"] or "").strip(),
+            }
+            valid_legacy = bool(
+                entry
+                and str(entry[2]) == "CASH_BUYBACK"
+                and str(entry[4]) == "BUYBACK"
+                and int(entry[5] or 0) == int(voucher["buyback_id"])
+            )
+            valid_import = bool(
+                entry
+                and str(entry[2]) == "CASH_EXPENSE"
+                and str(entry[4]) == "BUYBACK_CASH_DISBURSEMENT"
+                and int(entry[5] or 0) == int(voucher["id"])
+            )
+            if (
+                not entry
+                or int(entry[0]) != int(voucher["cash_session_id"])
+                or money(entry[3]) != -money(voucher["amount"])
+                or str(entry[6] or "").strip() not in expected_reference_numbers
+                or not (valid_legacy or valid_import)
+            ):
+                raise CashJournalError(
+                    "Knjiženi izdatek ni veljavno povezan s pripadajočim gotovinskim dogodkom."
+                )
             c.rollback()
             return {
                 "voucher_id": int(voucher["id"]),
                 "voucher_no": str(voucher["voucher_no"]),
                 "cash_entry_id": int(voucher["cash_entry_id"]),
-                "cash_session_id": int(entry[0]) if entry else int(voucher["cash_session_id"]),
-                "entry_no": int(entry[1]) if entry else None,
+                "cash_session_id": int(entry[0]),
+                "entry_no": int(entry[1]),
                 "already_booked": True,
             }
         if str(voucher["status"]) != "CONFIRMED":
             raise CashJournalError(
                 "Izdatek je mogoče knjižiti šele po podpisu in potrditvi odkupa."
             )
-        session_id = require_open_cash_session(
-            c, premise_id=str(premise_id), device_id=str(device_id)
-        )
         amount = money(voucher["amount"])
         if amount <= 0:
             raise CashJournalError("Blagajniški izdatek nima veljavnega zneska.")
+        legacy = c.execute(
+            """
+            SELECT id,session_id,entry_no,amount,reference_no
+            FROM cash_journal_entries_v30
+            WHERE reference_type='BUYBACK' AND reference_id=?
+              AND entry_type='CASH_BUYBACK'
+            ORDER BY id LIMIT 1
+            """,
+            (int(voucher["buyback_id"]),),
+        ).fetchone()
+        if legacy:
+            expected_references = {
+                str(voucher["voucher_no"] or "").strip(),
+                str(voucher["buyback_no"] or "").strip(),
+            }
+            if (
+                money(legacy["amount"]) != -amount
+                or str(legacy["reference_no"] or "").strip() not in expected_references
+            ):
+                raise CashJournalError(
+                    "Obstoječi blagajniški izdatek odkupa ima drugačen znesek ali referenco; "
+                    "samodejna povezava ni dovoljena."
+                )
+            now = datetime.now().isoformat(timespec="seconds")
+            updated = c.execute(
+                """
+                UPDATE svc.cash_disbursements
+                SET status='BOOKED',cash_session_id=?,cash_entry_id=?,booked_at=?
+                WHERE id=? AND status='CONFIRMED' AND cash_entry_id IS NULL
+                """,
+                (
+                    int(legacy["session_id"]), int(legacy["id"]), now,
+                    int(voucher_id),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise CashJournalError("Izdatka ni bilo mogoče enolično povezati.")
+            c.commit()
+            return {
+                "voucher_id": int(voucher["id"]),
+                "voucher_no": str(voucher["voucher_no"]),
+                "cash_entry_id": int(legacy["id"]),
+                "cash_session_id": int(legacy["session_id"]),
+                "entry_no": int(legacy["entry_no"]),
+                "already_booked": True,
+            }
+        session_id = require_open_cash_session(
+            c, premise_id=str(premise_id), device_id=str(device_id)
+        )
         entry_id = record_cash_entry(
             c,
             session_id=session_id,
@@ -433,3 +555,4 @@ def generate_cash_journal_pdf(
     ),Spacer(1,12*mm),Paragraph("Blagajnik: ____________________    Odgovorna oseba: ____________________",body)])
     SimpleDocTemplate(str(path),pagesize=A4,leftMargin=10*mm,rightMargin=10*mm,topMargin=12*mm,bottomMargin=12*mm).build(story)
     return path
+

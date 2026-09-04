@@ -51,7 +51,8 @@ class PosWindow:
     def __init__(
         self, parent, *, runtime, office_db, inventory_db, service_db, pdf_dir,
         operator_code, service_id=None, service_loader=None, service_finalizer=None,
-        on_close=None,
+        on_close=None, authenticated_username=None, action_permissions=None,
+        audit_event=None,
     ):
         self.parent = parent
         self.runtime = runtime
@@ -60,6 +61,13 @@ class PosWindow:
         self.service_db = Path(service_db)
         self.pdf_dir = Path(pdf_dir)
         self.operator_code = str(operator_code or "-")
+        self.authenticated_username = str(authenticated_username or "").strip()
+        if not self.authenticated_username:
+            raise PosError("Blagajne ni mogoče odpreti brez prijavljenega uporabnika.")
+        self.action_permissions = {
+            str(value or "").strip().upper() for value in (action_permissions or ())
+        }
+        self.audit_event = audit_event
         self.service_id = service_id
         self.service_loader = service_loader
         self.service_finalizer = service_finalizer
@@ -138,6 +146,27 @@ class PosWindow:
             width = 80
         return width if width in (58, 80) else 80
 
+    def _can_storno(self) -> bool:
+        return "STORNO_DOCUMENT" in self.action_permissions
+
+    def _require_storno_permission(self) -> bool:
+        if self._can_storno():
+            return True
+        if callable(self.audit_event):
+            try:
+                self.audit_event(
+                    "PERMISSION_DENIED", "action", "STORNO_DOCUMENT",
+                    {"module": "CASHIER"},
+                )
+            except Exception:
+                pass
+        messagebox.showwarning(
+            "Blagajna",
+            "Prijavljeni uporabnik nima dovoljenja za storno dokumentov.",
+            parent=self.win,
+        )
+        return False
+
     def _build(self):
         header = tk.Frame(self.win, bg=DARK, height=64)
         header.pack(fill="x")
@@ -145,7 +174,7 @@ class PosWindow:
         tk.Label(header, text="BLAGAJNA", bg=DARK, fg="white", font=("Segoe UI", 20, "bold")).pack(side="left", padx=20)
         self.header_status = tk.StringVar(
             value=(
-                f"Uporabnik: {self.operator_code}  •  "
+                f"Uporabnik: {self.authenticated_username}  •  FURS operater: {self.operator_code}  •  "
                 f"{self.premise_var.get()}/{self.runtime.electronic_device}  •  "
                 "TEST – FURS izklopljen"
             )
@@ -178,13 +207,12 @@ class PosWindow:
         rail = tk.Frame(workspace, bg=DARK, width=132)
         rail.pack(side="left", fill="y", padx=(0, 8))
         rail.pack_propagate(False)
-        for text_value, command in (
+        rail_actions = [
             ("F1  ISKANJE", lambda: self.search_entry.focus_set()),
             ("F2  DODAJ ARTIKEL", self.add_selected_stock),
             ("F3  + T1 DELO", lambda: self.add_service("T1")),
             ("F4  + T2 TEREN", lambda: self.add_service("T2")),
             ("F5  NOV RAČUN", self.new_invoice),
-            ("⇄ VEŽI NA STORNO", self.choose_replacement_source),
             ("F6  SERVIS ZA RAČUN", self.choose_ready_service),
             ("F7  RABAT", self.edit_discount),
             ("F8  UPN QR", self.print_upn_qr),
@@ -193,7 +221,10 @@ class PosWindow:
             ("F11 KOLIČINA +", lambda: self.change_qty(1)),
             ("F12 KOLIČINA –", lambda: self.change_qty(-1)),
             ("DEL ODSTRANI", self.remove_line),
-        ):
+        ]
+        if self._can_storno():
+            rail_actions.insert(5, ("⇄ VEŽI NA STORNO", self.choose_replacement_source))
+        for text_value, command in rail_actions:
             tk.Button(
                 rail, text=text_value, command=command, bg=DARK, fg="white",
                 activebackground=BLUE, activeforeground="white", relief="flat",
@@ -435,6 +466,7 @@ class PosWindow:
                 self.office_db,
                 issue_token=self.issue_token,
                 operator_code=self.operator_code,
+                actor_username=self.authenticated_username,
                 premise_id=self.premise_var.get(),
                 device_id=self.runtime.electronic_device,
                 payload=self._draft_data(),
@@ -452,7 +484,7 @@ class PosWindow:
         try:
             stored = load_active_pos_draft(
                 self.office_db,
-                operator_code=self.operator_code,
+                actor_username=self.authenticated_username,
                 device_id=self.runtime.electronic_device,
             )
         except Exception as exc:
@@ -466,7 +498,11 @@ class PosWindow:
             f"{str(stored['updated_at']).replace('T', ' ')}. Nadaljujem ta osnutek?",
             parent=self.win,
         ):
-            abandon_pos_draft(self.office_db, str(stored["issue_token"]))
+            abandon_pos_draft(
+                self.office_db, str(stored["issue_token"]),
+                actor_username=self.authenticated_username,
+                device_id=self.runtime.electronic_device,
+            )
             return
         payload = stored["payload"]
         try:
@@ -571,7 +607,7 @@ class PosWindow:
             return
         self.invalidate_review()
         self.header_status.set(
-            f"Uporabnik: {self.operator_code}  •  "
+            f"Uporabnik: {self.authenticated_username}  •  FURS operater: {self.operator_code}  •  "
             f"{self.premise_var.get()}/{self.runtime.electronic_device}  •  "
             "TEST – FURS izklopljen"
         )
@@ -677,7 +713,9 @@ class PosWindow:
                 )
                 return
             try:
-                rows = pending_cash_disbursements(self.service_db)
+                rows = pending_cash_disbursements(
+                    office_db=self.office_db, service_db=self.service_db
+                )
             except Exception as exc:
                 messagebox.showerror("Blagajna", str(exc), parent=win)
                 return
@@ -1176,6 +1214,8 @@ class PosWindow:
                 payment_reference=self.payment_reference,
                 used_goods_agreement_id=self.used_agreement_id,
                 replacement_of_invoice_id=self.replacement_of_invoice_id,
+                authenticated_username=self.authenticated_username,
+                action_permissions=self.action_permissions,
             )
             self.header_status.set(f"Račun {self.issued_no}  •  {self.total:.2f} EUR  •  TEST/FURS izklopljen")
             self.premise_combo.configure(state="disabled")
@@ -1404,8 +1444,9 @@ class PosWindow:
         if ready:
             b = ttk.Button(footer, text="NATISNI KOPIJO", command=self.print_copy)
             b.pack(side="right", padx=4, pady=10); self.post_buttons.append(b)
-            b = ttk.Button(footer, text="STORNO RAČUNA", command=self.storno_current_invoice)
-            b.pack(side="right", padx=4, pady=10); self.post_buttons.append(b)
+            if self._can_storno():
+                b = ttk.Button(footer, text="STORNO RAČUNA", command=self.storno_current_invoice)
+                b.pack(side="right", padx=4, pady=10); self.post_buttons.append(b)
 
     def print_copy(self):
         try:
@@ -1439,6 +1480,8 @@ class PosWindow:
             c.close()
 
     def storno_current_invoice(self):
+        if not self._require_storno_permission():
+            return
         if not self.issued_id or not self.print_confirmed:
             return
         reason = simpledialog.askstring(
@@ -1458,6 +1501,8 @@ class PosWindow:
                 office_db=self.office_db, inventory_db=self.inventory_db,
                 service_db=self.service_db, document_id=int(self.issued_id),
                 reason=reason, operator_code=self.operator_code,
+                authenticated_username=self.authenticated_username,
+                action_permissions=self.action_permissions,
             )
             a4, receipt = generate_pos_pdfs(
                 office_db=self.office_db, document_id=storno_id,
@@ -1497,7 +1542,11 @@ class PosWindow:
             except Exception:
                 pass
             self._draft_after_id = None
-        abandon_pos_draft(self.office_db, self.issue_token)
+        abandon_pos_draft(
+            self.office_db, self.issue_token,
+            actor_username=self.authenticated_username,
+            device_id=self.runtime.electronic_device,
+        )
         self.lines.clear(); self.used_device_ids.clear(); self.issue_token=str(uuid.uuid4())
         self.payment_reference=self._reference_for_token(self.issue_token)
         self.used_agreement_id=None; self.used_agreement_path=None
@@ -1515,7 +1564,7 @@ class PosWindow:
         self.premise_combo.configure(state="readonly")
         self.review_btn.configure(text="KONČNI PREGLED", command=self.review)
         self.header_status.set(
-            f"Uporabnik: {self.operator_code}  •  "
+            f"Uporabnik: {self.authenticated_username}  •  FURS operater: {self.operator_code}  •  "
             f"{self.premise_var.get()}/{self.runtime.electronic_device}  •  "
             "TEST – FURS izklopljen"
         )
@@ -1527,6 +1576,8 @@ class PosWindow:
         self.recalc(); self.refresh_stock(); self.search_entry.focus_set()
 
     def choose_replacement_source(self):
+        if not self._require_storno_permission():
+            return
         if self.issued_id:
             return
         try:
@@ -1786,3 +1837,4 @@ class PosWindow:
 
 def open_pos(parent, **kwargs):
     return PosWindow(parent, **kwargs)
+
