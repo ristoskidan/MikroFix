@@ -7,6 +7,8 @@ from pathlib import Path
 from mikrofix_v30_cash import (
     CashJournalError, book_cash_disbursement, cash_session_snapshot,
     close_cash_session, ensure_cash_schema, open_cash_session,
+    generate_cash_journal_pdf,
+    list_cash_sessions,
     pending_cash_disbursements, record_cash_entry,
     require_open_cash_session,
 )
@@ -52,6 +54,32 @@ class CashJournalTests(unittest.TestCase):
         open_cash_session(self.db,premise_id="MFD",device_id="PIS",operator_code="DR",opening_cash=0)
         with self.assertRaises(CashJournalError):
             open_cash_session(self.db,premise_id="MFD",device_id="PIS",operator_code="DR",opening_cash=0)
+
+    def test_cash_journal_pdf_preserves_slovenian_characters(self):
+        sid, _ = open_cash_session(
+            self.db, premise_id="MFD", device_id="PIS",
+            operator_code="DR", opening_cash=10,
+        )
+        close_cash_session(
+            self.db, premise_id="MFD", device_id="PIS",
+            operator_code="DR", counted_cash=10, note="Šumniki: čšž ČŠŽ",
+        )
+        path = generate_cash_journal_pdf(
+            self.db, session_id=sid, output_dir=Path(self.tmp.name),
+            company={"legal_name": "MikroFIX", "address": "Paradiž 73"},
+        )
+        from pypdf import PdfReader
+        pages = PdfReader(str(path)).pages
+        text = "\n".join(page.extract_text() or "" for page in pages)
+        self.assertGreaterEqual(len(pages), 2)
+        self.assertIn("ZAKLJUČNI POVZETEK", pages[0].extract_text() or "")
+        self.assertIn("ARHIVSKA PRILOGA", text)
+        self.assertIn("Začetno stanje", text)
+        self.assertIn("Pričakovano stanje", text)
+        self.assertIn("Šumniki: čšž ČŠŽ", text)
+        sessions = list_cash_sessions(self.db, premise_id="MFD", device_id="PIS")
+        self.assertEqual(sessions[0]["id"], sid)
+        self.assertEqual(sessions[0]["status"], "CLOSED")
 
     def test_confirmed_buyback_disbursement_is_booked_exactly_once(self):
         service_db = Path(self.tmp.name) / "service.db"
@@ -294,4 +322,3 @@ class CashJournalTests(unittest.TestCase):
 
 
 if __name__=="__main__": unittest.main()
-

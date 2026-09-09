@@ -27,12 +27,17 @@ FURS_TEST_BASE = "https://blagajne-test.fu.gov.si:9002"
 FURS_TEST_ECHO_URL = f"{FURS_TEST_BASE}/v1/cash_registers/echo"
 FURS_TEST_INVOICE_URL = f"{FURS_TEST_BASE}/v1/cash_registers/invoices"
 FURS_TEST_PREMISE_URL = f"{FURS_TEST_BASE}/v1/cash_registers/invoices/register"
+FURS_PRODUCTION_BASE = "https://blagajne.fu.gov.si:9003"
+FURS_PRODUCTION_ECHO_URL = f"{FURS_PRODUCTION_BASE}/v1/cash_registers/echo"
+FURS_PRODUCTION_INVOICE_URL = f"{FURS_PRODUCTION_BASE}/v1/cash_registers/invoices"
+FURS_PRODUCTION_PREMISE_URL = f"{FURS_PRODUCTION_BASE}/v1/cash_registers/invoices/register"
 FURS_TECHNICAL_VERSION = "3.2 (23. 03. 2026)"
 _TEST_HOST = "blagajne-test.fu.gov.si"
 _TEST_PORT = 9002
 _CERT_DIR = Path(__file__).resolve().parent / "certs"
 FURS_TEST_CA_BUNDLE = _CERT_DIR / "furs-test-ca-bundle.pem"
 FURS_TEST_RESPONSE_CERTIFICATE = _CERT_DIR / "DavPotRacTEST.cer"
+FURS_PRODUCTION_RESPONSE_CERTIFICATE = _CERT_DIR / "DavPotRac.cer"
 
 
 class FursTestError(RuntimeError):
@@ -223,6 +228,120 @@ def load_test_certificate(path: str | Path, password: str) -> CertificateBundle:
     )
 
 
+def load_production_certificate(
+    path: str | Path, password: str, *, expected_tax_number: int | str
+) -> CertificateBundle:
+    """Odpre namensko produkcijsko potrdilo in zavrne testno identiteto."""
+    try:
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
+    except ImportError as exc:
+        raise FursTestError("CRYPTOGRAPHY_MISSING", "Manjka knjižnica cryptography.") from exc
+    cert_path = Path(path).expanduser().resolve()
+    if not cert_path.is_file() or cert_path.suffix.lower() not in {".p12", ".pfx"}:
+        raise FursTestError("CERTIFICATE_MISSING", "Produkcijsko potrdilo .p12/.pfx ni najdeno.")
+    if not password:
+        raise FursTestError("PASSWORD_MISSING", "Vpiši geslo produkcijskega potrdila.")
+    try:
+        key, certificate, additional = load_key_and_certificates(
+            cert_path.read_bytes(), password.encode("utf-8")
+        )
+    except Exception as exc:
+        raise FursTestError("CERTIFICATE_OPEN_FAILED", "Produkcijskega potrdila ni mogoče odpreti.") from exc
+    if certificate is None or key is None or not isinstance(key, rsa.RSAPrivateKey):
+        raise FursTestError("CERTIFICATE_INCOMPLETE", "Potrdilo nima uporabnega zasebnega ključa RSA.")
+    identity = f"{certificate.subject.rfc4514_string()},{certificate.issuer.rfc4514_string()}"
+    if "TEST" in identity.upper():
+        raise FursTestError("TEST_CERTIFICATE_REJECTED", "Testno potrdilo ni dovoljeno v produkciji.")
+    tax_number = _extract_test_tax_number(certificate)
+    if tax_number != int(str(expected_tax_number).strip()):
+        raise FursTestError(
+            "CERTIFICATE_TAX_MISMATCH",
+            "Davčna številka v potrdilu se ne ujema z davčno številko podjetja.",
+        )
+    not_before = _certificate_time(certificate, "not_valid_before_utc", "not_valid_before")
+    not_after = _certificate_time(certificate, "not_valid_after_utc", "not_valid_after")
+    now = _utc_now()
+    if not not_before <= now <= not_after:
+        raise FursTestError("CERTIFICATE_EXPIRED", "Produkcijsko potrdilo ni časovno veljavno.")
+    return CertificateBundle(
+        private_key=key, certificate=certificate,
+        additional_certificates=tuple(additional or ()),
+        subject_name=certificate.subject.rfc4514_string(),
+        issuer_name=certificate.issuer.rfc4514_string(),
+        serial_number=int(certificate.serial_number), tax_number=tax_number,
+        not_valid_before=not_before, not_valid_after=not_after,
+    )
+
+
+def build_fiscal_qr_payload(
+    *, zoi: str, tax_number: int | str, issue_datetime: datetime
+) -> str:
+    """Vrne uradni 60-mestni zapis za QR/PDF417/Code128 na računu."""
+    zoi_text = str(zoi or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", zoi_text):
+        raise FursTestError("ZOI_INVALID", "ZOI mora imeti 32 šestnajstiških znakov.")
+    tax = str(tax_number).strip()
+    if not re.fullmatch(r"[1-9][0-9]{7}", tax):
+        raise FursTestError("TAX_NUMBER_INVALID", "Davčna številka mora imeti 8 številk.")
+    decimal_zoi = f"{int(zoi_text, 16):039d}"
+    body = f"{decimal_zoi}{tax}{issue_datetime.strftime('%y%m%d%H%M%S')}"
+    control = sum(int(char) for char in body) % 10
+    result = f"{body}{control}"
+    if len(result) != 60:
+        raise FursTestError("QR_LENGTH", "Davčni QR zapis nima 60 številk.")
+    return result
+
+
+def build_invoice_request(
+    bundle: CertificateBundle, *, issue_datetime: datetime,
+    invoice_number: str, business_premise_id: str, electronic_device_id: str,
+    invoice_amount: Decimal | float | str, payment_amount: Decimal | float | str,
+    operator_tax_number: int | str, numbering_structure: str = "B",
+    customer_vat_number: str = "", subsequent_submit: bool = False,
+    reference_invoice: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Sestavi produkcijsko/testno sporočilo za zavezanca, ki ni v sistemu DDV."""
+    premise = _validate_identifier(business_premise_id, "Oznaka poslovnega prostora")
+    device = _validate_identifier(electronic_device_id, "Oznaka elektronske naprave")
+    number = _validate_identifier(invoice_number, "Številka računa")
+    amount = Decimal(str(invoice_amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    payment = Decimal(str(payment_amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    issued_text = issue_datetime.strftime("%Y-%m-%dT%H:%M:%S")
+    zoi = calculate_zoi(
+        bundle, issue_datetime=issue_datetime, invoice_number=number,
+        business_premise_id=premise, electronic_device_id=device,
+        invoice_amount=amount,
+    )
+    invoice: dict[str, Any] = {
+        "TaxNumber": bundle.tax_number,
+        "IssueDateTime": issued_text,
+        "NumberingStructure": str(numbering_structure),
+        "InvoiceIdentifier": {
+            "BusinessPremiseID": premise,
+            "ElectronicDeviceID": device,
+            "InvoiceNumber": number,
+        },
+        "InvoiceAmount": float(amount),
+        "PaymentAmount": float(payment),
+        "TaxesPerSeller": [{"ExemptVATTaxableAmount": float(amount)}],
+        "OperatorTaxNumber": int(str(operator_tax_number)),
+        "ProtectedID": zoi,
+    }
+    if customer_vat_number:
+        invoice["CustomerVATNumber"] = str(customer_vat_number).strip()
+    if subsequent_submit:
+        invoice["SubsequentSubmit"] = True
+    if reference_invoice:
+        invoice["ReferenceInvoice"] = [reference_invoice]
+    return {
+        "InvoiceRequest": {
+            "Header": {"MessageID": str(uuid.uuid4()), "DateTime": issued_text},
+            "Invoice": invoice,
+        }
+    }
+
+
 def calculate_zoi(
     bundle: CertificateBundle,
     *,
@@ -309,8 +428,9 @@ def decode_and_verify_test_response(
     token: str,
     *,
     trusted_certificate_path: str | Path = FURS_TEST_RESPONSE_CERTIFICATE,
+    expected_common_name: str = "DavPotRacTEST",
 ) -> dict[str, Any]:
-    """Preveri podpis testnega FURS JWS odgovora in vrne njegovo vsebino."""
+    """Preveri podpis FURS JWS odgovora z izrecno pripetim uradnim potrdilom."""
     try:
         from cryptography import x509
         from cryptography.hazmat.primitives import hashes
@@ -345,11 +465,14 @@ def decode_and_verify_test_response(
             "Podpisno potrdilo odgovora se ne ujema z uradnim potrdilom FURS TEST.",
         )
 
-    response_identity = f"{leaf.subject.rfc4514_string()},{leaf.issuer.rfc4514_string()}".upper()
-    if "DAVPOTRACTEST" not in response_identity:
+    from cryptography.x509.oid import NameOID
+    common_names = [
+        str(item.value) for item in leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    ]
+    if common_names != [expected_common_name]:
         raise FursTestError(
-            "NON_TEST_RESPONSE",
-            "Odgovor ni podpisan s potrdilom FURS testnega okolja.",
+            "WRONG_RESPONSE_ENVIRONMENT",
+            "Odgovor ni podpisan s pričakovanim uradnim potrdilom FURS.",
         )
     now = _utc_now()
     if not (
@@ -568,8 +691,27 @@ def _assert_test_url(url: str) -> None:
         )
 
 
+def _assert_production_url(url: str) -> None:
+    parsed = urlparse(url)
+    if (
+        parsed.scheme != "https" or parsed.hostname != "blagajne.fu.gov.si"
+        or parsed.port != 9003 or not parsed.path.startswith("/v1/cash_registers")
+    ):
+        raise FursTestError(
+            "ENDPOINT_BLOCKED",
+            "Produkcijski modul sme komunicirati samo z uradnim naslovom FURS na vratih 9003.",
+        )
+
+
 class FursTestClient:
     """HTTP odjemalec, ki je konstrukcijsko omejen samo na FURS TEST."""
+
+    ECHO_URL = FURS_TEST_ECHO_URL
+    INVOICE_URL = FURS_TEST_INVOICE_URL
+    PREMISE_URL = FURS_TEST_PREMISE_URL
+    RESPONSE_CERTIFICATE = FURS_TEST_RESPONSE_CERTIFICATE
+    RESPONSE_COMMON_NAME = "DavPotRacTEST"
+    ENVIRONMENT_LABEL = "FURS TEST"
 
     def __init__(
         self,
@@ -589,7 +731,7 @@ class FursTestClient:
         self.session_factory = session_factory
 
     def _request(self, url: str, body: dict[str, Any], bundle: CertificateBundle) -> dict[str, Any]:
-        _assert_test_url(url)
+        self._assert_url(url)
         try:
             from cryptography.hazmat.primitives.serialization import (
                 Encoding,
@@ -661,8 +803,8 @@ class FursTestClient:
                 raise
             except Exception as exc:
                 raise FursTestError(
-                    "TEST_CONNECTION_FAILED",
-                    f"Povezava s FURS TEST ni uspela: {exc}",
+                    "CONNECTION_FAILED",
+                    f"Povezava s {self.ENVIRONMENT_LABEL} ni uspela: {exc}",
                 ) from exc
             finally:
                 try:
@@ -671,10 +813,10 @@ class FursTestClient:
                     pass
 
     def echo(self, bundle: CertificateBundle, text: str = "mikrofix") -> str:
-        data = self._request(FURS_TEST_ECHO_URL, {"EchoRequest": text}, bundle)
+        data = self._request(self.ECHO_URL, {"EchoRequest": text}, bundle)
         response = str(data.get("EchoResponse") or "")
         if response != text:
-            raise FursTestError("ECHO_MISMATCH", "FURS TEST ni vrnil pričakovanega odgovora.")
+            raise FursTestError("ECHO_MISMATCH", f"{self.ENVIRONMENT_LABEL} ni vrnil pričakovanega odgovora.")
         return response
 
     def submit_invoice(
@@ -685,10 +827,13 @@ class FursTestClient:
         )
         token = create_jws(payload, bundle)
         raw_response = self._request(
-            FURS_TEST_INVOICE_URL, {"token": token}, bundle
+            self.INVOICE_URL, {"token": token}, bundle
         )
         response_token = str(raw_response.get("token") or "")
-        verified_payload = decode_and_verify_test_response(response_token)
+        verified_payload = decode_and_verify_test_response(
+            response_token, trusted_certificate_path=self.RESPONSE_CERTIFICATE,
+            expected_common_name=self.RESPONSE_COMMON_NAME,
+        )
         parsed = parse_invoice_response(
             verified_payload, expected_message_id=request_message_id
         )
@@ -705,14 +850,135 @@ class FursTestClient:
         )
         token = create_jws(payload, bundle)
         raw_response = self._request(
-            FURS_TEST_PREMISE_URL, {"token": token}, bundle
+            self.PREMISE_URL, {"token": token}, bundle
         )
         response_token = str(raw_response.get("token") or "")
-        verified_payload = decode_and_verify_test_response(response_token)
+        verified_payload = decode_and_verify_test_response(
+            response_token, trusted_certificate_path=self.RESPONSE_CERTIFICATE,
+            expected_common_name=self.RESPONSE_COMMON_NAME,
+        )
         parsed = parse_business_premise_response(
             verified_payload, expected_message_id=request_message_id
         )
         return parsed, token, raw_response
+
+    def _assert_url(self, url: str) -> None:
+        _assert_test_url(url)
+
+
+class FursProductionClient(FursTestClient):
+    """Odjemalec, zaklenjen izključno na uradno produkcijsko okolje."""
+
+    ECHO_URL = FURS_PRODUCTION_ECHO_URL
+    INVOICE_URL = FURS_PRODUCTION_INVOICE_URL
+    PREMISE_URL = FURS_PRODUCTION_PREMISE_URL
+    RESPONSE_CERTIFICATE = FURS_PRODUCTION_RESPONSE_CERTIFICATE
+    RESPONSE_COMMON_NAME = "DavPotRac"
+    ENVIRONMENT_LABEL = "FURS PRODUKCIJO"
+
+    def _assert_url(self, url: str) -> None:
+        _assert_production_url(url)
+
+
+class ProductionFiscalizer:
+    """Klicni adapter za atomsko izdajo POS računa in nadzor neznanega stanja."""
+
+    def __init__(self, bundle: CertificateBundle, client: FursProductionClient):
+        self.bundle = bundle
+        self.client = client
+
+    def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
+        payload = build_invoice_request(
+            self.bundle,
+            issue_datetime=request["issue_datetime"],
+            invoice_number=str(request["sequence"]),
+            business_premise_id=request["premise_id"],
+            electronic_device_id=request["device_id"],
+            invoice_amount=request["invoice_amount"],
+            payment_amount=request["payment_amount"],
+            operator_tax_number=request["operator_tax_number"],
+            numbering_structure=request.get("numbering_structure", "B"),
+            customer_vat_number=request.get("customer_vat_number", ""),
+            subsequent_submit=bool(request.get("subsequent_submit", False)),
+            reference_invoice=request.get("reference_invoice"),
+        )
+        invoice = payload["InvoiceRequest"]["Invoice"]
+        message_id = payload["InvoiceRequest"]["Header"]["MessageID"]
+        try:
+            result, _token, raw_response = self.client.submit_invoice(self.bundle, payload)
+        except FursTestError as exc:
+            # Po začetku omrežnega klica ni varno sklepati, da FURS računa ni
+            # sprejel. Lokalni račun ostane zaklenjen za poznejšo uskladitev.
+            uncertain_codes = {
+                "CONNECTION_FAILED", "RESPONSE_FORMAT", "RESPONSE_DECODE",
+                "RESPONSE_CERTIFICATE", "RESPONSE_CERTIFICATE_UNTRUSTED",
+                "WRONG_RESPONSE_ENVIRONMENT", "RESPONSE_CERTIFICATE_TIME",
+                "RESPONSE_KEY_TYPE", "RESPONSE_SIGNATURE", "RESPONSE_MESSAGE_ID",
+            }
+            if exc.code not in uncertain_codes:
+                raise
+            return {
+                "status": "PENDING_RECONCILIATION", "zoi": invoice["ProtectedID"],
+                "eor": "", "message_id": message_id, "payload": payload,
+                "tax_number": self.bundle.tax_number,
+                "response": {}, "error_code": exc.code, "error_message": str(exc),
+            }
+        if not result.ok:
+            raise FursTestError(
+                result.error_code or "FURS_REJECTED",
+                result.error_message or "FURS je račun zavrnil.",
+            )
+        return {
+            "status": "CONFIRMED", "zoi": invoice["ProtectedID"],
+            "eor": result.eor, "message_id": message_id, "payload": payload,
+            "tax_number": self.bundle.tax_number,
+            "response": raw_response, "error_code": "", "error_message": "",
+        }
+
+    def retry_existing_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Ponovi isti podpisljivi zahtevek brez novega MessageID ali ZOI."""
+        try:
+            invoice = payload["InvoiceRequest"]["Invoice"]
+            message_id = str(payload["InvoiceRequest"]["Header"]["MessageID"])
+            zoi = str(invoice["ProtectedID"])
+        except (KeyError, TypeError) as exc:
+            raise FursTestError(
+                "RECONCILIATION_PAYLOAD_INVALID",
+                "Shranjeni FURS zahtevek ni popoln; samodejno ponovno pošiljanje ni dovoljeno.",
+            ) from exc
+        if int(invoice.get("TaxNumber") or 0) != int(self.bundle.tax_number):
+            raise FursTestError(
+                "RECONCILIATION_TAX_MISMATCH",
+                "Shranjeni zahtevek ne pripada produkcijskemu certifikatu.",
+            )
+        try:
+            result, _token, raw_response = self.client.submit_invoice(self.bundle, payload)
+        except FursTestError as exc:
+            uncertain_codes = {
+                "CONNECTION_FAILED", "RESPONSE_FORMAT", "RESPONSE_DECODE",
+                "RESPONSE_CERTIFICATE", "RESPONSE_CERTIFICATE_UNTRUSTED",
+                "WRONG_RESPONSE_ENVIRONMENT", "RESPONSE_CERTIFICATE_TIME",
+                "RESPONSE_KEY_TYPE", "RESPONSE_SIGNATURE", "RESPONSE_MESSAGE_ID",
+            }
+            if exc.code not in uncertain_codes:
+                raise
+            return {
+                "status": "PENDING_RECONCILIATION", "zoi": zoi, "eor": "",
+                "message_id": message_id, "payload": payload,
+                "tax_number": self.bundle.tax_number, "response": {},
+                "error_code": exc.code, "error_message": str(exc),
+            }
+        if not result.ok:
+            raise FursTestError(
+                result.error_code or "FURS_REJECTED",
+                result.error_message or "FURS je ponovljeni zahtevek zavrnil.",
+            )
+        return {
+            "status": "CONFIRMED", "zoi": zoi, "eor": result.eor,
+            "message_id": message_id, "payload": payload,
+            "tax_number": self.bundle.tax_number, "response": raw_response,
+            "error_code": "", "error_message": "",
+        }
 
 
 class FursTestStore:

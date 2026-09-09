@@ -8,10 +8,10 @@ import re
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Callable, Iterable
 from xml.sax.saxutils import escape
 
 from mikrofix_v30_lots import (
@@ -28,6 +28,7 @@ STORNO_DOCUMENT_PERMISSION = "STORNO_DOCUMENT"
 
 PAYMENT_METHOD_LABELS = {
     "CASH": "Gotovina",
+    "CARD": "Plačilna kartica",
     "BANK_TRANSFER": "Bančno nakazilo (TRR)",
 }
 PAYMENT_STATUS_LABELS = {
@@ -88,10 +89,15 @@ class PosLine:
     acquisition_cost: Decimal = Decimal("0.00")
     requested_discount_pct: Decimal = Decimal("0.00")
     service_tier: str = ""
+    service_billable_minutes: int = 0
+    service_tariff_version: str = ""
+    service_first_rate: Decimal = Decimal("0.00")
+    service_extra_half_hour_rate: Decimal = Decimal("0.00")
     stock_already_consumed: bool = False
     origin_kind: str = "POS_ADDED"
     origin_id: int | None = None
     source_locked: bool = False
+    requested_lot_serial: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,8 +112,12 @@ def calculate_line(line: PosLine, labor_floor: object = 22) -> CalculatedLine:
     qty = dec(line.quantity)
     base = dec(line.base_unit_price)
     requested = max(Decimal("0"), min(Decimal("100"), dec(line.requested_discount_pct)))
-    if qty <= 0 or base <= 0:
+    if qty == 0 or base <= 0:
         raise PosError(f"Postavka »{line.name}« nima veljavne količine ali cene.")
+    if qty < 0 and str(line.origin_kind or "") != "POS_CORRECTION":
+        raise PosError(
+            f"Negativna postavka »{line.name}« mora biti evidentirana kot korekcija."
+        )
 
     if line.line_kind == "ARTICLE":
         floor = (dec(line.acquisition_cost) * Decimal("1.05")).quantize(CENT, ROUND_HALF_UP)
@@ -132,7 +142,43 @@ def calculate_line(line: PosLine, labor_floor: object = 22) -> CalculatedLine:
     return CalculatedLine(line, applied, final, (final * qty).quantize(CENT, ROUND_HALF_UP))
 
 
-def service_price(tier: str, extra_half_hours: int, settings: dict) -> Decimal:
+def net_public_pos_lines(lines: Iterable[PosLine]) -> list[PosLine]:
+    """Pretvori sledljive interne +/- vrstice v pozitivne javne postavke računa."""
+    from dataclasses import replace
+
+    result: list[PosLine] = []
+    positions: dict[tuple, int] = {}
+    for line in lines:
+        if line.line_kind != "ARTICLE" or line.source_locked:
+            result.append(line)
+            continue
+        key = (
+            line.article_id, line.barcode, line.code, line.name,
+            str(dec(line.base_unit_price)), str(dec(line.requested_discount_pct)),
+            line.requested_lot_serial,
+        )
+        if key not in positions:
+            positions[key] = len(result)
+            result.append(replace(line, quantity=Decimal("0"), origin_kind="POS_ADDED"))
+        position = positions[key]
+        result[position] = replace(
+            result[position], quantity=dec(result[position].quantity) + dec(line.quantity)
+        )
+    public: list[PosLine] = []
+    for line in result:
+        quantity = dec(line.quantity)
+        if quantity < 0:
+            raise PosError(
+                f"Korekcije artikla »{line.name}« presegajo dodano količino."
+            )
+        if quantity > 0:
+            public.append(line)
+    if not public:
+        raise PosError("Po količinskih korekcijah račun nima nobene postavke.")
+    return public
+
+
+def service_tariff_snapshot(tier: str, extra_half_hours: int, settings: dict) -> dict:
     extra = max(0, int(extra_half_hours or 0))
     pricing = settings.get("pricing", {})
     if tier == "T1":
@@ -141,7 +187,100 @@ def service_price(tier: str, extra_half_hours: int, settings: dict) -> Decimal:
         first = dec(pricing.get("onsite_first_hour_eur", 90))
     else:
         raise PosError("Storitev mora biti T1 ali T2.")
-    return first + dec(15) * extra
+    extra_rate = dec(pricing.get("extra_half_hour_eur", 15))
+    return {
+        "price": first + extra_rate * extra,
+        "billable_minutes": 60 + 30 * extra,
+        "tariff_version": str(
+            pricing.get("tariff_version") or "T1T2-v1-2026-09-04"
+        ),
+        "first_rate": first,
+        "extra_half_hour_rate": extra_rate,
+        "extra_half_hours": extra,
+    }
+
+
+def service_labor_from_minutes(
+    contract_context: str,
+    elapsed_minutes: int,
+    settings: dict,
+    *,
+    description: str = "Delo",
+) -> dict:
+    """Pretvori dejanski čas zaključka v eno zaklenjeno postavko dela."""
+    try:
+        elapsed = int(elapsed_minutes)
+    except (TypeError, ValueError) as exc:
+        raise PosError("Čas dela mora biti vpisan v celih minutah.") from exc
+    if elapsed < 1:
+        raise PosError("Čas dela mora biti najmanj 1 minuta.")
+
+    context = str(contract_context or "").strip().upper()
+    tier = "T2" if context == "MFT_TEREN" else "T1"
+    return service_labor_for_tier_minutes(
+        tier, elapsed, settings, description=description
+    )
+
+
+def service_labor_for_tier_minutes(
+    tier: str,
+    elapsed_minutes: int,
+    settings: dict,
+    *,
+    description: str = "Delo",
+) -> dict:
+    """Izračun ročno dodane T1/T2 postavke iz dejanskih minut."""
+    try:
+        elapsed = int(elapsed_minutes)
+    except (TypeError, ValueError) as exc:
+        raise PosError("Čas dela mora biti vpisan v celih minutah.") from exc
+    if elapsed < 1:
+        raise PosError("Čas dela mora biti najmanj 1 minuta.")
+    tier = str(tier or "").strip().upper()
+    if tier not in {"T1", "T2"}:
+        raise PosError("Storitev mora biti T1 ali T2.")
+    extra_half_hours = max(0, (elapsed - 60 + 29) // 30)
+    tariff = service_tariff_snapshot(tier, extra_half_hours, settings)
+    return {
+        **tariff,
+        "tier": tier,
+        "description": str(description or "").strip() or "Delo",
+        "elapsed_minutes": elapsed,
+    }
+
+
+def service_price(tier: str, extra_half_hours: int, settings: dict) -> Decimal:
+    return service_tariff_snapshot(tier, extra_half_hours, settings)["price"]
+
+
+def service_line_public_name(line: PosLine | dict) -> str:
+    """Javni opis storitve dopolni s preverljivim časom in tarifnim izračunom."""
+    get = line.get if isinstance(line, dict) else lambda key, default=None: getattr(line, key, default)
+    name = str(get("article_name", get("name", "")) or "")
+    tier = str(get("service_tier", "") or "").upper()
+    minutes = int(get("service_billable_minutes", 0) or 0)
+    if tier not in {"T1", "T2"} or minutes < 60:
+        return name
+    extra = max(0, (minutes - 60) // 30)
+    first_rate = dec(get("service_first_rate", 0))
+    extra_rate = dec(get("service_extra_half_hour_rate", 0))
+    version = str(get("service_tariff_version", "") or "")
+    duration = "1 začeta ura" + (f" + {extra} × 30 min" if extra else "")
+    calculation = f"{first_rate:.2f} EUR"
+    if extra:
+        calculation += f" + {extra} × {extra_rate:.2f} EUR"
+    suffix = f"; tarifa {version}" if version else ""
+    return f"{name} ({tier}: {duration}; {calculation}{suffix})"
+
+
+def service_line_public_quantity(line: PosLine | dict) -> str:
+    """Na dokumentu je merska količina dela čas v minutah, ne umetna količina 1."""
+    get = line.get if isinstance(line, dict) else lambda key, default=None: getattr(line, key, default)
+    minutes = int(get("service_billable_minutes", 0) or 0)
+    tier = str(get("service_tier", "") or "").upper()
+    if tier in {"T1", "T2"} and minutes > 0:
+        return f"{minutes} min"
+    return f"{dec(get('qty', get('quantity', 0))):.2f}"
 
 
 def default_service_description(tier: str) -> str:
@@ -157,8 +296,102 @@ def default_service_description(tier: str) -> str:
 
 
 def ensure_pos_schema(office_db: Path | str) -> None:
+    """Pripravi osnovno Office in razširjeno POS shemo tudi v povsem prazni bazi.
+
+    Blagajna se lahko zažene neposredno iz glavnega menija, zato ne sme biti
+    odvisna od tega, ali je bil modul Office v tej seji že odprt.
+    """
     c = sqlite3.connect(str(office_db))
     try:
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS partners(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                address TEXT,
+                post_city TEXT,
+                country TEXT,
+                tax_no TEXT,
+                registration_no TEXT,
+                iban TEXT,
+                phone TEXT,
+                email TEXT,
+                contact_person TEXT,
+                partner_type TEXT NOT NULL DEFAULT 'DOBAVITELJ',
+                pcd_days REAL NOT NULL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS documents(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_no TEXT NOT NULL UNIQUE,
+                doc_type TEXT NOT NULL,
+                partner_id INTEGER,
+                partner_name_snapshot TEXT,
+                partner_address_snapshot TEXT,
+                partner_tax_snapshot TEXT,
+                partner_pcd_snapshot REAL NOT NULL DEFAULT 0,
+                external_no TEXT,
+                date TEXT NOT NULL,
+                order_date TEXT,
+                received_date TEXT,
+                due_date TEXT,
+                currency TEXT NOT NULL DEFAULT 'EUR',
+                delivery_cost REAL NOT NULL DEFAULT 0,
+                stock_effect INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'OSNUTEK',
+                linked_claim_id INTEGER,
+                linked_claim_no TEXT,
+                linked_service_id INTEGER,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                booked_at TEXT,
+                FOREIGN KEY(partner_id) REFERENCES partners(id)
+            );
+            CREATE TABLE IF NOT EXISTS document_items(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL,
+                article_id INTEGER,
+                barcode TEXT,
+                article_name TEXT NOT NULL,
+                internal_code TEXT,
+                qty REAL NOT NULL DEFAULT 1,
+                unit_price REAL NOT NULL DEFAULT 0,
+                discount_pct REAL NOT NULL DEFAULT 0,
+                vat_pct REAL NOT NULL DEFAULT 0,
+                delivery_share REAL NOT NULL DEFAULT 0,
+                actual_unit_cost REAL NOT NULL DEFAULT 0,
+                margin_pct REAL NOT NULL DEFAULT 0,
+                calculated_price REAL NOT NULL DEFAULT 0,
+                recommended_price REAL NOT NULL DEFAULT 0,
+                sell_price REAL NOT NULL DEFAULT 0,
+                line_net REAL NOT NULL DEFAULT 0,
+                line_vat REAL NOT NULL DEFAULT 0,
+                line_total REAL NOT NULL DEFAULT 0,
+                FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_partner_name ON partners(name COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_doc_date ON documents(date);
+            CREATE INDEX IF NOT EXISTS idx_doc_type ON documents(doc_type);
+            CREATE INDEX IF NOT EXISTS idx_doc_service ON documents(linked_service_id);
+            CREATE TABLE IF NOT EXISTS sales_claims_v31(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                claim_no TEXT NOT NULL UNIQUE,
+                document_id INTEGER NOT NULL,
+                opened_at TEXT NOT NULL,
+                opened_by TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                resolved_at TEXT,
+                resolution TEXT,
+                FOREIGN KEY(document_id) REFERENCES documents(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sales_claim_document_v31
+                ON sales_claims_v31(document_id,status);
+            """
+        )
         doc_cols = {row[1] for row in c.execute("PRAGMA table_info(documents)")}
         additions = {
             "pos_issue_token": "TEXT",
@@ -187,6 +420,15 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             "replacement_of_invoice_id": "INTEGER",
             "payment_reference": "TEXT",
             "cash_session_id": "INTEGER",
+            "furs_zoi": "TEXT",
+            "furs_eor": "TEXT",
+            "furs_qr_payload": "TEXT",
+            "furs_message_id": "TEXT",
+            "furs_error_code": "TEXT",
+            "furs_error_message": "TEXT",
+            "payment_received_at": "TEXT",
+            "payment_received_method": "TEXT",
+            "furs_submission_deadline": "TEXT",
         }
         for name, ddl in additions.items():
             if name not in doc_cols:
@@ -196,6 +438,10 @@ def ensure_pos_schema(office_db: Path | str) -> None:
         item_additions = {
             "line_kind": "TEXT NOT NULL DEFAULT 'ARTICLE'",
             "service_tier": "TEXT",
+            "service_billable_minutes": "INTEGER NOT NULL DEFAULT 0",
+            "service_tariff_version": "TEXT",
+            "service_first_rate": "REAL NOT NULL DEFAULT 0",
+            "service_extra_half_hour_rate": "REAL NOT NULL DEFAULT 0",
             "requested_discount_pct": "REAL NOT NULL DEFAULT 0",
             "stock_already_consumed": "INTEGER NOT NULL DEFAULT 0",
             "origin_kind": "TEXT NOT NULL DEFAULT 'POS_ADDED'",
@@ -286,6 +532,23 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_pos_drafts_recovery_v31
                 ON pos_drafts_v31(status,operator_code,updated_at);
+            CREATE TABLE IF NOT EXISTS furs_outbox_v30(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL UNIQUE,
+                message_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                response_json TEXT NOT NULL DEFAULT '{}',
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                confirmed_at TEXT,
+                FOREIGN KEY(document_id) REFERENCES documents(id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_furs_outbox_status_v30
+                ON furs_outbox_v30(status,id);
             """
         )
         ensure_cash_schema_connection(c)
@@ -306,7 +569,135 @@ def ensure_pos_schema(office_db: Path | str) -> None:
             "CREATE INDEX IF NOT EXISTS idx_pos_drafts_actor_recovery_v31 "
             "ON pos_drafts_v31(status,actor_username,device_id,updated_at)"
         )
+        agreement_cols = {
+            row[1] for row in c.execute("PRAGMA table_info(used_goods_agreements_v30)")
+        }
+        if "customer_partner_id" not in agreement_cols:
+            c.execute(
+                "ALTER TABLE used_goods_agreements_v30 ADD COLUMN customer_partner_id INTEGER"
+            )
         c.commit()
+    finally:
+        c.close()
+
+
+def customer_partner_by_id(
+    office_db: Path | str, partner_id: int,
+) -> dict[str, Any] | None:
+    """Vrne enoten kupčev zapis za F9, račun in garancijski dogovor."""
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        row = c.execute(
+            """
+            SELECT id,name,address,post_city,country,tax_no,registration_no,
+                   phone,email,partner_type
+            FROM partners WHERE id=?
+            """,
+            (int(partner_id),),
+        ).fetchone()
+    finally:
+        c.close()
+    if not row:
+        return None
+    street = str(row["address"] or "").strip()
+    post_city = str(row["post_city"] or "").strip()
+    address = ", ".join(value for value in (street, post_city) if value)
+    return {
+        "id": int(row["id"]), "name": str(row["name"] or "").strip(),
+        "address": address, "street": street, "post_city": post_city,
+        "country": str(row["country"] or "").strip(),
+        "tax_number": str(row["tax_no"] or "").strip(),
+        "registration_number": str(row["registration_no"] or "").strip(),
+        "phone": str(row["phone"] or "").strip(),
+        "email": str(row["email"] or "").strip(),
+        "partner_type": str(row["partner_type"] or "").strip(),
+    }
+
+
+def list_customer_partners(office_db: Path | str) -> list[dict[str, Any]]:
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    try:
+        ids = [
+            int(row[0]) for row in c.execute(
+                "SELECT id FROM partners ORDER BY name COLLATE NOCASE,id"
+            ).fetchall()
+        ]
+    finally:
+        c.close()
+    return [partner for pid in ids if (partner := customer_partner_by_id(office_db, pid))]
+
+
+def save_customer_partner(
+    office_db: Path | str, customer: dict[str, str], *,
+    preferred_partner_id: int | None = None,
+) -> int:
+    """Poišče ali ustvari partnerja in vrne ID, ki se veže na trenutni račun."""
+    ensure_pos_schema(office_db)
+    name = str(customer.get("name") or "").strip()
+    address = str(customer.get("address") or "").strip()
+    tax = re.sub(r"\D", "", str(customer.get("tax_number") or ""))
+    phone = str(customer.get("phone") or "").strip()
+    email = str(customer.get("email") or "").strip()
+    if not name or name == "Končni kupec":
+        raise PosError("Vpiši ali izberi konkretnega kupca.")
+    c = sqlite3.connect(str(office_db))
+    try:
+        if preferred_partner_id is not None:
+            row = c.execute(
+                "SELECT id FROM partners WHERE id=?", (int(preferred_partner_id),)
+            ).fetchone()
+            if not row:
+                raise PosError("Izbrani partner ne obstaja več.")
+            return int(row[0])
+        row = None
+        if tax:
+            row = c.execute(
+                "SELECT id FROM partners WHERE replace(replace(tax_no,'SI',''),' ','')=? "
+                "ORDER BY id LIMIT 1", (tax,),
+            ).fetchone()
+        if row is None:
+            row = c.execute(
+                """
+                SELECT id FROM partners
+                WHERE lower(trim(name))=lower(?)
+                  AND lower(trim(COALESCE(address,'')))=lower(?)
+                ORDER BY id LIMIT 1
+                """,
+                (name, address),
+            ).fetchone()
+        if row:
+            partner_id = int(row[0])
+            c.execute(
+                """
+                UPDATE partners SET phone=CASE WHEN ?<>'' THEN ? ELSE phone END,
+                    email=CASE WHEN ?<>'' THEN ? ELSE email END,
+                    partner_type=CASE WHEN partner_type='DOBAVITELJ' THEN 'OBOJE' ELSE partner_type END,
+                    updated_at=? WHERE id=?
+                """,
+                (phone, phone, email, email, datetime.now().isoformat(timespec="seconds"), partner_id),
+            )
+        else:
+            now = datetime.now().isoformat(timespec="seconds")
+            cursor = c.execute(
+                """
+                INSERT INTO partners(
+                    name,address,post_city,country,tax_no,registration_no,iban,
+                    phone,email,contact_person,partner_type,pcd_days,notes,
+                    created_at,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (name,address,"","Slovenija",tax,"","",phone,email,"","KUPEC",0,
+                 "Ustvarjeno in pripeto prek F9 v Blagajni.",now,now),
+            )
+            partner_id = int(cursor.lastrowid)
+        c.commit()
+        return partner_id
+    except Exception:
+        c.rollback()
+        raise
     finally:
         c.close()
 
@@ -457,11 +848,15 @@ def search_inventory(inventory_db: Path | str, query: str = "", limit: int = 100
         c.commit()
         q = str(query or "").strip()
         params: list[object] = []
+        select_params: list[object] = []
+        matched_lot = "'' AS requested_lot_serial"
         where = "i.active=1 AND (i.stock_qty-COALESCE(i.reserved_qty,0))>0"
         if q:
-            where += " AND (i.barcode LIKE ? OR i.article_name LIKE ? OR i.internal_code LIKE ? OR i.supplier_sku LIKE ?)"
+            where += " AND (i.barcode LIKE ? OR i.article_name LIKE ? OR i.internal_code LIKE ? OR i.supplier_sku LIKE ? OR EXISTS(SELECT 1 FROM inventory_lots_v30 lx WHERE lx.article_id=i.id AND lx.status='ACTIVE' AND lx.quantity_available>0 AND lx.lot_serial LIKE ?))"
             p = f"%{q}%"
-            params.extend([p, p, p, p])
+            params.extend([p, p, p, p, p])
+            matched_lot = "COALESCE((SELECT lx.lot_serial FROM inventory_lots_v30 lx WHERE lx.article_id=i.id AND lx.status='ACTIVE' AND lx.quantity_available>0 AND lx.lot_serial=? LIMIT 1),'') AS requested_lot_serial"
+            select_params.append(q)
         params.append(int(limit))
         rows = c.execute(
             f"""
@@ -475,11 +870,12 @@ def search_inventory(inventory_db: Path | str, query: str = "", limit: int = 100
                    COALESCE(i.category,'') AS category,
                    COALESCE(i.lot_serial,'') AS lot_serial,
                    COALESCE(i.source_kind,'') AS source_kind,
-                   COALESCE(i.source_id,0) AS source_id
+                   COALESCE(i.source_id,0) AS source_id,
+                   {matched_lot}
             FROM inventory_items i WHERE {where}
             ORDER BY i.article_name COLLATE NOCASE, i.barcode LIMIT ?
             """,
-            params,
+            select_params + params,
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
@@ -595,13 +991,24 @@ def _complete_linked_service(
     c: sqlite3.Connection, *, service_id: int, service_order_id: int | None,
     invoice_no: str, document_id: int,
 ) -> None:
+    service_columns = {
+        row[1] for row in c.execute("PRAGMA servicedb.table_info(service)")
+    }
+    custody_sql = ""
+    params: list[object] = [invoice_no, int(document_id)]
+    if "ready_for_pickup_at" in service_columns:
+        custody_sql = (
+            ", ready_for_pickup_at=?, picked_up_at=NULL, "
+            "final_notice_recorded_at=NULL"
+        )
+        params.append(datetime.now().isoformat(timespec="seconds"))
+    params.append(int(service_id))
     cursor = c.execute(
-        """
-        UPDATE servicedb.service
-        SET invoice_no=?, office_invoice_id=?
-        WHERE id=? AND trim(COALESCE(invoice_no,''))='' AND office_invoice_id IS NULL
-        """,
-        (invoice_no, int(document_id), int(service_id)),
+        "UPDATE servicedb.service SET invoice_no=?, office_invoice_id=?"
+        + custody_sql
+        + " WHERE id=? AND trim(COALESCE(invoice_no,''))='' "
+          "AND office_invoice_id IS NULL",
+        tuple(params),
     )
     if cursor.rowcount != 1:
         raise PosError("Servisa ni bilo mogoče enolično povezati z računom.")
@@ -632,13 +1039,20 @@ def _validate_linked_service_lines(
     lines: list[CalculatedLine],
 ) -> None:
     """Vse izvorne servisne vrstice morajo ostati prisotne in nespremenjene."""
-    expected_manual: dict[int, tuple[str, str, Decimal, Decimal]] = {}
+    expected_manual: dict[int, tuple] = {}
     if _table_exists(c, "servicedb", "service_manual_lines"):
         expected_manual = {
-            int(row[0]): (str(row[1]), str(row[2]), dec(row[3]), dec(row[4]))
+            int(row[0]): (
+                str(row[1]), str(row[2]), dec(row[3]), dec(row[4]),
+                str(row[5] or ""), int(row[6] or 0), str(row[7] or ""),
+                dec(row[8]), dec(row[9]),
+            )
             for row in c.execute(
                 """
-                SELECT id, line_kind, description, quantity, unit_price
+                SELECT id, line_kind, description, quantity, unit_price,
+                       COALESCE(service_tier,''), COALESCE(billable_minutes,0),
+                       COALESCE(tariff_version,''), COALESCE(first_rate,0),
+                       COALESCE(extra_half_hour_rate,0)
                 FROM servicedb.service_manual_lines WHERE service_id=?
                 """,
                 (int(service_id),),
@@ -674,12 +1088,19 @@ def _validate_linked_service_lines(
                 raise PosError("Servisna postavka nima veljavnega zaklenjenega izvora.")
             if int(line.origin_id) in seen_manual:
                 raise PosError("Ista servisna postavka je na računu podvojena.")
-            kind, description, quantity, price = expected_manual[int(line.origin_id)]
+            (
+                kind, description, quantity, price, stored_tier, minutes,
+                tariff_version, first_rate, extra_rate,
+            ) = expected_manual[int(line.origin_id)]
             if (
-                str(line.service_tier) != ("T2" if kind.upper() == "T2" else "T1")
+                str(line.service_tier) != ("T2" if (stored_tier or kind).upper() == "T2" else "T1")
                 or str(line.name) != description
                 or dec(line.quantity) != quantity
                 or dec(line.base_unit_price) != price
+                or int(line.service_billable_minutes or 0) != minutes
+                or str(line.service_tariff_version or "") != tariff_version
+                or dec(line.service_first_rate) != first_rate
+                or dec(line.service_extra_half_hour_rate) != extra_rate
             ):
                 raise PosError("Zaklenjena servisna postavka je bila spremenjena.")
             seen_manual.add(int(line.origin_id))
@@ -689,6 +1110,16 @@ def _validate_linked_service_lines(
             if int(line.origin_id) in seen_parts:
                 raise PosError("Isti servisni del je na računu podvojen.")
             article_id, barcode, name, code, price = expected_parts[int(line.origin_id)]
+            reservation = c.execute(
+                """
+                SELECT COALESCE(SUM(quantity),0)
+                FROM inv.inventory_lot_allocations_v30
+                WHERE allocation_type='SERVICE_RESERVATION' AND source_id=?
+                  AND source_line_id=? AND reversed_at IS NULL
+                """,
+                (int(service_id), int(line.origin_id)),
+            ).fetchone()
+            has_reservation = dec(reservation[0] if reservation else 0) > 0
             if (
                 line.article_id != article_id
                 or str(line.barcode or "") != barcode
@@ -696,7 +1127,7 @@ def _validate_linked_service_lines(
                 or str(line.code or "") != code
                 or dec(line.quantity) != Decimal("1.00")
                 or dec(line.base_unit_price) != price
-                or not line.stock_already_consumed
+                or bool(line.stock_already_consumed) == has_reservation
             ):
                 raise PosError("Zaklenjeni servisni del je bil spremenjen.")
             seen_parts.add(int(line.origin_id))
@@ -742,10 +1173,11 @@ def _validate_live_article_prices(
                 """
                 SELECT MAX(acquisition_cost)
                 FROM inv.inventory_lot_allocations_v30
-                WHERE allocation_type='SERVICE' AND source_id=? AND source_line_id=?
+                WHERE allocation_type='SERVICE_RESERVATION'
+                  AND source_id=? AND source_line_id=?
                   AND reversed_at IS NULL
                 """,
-                (int(linked_service_id), int(src.article_id)),
+                (int(linked_service_id), int(src.origin_id)),
             ).fetchone()
             protected_cost = (
                 dec(lot_row[0]) if lot_row and lot_row[0] is not None
@@ -767,6 +1199,7 @@ def prepare_used_goods_agreement(
     *, office_db: Path | str, inventory_db: Path | str,
     article_ids: Iterable[int], customer: dict[str, str], issue_token: str,
     output_dir: Path | str, company: dict[str, str], operator_code: str,
+    customer_partner_id: int | None = None,
 ) -> tuple[int, str, Path]:
     """Pripravi nespremenljiv A4 dogovor/garancijski list za podpis na papirju."""
     ensure_pos_schema(office_db)
@@ -870,10 +1303,12 @@ def prepare_used_goods_agreement(
             """
             INSERT INTO used_goods_agreements_v30(
                 agreement_no,issue_token,device_article_ids,customer_name,
-                customer_address,pdf_path,pdf_sha256,status,operator_code,prepared_at
-            ) VALUES(?,?,?,?,?,?,?,'PREPARED',?,?)
+                customer_address,pdf_path,pdf_sha256,status,operator_code,prepared_at,
+                customer_partner_id
+            ) VALUES(?,?,?,?,?,?,?,'PREPARED',?,?,?)
             """,
-            (agreement_no,str(issue_token),json.dumps(ids),name,address,str(pdf_path),digest,operator_code,now),
+            (agreement_no,str(issue_token),json.dumps(ids),name,address,str(pdf_path),digest,
+             operator_code,now,int(customer_partner_id) if customer_partner_id else None),
         )
         c.commit()
         return int(cur.lastrowid),agreement_no,pdf_path
@@ -916,9 +1351,14 @@ def issue_invoice(
     bank_transfer_received: bool = False,
     payment_reference: str = "",
     used_goods_agreement_id: int | None = None,
+    customer_partner_id: int | None = None,
     replacement_of_invoice_id: int | None = None,
     authenticated_username: str | None = None,
     action_permissions: Iterable[str] | None = None,
+    fiscalization_required: bool = False,
+    fiscalizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    numbering_structure: str = "B",
+    test_mode: bool = True,
 ) -> tuple[int, str, Decimal]:
     actor = _actor_username(authenticated_username)
     if replacement_of_invoice_id is not None:
@@ -937,7 +1377,7 @@ def issue_invoice(
     total = sum((line.line_total for line in calculated), Decimal("0.00")).quantize(CENT)
 
     normalized_payments = {str(k): dec(v) for k, v in payments.items() if dec(v) > 0}
-    if set(normalized_payments) - {"CASH", "BANK_TRANSFER"}:
+    if set(normalized_payments) - {"CASH", "CARD", "BANK_TRANSFER"}:
         raise PosError("Nepodprt način plačila.")
     if sum(normalized_payments.values(), Decimal("0.00")) != total:
         raise PosError("Seštevek plačil mora biti natančno enak znesku računa.")
@@ -948,6 +1388,11 @@ def issue_invoice(
             "Pri razdeljenem plačilu mora biti TRR del pred izdajo dejansko prejet."
         )
     payment_status = "PAID" if not has_bank_transfer or bank_transfer_received else "UNPAID"
+    needs_fiscalization = bool(fiscalization_required) and any(
+        normalized_payments.get(method, 0) > 0 for method in ("CASH", "CARD")
+    )
+    if needs_fiscalization and fiscalizer is None:
+        raise PosError("Produkcijska davčna potrditev je obvezna, FURS povezava pa ni pripravljena.")
     issued_at = datetime.now()
     now = issued_at.isoformat(timespec="seconds")
 
@@ -971,6 +1416,15 @@ def issue_invoice(
             raise PosError("Osnutek računa pripada drugemu uporabniku ali drugi napravi.")
         if draft and str(draft[0]) == "ABANDONED":
             raise PosError("Opuščenega osnutka ni dovoljeno izdati.")
+        existing = c.execute(
+            "SELECT id, COALESCE(fiscal_invoice_no, doc_no), invoice_total "
+            "FROM documents WHERE pos_issue_token=?",
+            (token,),
+        ).fetchone()
+        if existing:
+            c.rollback()
+            return int(existing[0]), str(existing[1]), dec(existing[2])
+
         full_inventory = c.execute(
             """
             SELECT reference FROM inventory_operation_locks_v30
@@ -983,23 +1437,16 @@ def issue_invoice(
                 "Prodaja je zaklenjena zaradi polne inventure"
                 + (f" ({full_inventory[0]})" if full_inventory[0] else "") + "."
             )
-        cash_session_id = None
+        try:
+            cash_session_id = require_open_cash_session(
+                c, premise_id=premise, device_id=device
+            )
+        except CashJournalError as exc:
+            raise PosError(
+                "Računa ni mogoče izdati brez odprtega blagajniškega dnevnika. "
+                + str(exc)
+            ) from exc
         cash_payment = dec(normalized_payments.get("CASH",0))
-        if cash_payment > 0:
-            try:
-                cash_session_id = require_open_cash_session(
-                    c,premise_id=premise,device_id=device
-                )
-            except CashJournalError as exc:
-                raise PosError(str(exc)) from exc
-        existing = c.execute(
-            "SELECT id, COALESCE(fiscal_invoice_no, doc_no), invoice_total "
-            "FROM documents WHERE pos_issue_token=?",
-            (token,),
-        ).fetchone()
-        if existing:
-            c.rollback()
-            return int(existing[0]), str(existing[1]), dec(existing[2])
 
         replacement_source = None
         if replacement_of_invoice_id is not None:
@@ -1046,7 +1493,6 @@ def issue_invoice(
                 f"Račun {pending_print[0]} še čaka na potrditev originalnega tiska. "
                 "Najprej zaključi njegov tisk."
             )
-
         linked_service_order_id = None
         if linked_service_id:
             if not service_attached:
@@ -1072,6 +1518,31 @@ def issue_invoice(
         customer_address = str(customer.get("address") or "").strip()
         customer_tax = str(customer.get("tax_number") or "").strip()
         notes = str(customer.get("notes") or "").strip()
+        partner_id = int(customer_partner_id) if customer_partner_id is not None else None
+        if partner_id is not None:
+            partner = c.execute(
+                """
+                SELECT name,address,post_city,tax_no,phone,email
+                FROM partners WHERE id=?
+                """, (partner_id,),
+            ).fetchone()
+            if not partner:
+                raise PosError("Kupec, izbran s F9, ne obstaja več v bazi partnerjev.")
+            partner_address = ", ".join(
+                value for value in (str(partner[1] or "").strip(), str(partner[2] or "").strip())
+                if value
+            )
+            if (
+                str(partner[0] or "").strip() != customer_name
+                or partner_address != customer_address
+                or re.sub(r"\D", "", str(partner[3] or ""))
+                   != re.sub(r"\D", "", customer_tax)
+                or str(partner[4] or "").strip() != str(customer.get("phone") or "").strip()
+                or str(partner[5] or "").strip() != str(customer.get("email") or "").strip()
+            ):
+                raise PosError(
+                    "Podatki kupca so bili po izbiri F9 spremenjeni. Kupca ponovno potrdi s F9."
+                )
         used_article_ids: list[int] = []
         for calculated_line in calculated:
             article_id_value = calculated_line.source.article_id
@@ -1090,7 +1561,7 @@ def issue_invoice(
                     "Pred izdajo natisni in evidentiraj podpisan A4 dogovor za obnovljeno napravo."
                 )
             agreement = c.execute(
-                "SELECT issue_token,device_article_ids,customer_name,pdf_path,pdf_sha256,status,sale_document_id "
+                "SELECT issue_token,device_article_ids,customer_name,pdf_path,pdf_sha256,status,sale_document_id,customer_partner_id "
                 "FROM used_goods_agreements_v30 WHERE id=?",
                 (int(used_goods_agreement_id),),
             ).fetchone()
@@ -1099,6 +1570,7 @@ def issue_invoice(
                 or sorted(json.loads(str(agreement[1]))) != used_article_ids
                 or str(agreement[2]).strip() != customer_name
                 or str(agreement[5]) != "SIGNED" or agreement[6] is not None
+                or partner_id is None or int(agreement[7] or 0) != partner_id
             ):
                 raise PosError("Podpisani dogovor ne ustreza kupcu ali napravam na računu.")
             agreement_path = Path(str(agreement[3]))
@@ -1110,7 +1582,7 @@ def issue_invoice(
         cur = c.execute(
             """
             INSERT INTO documents(
-                doc_no, doc_type, partner_name_snapshot, partner_address_snapshot,
+                doc_no, doc_type, partner_id, partner_name_snapshot, partner_address_snapshot,
                 partner_tax_snapshot, partner_pcd_snapshot, external_no, date,
                 currency, delivery_cost, stock_effect, status, linked_service_id,
                 notes, created_at, updated_at, booked_at, pos_issue_token,
@@ -1122,16 +1594,20 @@ def issue_invoice(
                 ,payment_reference
                 ,cash_session_id
                 ,replacement_of_invoice_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                invoice_no, "IZDANI RAČUN", customer_name, customer_address,
+                invoice_no, "IZDANI RAČUN", partner_id, customer_name, customer_address,
                 customer_tax, 0, "", date.today().isoformat(), "EUR", 0, 0,
                 "KNJIŽENO", linked_service_id, notes, now, now, now, token,
                 payment_method, payment_status, float(total),
                 str(customer.get("phone") or "").strip(),
                 str(customer.get("email") or "").strip(),
-                "TEST_DISABLED", "AWAITING_PRINT", 1 if used_goods_12m_signed else 0,
+                (
+                    "PENDING_SUBMISSION" if needs_fiscalization
+                    else ("TEST_DISABLED" if test_mode else "NOT_REQUIRED")
+                ),
+                "AWAITING_PRINT", 1 if used_goods_12m_signed else 0,
                 premise, device, fiscal_year, fiscal_sequence, fiscal_invoice_no,
                 operator, operator_tax, now,
                 str(payment_reference or "").strip(),
@@ -1147,14 +1623,6 @@ def issue_invoice(
                 (document_id,int(used_goods_agreement_id)),
             )
 
-        consumed_by_service: dict[int, Decimal] = {}
-        if linked_service_id and service_attached:
-            for article_id, count in c.execute(
-                "SELECT article_id, COUNT(*) FROM servicedb.service_parts WHERE service_id=? AND article_id IS NOT NULL GROUP BY article_id",
-                (int(linked_service_id),),
-            ):
-                consumed_by_service[int(article_id)] = dec(count)
-
         for item in calculated:
             src = item.source
             cur = c.execute(
@@ -1164,9 +1632,11 @@ def issue_invoice(
                     qty, unit_price, discount_pct, vat_pct, delivery_share,
                     actual_unit_cost, margin_pct, calculated_price, recommended_price,
                     sell_price, line_net, line_vat, line_total, line_kind,
-                    service_tier, requested_discount_pct, stock_already_consumed,
+                    service_tier, service_billable_minutes, service_tariff_version,
+                    service_first_rate, service_extra_half_hour_rate,
+                    requested_discount_pct, stock_already_consumed,
                     origin_kind, origin_id, source_locked
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     document_id, src.article_id, src.barcode, src.name, src.code,
@@ -1175,6 +1645,10 @@ def issue_invoice(
                     0, float(item.final_unit_price), float(item.final_unit_price),
                     float(item.final_unit_price), float(item.line_total), 0,
                     float(item.line_total), src.line_kind, src.service_tier,
+                    int(src.service_billable_minutes or 0),
+                    str(src.service_tariff_version or ""),
+                    float(dec(src.service_first_rate)),
+                    float(dec(src.service_extra_half_hour_rate)),
                     float(src.requested_discount_pct), 1 if src.stock_already_consumed else 0,
                     str(src.origin_kind or "POS_ADDED"), src.origin_id,
                     1 if src.source_locked else 0,
@@ -1184,13 +1658,6 @@ def issue_invoice(
             if src.line_kind != "ARTICLE" or not src.article_id:
                 continue
             qty_to_issue = dec(src.quantity)
-            covered = min(qty_to_issue, consumed_by_service.get(int(src.article_id), Decimal("0")))
-            consumed_by_service[int(src.article_id)] = max(
-                Decimal("0"), consumed_by_service.get(int(src.article_id), Decimal("0")) - covered
-            )
-            qty_to_issue -= covered
-            if qty_to_issue <= 0:
-                continue
             stock = c.execute(
                 """
                 SELECT stock_qty, COALESCE(reserved_qty,0), article_name, lot_serial,
@@ -1199,6 +1666,81 @@ def issue_invoice(
                 """,
                 (int(src.article_id),),
             ).fetchone()
+            is_reserved_service_part = (
+                str(src.origin_kind or "") == "SERVICE_PART"
+                and linked_service_id is not None
+                and src.origin_id is not None
+                and not src.stock_already_consumed
+            )
+            if is_reserved_service_part:
+                reservation_rows = c.execute(
+                    """
+                    SELECT id,lot_serial,quantity,acquisition_cost
+                    FROM inv.inventory_lot_allocations_v30
+                    WHERE allocation_type='SERVICE_RESERVATION' AND source_id=?
+                      AND source_line_id=? AND reversed_at IS NULL
+                    ORDER BY id
+                    """,
+                    (int(linked_service_id), int(src.origin_id)),
+                ).fetchall()
+                reserved_quantity = sum(
+                    (dec(row[2]) for row in reservation_rows), Decimal("0")
+                )
+                if (
+                    not stock or reserved_quantity != qty_to_issue
+                    or dec(stock[0]) < qty_to_issue
+                    or dec(stock[1]) < qty_to_issue
+                ):
+                    raise PosError(
+                        f"Rezervacija servisnega dela »{src.name}« ni več skladna z zalogo."
+                    )
+                balance = dec(stock[0]) - qty_to_issue
+                reserved_after = dec(stock[1]) - qty_to_issue
+                c.execute(
+                    """
+                    UPDATE inv.inventory_lot_allocations_v30
+                    SET allocation_type='POS_INVOICE',source_id=?,source_line_id=?
+                    WHERE allocation_type='SERVICE_RESERVATION' AND source_id=?
+                      AND source_line_id=? AND reversed_at IS NULL
+                    """,
+                    (
+                        int(document_id), int(line_id), int(linked_service_id),
+                        int(src.origin_id),
+                    ),
+                )
+                c.execute(
+                    "UPDATE inv.inventory_items SET stock_qty=?,reserved_qty=?,updated_at=? "
+                    "WHERE id=?",
+                    (float(balance), float(reserved_after), now, int(src.article_id)),
+                )
+                allocation_lots = ", ".join(
+                    str(row[1]) for row in reservation_rows if row[1]
+                )
+                actual_cost = max(dec(row[3]) for row in reservation_rows)
+                c.execute(
+                    "UPDATE document_items SET actual_unit_cost=? WHERE id=?",
+                    (float(actual_cost), int(line_id)),
+                )
+                c.execute(
+                    """
+                    INSERT INTO inv.stock_movements(
+                        movement_no,created_at,article_id,quantity_delta,balance_after,
+                        movement_type,source_type,source_id,source_line_id,lot_serial,
+                        location_from,location_to,reason,operator_code,reversal_of_id
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
+                    """,
+                    (
+                        f"PREM-POS-{document_id:06d}-{line_id}", now,
+                        int(src.article_id), -float(qty_to_issue), float(balance),
+                        "SALE_OUT", "POS_INVOICE", document_id, line_id,
+                        allocation_lots or stock[3] or "", stock[4] or "", "KUPEC",
+                        f"Prodaja po računu {fiscal_invoice_no}", operator,
+                    ),
+                )
+                continue
+            if src.stock_already_consumed:
+                # Zgodovinski servis je zalogo odpisal že ob shranitvi servisa.
+                continue
             if not stock or dec(stock[0]) - dec(stock[1]) < qty_to_issue:
                 raise PosError(f"Premalo zaloge za artikel »{src.name}«.")
             balance = dec(stock[0]) - qty_to_issue
@@ -1211,6 +1753,7 @@ def issue_invoice(
                 source_id=int(document_id),
                 source_line_id=int(line_id),
                 created_at=now,
+                requested_lot_serial=src.requested_lot_serial,
             )
             allocation_lots = ", ".join(
                 str(entry["lot_serial"]) for entry in allocations if entry["lot_serial"]
@@ -1267,11 +1810,68 @@ def issue_invoice(
                 description=f"Gotovinsko plačilo računa {fiscal_invoice_no}",
                 operator_code=operator,
             )
+        fiscal_result = None
+        if needs_fiscalization:
+            fiscal_result = fiscalizer(
+                {
+                    "issue_datetime": issued_at,
+                    "sequence": fiscal_sequence,
+                    "public_invoice_number": fiscal_invoice_no,
+                    "premise_id": premise,
+                    "device_id": device,
+                    "invoice_amount": total,
+                    "payment_amount": total,
+                    "operator_tax_number": operator_tax,
+                    "customer_vat_number": customer_tax,
+                    "numbering_structure": numbering_structure,
+                }
+            )
+            status = str(fiscal_result.get("status") or "")
+            if status not in {"CONFIRMED", "PENDING_RECONCILIATION"}:
+                raise PosError("FURS povezava je vrnila neveljavno stanje.")
+            from mikrofix_furs import build_fiscal_qr_payload
+            qr_payload = build_fiscal_qr_payload(
+                zoi=fiscal_result.get("zoi", ""),
+                tax_number=str(fiscal_result.get("tax_number") or ""),
+                issue_datetime=issued_at,
+            )
+            c.execute(
+                """
+                UPDATE documents SET fiscal_status=?,furs_zoi=?,furs_eor=?,
+                    furs_qr_payload=?,furs_message_id=?,furs_error_code=?,
+                    furs_error_message=?,updated_at=? WHERE id=?
+                """,
+                (
+                    status, str(fiscal_result.get("zoi") or ""),
+                    str(fiscal_result.get("eor") or ""), qr_payload,
+                    str(fiscal_result.get("message_id") or ""),
+                    str(fiscal_result.get("error_code") or ""),
+                    str(fiscal_result.get("error_message") or "")[:1000],
+                    now, document_id,
+                ),
+            )
+            c.execute(
+                """
+                INSERT INTO furs_outbox_v30(
+                    document_id,message_id,status,payload_json,response_json,
+                    error_code,error_message,created_at,updated_at,confirmed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    document_id, str(fiscal_result.get("message_id") or ""), status,
+                    json.dumps(fiscal_result.get("payload") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(fiscal_result.get("response") or {}, ensure_ascii=False, separators=(",", ":")),
+                    str(fiscal_result.get("error_code") or ""),
+                    str(fiscal_result.get("error_message") or "")[:1000],
+                    now, now, now if status == "CONFIRMED" else None,
+                ),
+            )
         c.execute(
             "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,actor_username,created_at) VALUES(?,?,?,?,?,?)",
             (
                 document_id, "INVOICE_ISSUED",
-                f"fiscal={fiscal_invoice_no}; internal={invoice_no}; total={total}; token={token}",
+                f"fiscal={fiscal_invoice_no}; internal={invoice_no}; total={total}; token={token}; "
+                f"furs={(fiscal_result or {}).get('status','NOT_REQUIRED')}",
                 operator, actor, now,
             ),
         )
@@ -1447,6 +2047,405 @@ def latest_pending_print(office_db: Path | str) -> dict | None:
         c.close()
 
 
+def search_issued_invoices(office_db: Path | str, query: str = "") -> list[dict]:
+    """Računi in storni za blagajniški pregled; brez osnutkov in predračunov."""
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        term = f"%{str(query or '').strip()}%"
+        rows = c.execute(
+            """
+            SELECT id,COALESCE(fiscal_invoice_no,doc_no) invoice_no,doc_type,date,
+                   COALESCE(partner_name_snapshot,'Končni kupec') customer,
+                   COALESCE(partner_address_snapshot,'') customer_address,
+                   COALESCE(invoice_total,0) invoice_total,status,print_status,
+                   COALESCE(print_copy_count,0) copy_count,linked_service_id
+            FROM documents
+            WHERE doc_type IN ('IZDANI RAČUN','STORNO RAČUNA')
+              AND (?='%%' OR COALESCE(fiscal_invoice_no,doc_no) LIKE ?
+                   OR COALESCE(partner_name_snapshot,'') LIKE ?
+                   OR COALESCE(partner_address_snapshot,'') LIKE ? OR date LIKE ?)
+            ORDER BY id DESC LIMIT 500
+            """,
+            (term, term, term, term, term),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        c.close()
+
+
+def open_sales_claim(
+    office_db: Path | str, *, document_id: int, reason: str, operator_code: str,
+) -> tuple[int, str]:
+    """Odpre sledljivo reklamacijo tudi za prodajo brez servisnega naloga."""
+    ensure_pos_schema(office_db)
+    reason = str(reason or "").strip()
+    if len(reason) < 3:
+        raise PosError("Za reklamacijo vpiši jasen opis razloga.")
+    c = sqlite3.connect(str(office_db))
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        doc = c.execute(
+            "SELECT doc_type,COALESCE(fiscal_invoice_no,doc_no) FROM documents WHERE id=?",
+            (int(document_id),),
+        ).fetchone()
+        if not doc or str(doc[0]) != "IZDANI RAČUN":
+            raise PosError("Reklamacijo je mogoče odpreti samo za izdani račun.")
+        existing = c.execute(
+            "SELECT id,claim_no FROM sales_claims_v31 WHERE document_id=? AND status='OPEN'",
+            (int(document_id),),
+        ).fetchone()
+        if existing:
+            c.rollback()
+            return int(existing[0]), str(existing[1])
+        year = datetime.now().year
+        prefix = f"REK-POS-{year}-"
+        numbers = []
+        for (raw,) in c.execute(
+            "SELECT claim_no FROM sales_claims_v31 WHERE claim_no LIKE ?", (prefix + "%",)
+        ):
+            try: numbers.append(int(str(raw).rsplit("-", 1)[-1]))
+            except ValueError: pass
+        number = f"{prefix}{max(numbers, default=0) + 1:04d}"
+        cur = c.execute(
+            "INSERT INTO sales_claims_v31(claim_no,document_id,opened_at,opened_by,reason) "
+            "VALUES(?,?,?,?,?)",
+            (number, int(document_id), datetime.now().isoformat(timespec="seconds"),
+             str(operator_code or ""), reason),
+        )
+        c.commit()
+        return int(cur.lastrowid), number
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def unpaid_bank_invoices(office_db: Path | str) -> list[dict]:
+    """Vrne izdane TRR račune, pri katerih plačilo še ni bilo prejeto."""
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        rows = c.execute(
+            """
+            SELECT d.id,COALESCE(d.fiscal_invoice_no,d.doc_no) AS invoice_no,
+                   d.date,COALESCE(d.partner_name_snapshot,'Končni kupec') AS customer,
+                   d.invoice_total,d.payment_reference
+            FROM documents d
+            WHERE d.doc_type='IZDANI RAČUN' AND d.status='KNJIŽENO'
+              AND d.payment_status='UNPAID'
+              AND EXISTS(
+                  SELECT 1 FROM pos_payments_v30 p
+                  WHERE p.document_id=d.id AND p.method='BANK_TRANSFER'
+                    AND p.status='PENDING' AND p.reversal_of_id IS NULL
+              )
+            ORDER BY d.date,d.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        c.close()
+
+
+def pending_furs_documents(office_db: Path | str) -> list[dict]:
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        rows = c.execute(
+            """
+            SELECT d.id,COALESCE(d.fiscal_invoice_no,d.doc_no) AS invoice_no,
+                   d.doc_type,d.invoice_total,d.furs_zoi,f.message_id,
+                   f.attempt_count,f.error_code,f.error_message,f.updated_at
+            FROM furs_outbox_v30 f
+            JOIN documents d ON d.id=f.document_id
+            WHERE f.status='PENDING_RECONCILIATION'
+            ORDER BY f.id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        c.close()
+
+
+def reconcile_pending_furs_document(
+    *, office_db: Path | str, document_id: int, fiscalizer: Any,
+    operator_code: str, authenticated_username: str | None = None,
+) -> dict[str, Any]:
+    """Ponovi natančno isti shranjeni FURS zahtevek in ohrani revizijsko sled."""
+    actor = _actor_username(authenticated_username)
+    retry = getattr(fiscalizer, "retry_existing_payload", None)
+    if not callable(retry):
+        raise PosError("FURS povezava ne podpira varnega ponovnega pošiljanja istega zahtevka.")
+    ensure_pos_schema(office_db)
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        row = c.execute(
+            """
+            SELECT f.*,d.furs_zoi,d.fiscal_status
+            FROM furs_outbox_v30 f JOIN documents d ON d.id=f.document_id
+            WHERE f.document_id=?
+            """,
+            (int(document_id),),
+        ).fetchone()
+        if not row:
+            raise PosError("FURS dogodek za izbrani račun ne obstaja.")
+        if str(row["status"]) == "CONFIRMED":
+            c.rollback()
+            return {"status": "CONFIRMED", "document_id": int(document_id)}
+        if str(row["status"]) != "PENDING_RECONCILIATION":
+            raise PosError("Izbrani FURS dogodek ni v stanju za uskladitev.")
+        try:
+            payload = json.loads(str(row["payload_json"] or ""))
+            payload_zoi = str(payload["InvoiceRequest"]["Invoice"]["ProtectedID"])
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise PosError("Shranjeni FURS zahtevek je poškodovan.") from exc
+        if not payload_zoi or payload_zoi != str(row["furs_zoi"] or ""):
+            raise PosError("ZOI dokumenta se ne ujema s shranjenim FURS zahtevkom.")
+
+        result = retry(payload)
+        status = str(result.get("status") or "")
+        if status not in {"CONFIRMED", "PENDING_RECONCILIATION"}:
+            raise PosError("Ponovljeni FURS zahtevek je vrnil neveljavno stanje.")
+        now = datetime.now().isoformat(timespec="seconds")
+        c.execute(
+            """
+            UPDATE furs_outbox_v30 SET status=?,attempt_count=attempt_count+1,
+                response_json=?,error_code=?,error_message=?,updated_at=?,
+                confirmed_at=CASE WHEN ?='CONFIRMED' THEN ? ELSE confirmed_at END
+            WHERE document_id=?
+            """,
+            (
+                status,
+                json.dumps(result.get("response") or {}, ensure_ascii=False, separators=(",", ":")),
+                str(result.get("error_code") or ""),
+                str(result.get("error_message") or "")[:1000],
+                now, status, now, int(document_id),
+            ),
+        )
+        c.execute(
+            """
+            UPDATE documents SET fiscal_status=?,furs_eor=?,furs_error_code=?,
+                furs_error_message=?,updated_at=? WHERE id=?
+            """,
+            (
+                status, str(result.get("eor") or ""),
+                str(result.get("error_code") or ""),
+                str(result.get("error_message") or "")[:1000],
+                now, int(document_id),
+            ),
+        )
+        c.execute(
+            "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,actor_username,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                int(document_id), "FURS_RECONCILIATION_ATTEMPT",
+                f"status={status}; message_id={row['message_id']}; attempt={int(row['attempt_count']) + 1}",
+                operator_code, actor, now,
+            ),
+        )
+        c.commit()
+        return {
+            "status": status, "document_id": int(document_id),
+            "eor": str(result.get("eor") or ""),
+            "error_message": str(result.get("error_message") or ""),
+        }
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
+def _ten_working_day_deadline(value: datetime) -> str:
+    """Varnostni rok; državni praznik lahko rok samo podaljša, nikoli skrajša."""
+    cursor = value.date()
+    remaining = 10
+    while remaining:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            remaining -= 1
+    return cursor.isoformat()
+
+
+def settle_unpaid_bank_invoice(
+    *, office_db: Path | str, document_id: int, method: str,
+    operator_code: str, fiscalization_required: bool,
+    fiscalizer: Callable[[dict[str, Any]], dict[str, Any]] | None,
+    authenticated_username: str | None = None,
+    numbering_structure: str = "B", test_mode: bool = True,
+) -> dict[str, Any]:
+    """Evidentira poznejše gotovinsko/kartično plačilo istega TRR računa."""
+    actor = _actor_username(authenticated_username)
+    method = str(method or "").upper()
+    if method not in {"CASH", "CARD"}:
+        raise PosError("Poznejše plačilo TRR računa je lahko gotovina ali kartica.")
+    if fiscalization_required and fiscalizer is None:
+        raise PosError("Naknadna davčna potrditev je obvezna, FURS povezava pa ni pripravljena.")
+    ensure_pos_schema(office_db)
+    paid_at = datetime.now()
+    now = paid_at.isoformat(timespec="seconds")
+    c = sqlite3.connect(str(office_db))
+    c.row_factory = sqlite3.Row
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        doc = c.execute(
+            "SELECT * FROM documents WHERE id=?", (int(document_id),)
+        ).fetchone()
+        if not doc or str(doc["doc_type"]) != "IZDANI RAČUN" or str(doc["status"]) != "KNJIŽENO":
+            raise PosError("Izbran ni veljaven knjižen izdani račun.")
+        if str(doc["payment_status"]) == "PAID":
+            c.rollback()
+            return {
+                "document_id": int(document_id), "status": "ALREADY_PAID",
+                "fiscal_status": str(doc["fiscal_status"] or ""),
+            }
+        bank = c.execute(
+            """
+            SELECT id,amount FROM pos_payments_v30
+            WHERE document_id=? AND method='BANK_TRANSFER' AND status='PENDING'
+              AND reversal_of_id IS NULL
+            ORDER BY id
+            """,
+            (int(document_id),),
+        ).fetchall()
+        total = dec(doc["invoice_total"])
+        if len(bank) != 1 or dec(bank[0]["amount"]) != total:
+            raise PosError(
+                "Račun nima enega samega neplačanega TRR zneska, enakega celotnemu računu."
+            )
+        cash_session_id = None
+        if method == "CASH":
+            try:
+                cash_session_id = require_open_cash_session(
+                    c, premise_id=str(doc["fiscal_premise"] or ""),
+                    device_id=str(doc["fiscal_device"] or ""),
+                )
+            except CashJournalError as exc:
+                raise PosError("Pred prejemom gotovine odpri ustrezno blagajno. " + str(exc)) from exc
+
+        fiscal_result = None
+        if fiscalization_required:
+            try:
+                original_issue = datetime.fromisoformat(
+                    str(doc["fiscal_issued_at"] or doc["date"] or "")
+                )
+            except ValueError as exc:
+                raise PosError("Račun nima veljavnega prvotnega časa izdaje.") from exc
+            fiscal_result = fiscalizer(
+                {
+                    "issue_datetime": original_issue,
+                    "sequence": int(doc["fiscal_sequence"]),
+                    "public_invoice_number": str(doc["fiscal_invoice_no"] or doc["doc_no"]),
+                    "premise_id": str(doc["fiscal_premise"] or ""),
+                    "device_id": str(doc["fiscal_device"] or ""),
+                    "invoice_amount": total,
+                    "payment_amount": total,
+                    "operator_tax_number": str(doc["operator_tax_number_snapshot"] or ""),
+                    "customer_vat_number": str(doc["partner_tax_snapshot"] or ""),
+                    "numbering_structure": numbering_structure,
+                    "subsequent_submit": True,
+                }
+            )
+            fiscal_status = str(fiscal_result.get("status") or "")
+            if fiscal_status not in {"CONFIRMED", "PENDING_RECONCILIATION"}:
+                raise PosError("FURS povezava je vrnila neveljavno stanje.")
+            from mikrofix_furs import build_fiscal_qr_payload
+            qr_payload = build_fiscal_qr_payload(
+                zoi=fiscal_result.get("zoi", ""),
+                tax_number=str(fiscal_result.get("tax_number") or ""),
+                issue_datetime=original_issue,
+            )
+            deadline = _ten_working_day_deadline(paid_at)
+            c.execute(
+                """
+                UPDATE documents SET fiscal_status=?,furs_zoi=?,furs_eor=?,
+                    furs_qr_payload=?,furs_message_id=?,furs_error_code=?,
+                    furs_error_message=?,furs_submission_deadline=?,updated_at=?
+                WHERE id=?
+                """,
+                (
+                    fiscal_status, str(fiscal_result.get("zoi") or ""),
+                    str(fiscal_result.get("eor") or ""), qr_payload,
+                    str(fiscal_result.get("message_id") or ""),
+                    str(fiscal_result.get("error_code") or ""),
+                    str(fiscal_result.get("error_message") or "")[:1000],
+                    deadline, now, int(document_id),
+                ),
+            )
+            c.execute(
+                """
+                INSERT INTO furs_outbox_v30(
+                    document_id,message_id,status,payload_json,response_json,
+                    error_code,error_message,created_at,updated_at,confirmed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(document_id), str(fiscal_result.get("message_id") or ""),
+                    fiscal_status,
+                    json.dumps(fiscal_result.get("payload") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(fiscal_result.get("response") or {}, ensure_ascii=False, separators=(",", ":")),
+                    str(fiscal_result.get("error_code") or ""),
+                    str(fiscal_result.get("error_message") or "")[:1000],
+                    now, now, now if fiscal_status == "CONFIRMED" else None,
+                ),
+            )
+        else:
+            fiscal_status = "TEST_DISABLED" if test_mode else "NOT_REQUIRED"
+
+        c.execute(
+            "UPDATE pos_payments_v30 SET status='REPLACED_UNPAID',reversed_at=? WHERE id=?",
+            (now, int(bank[0]["id"])),
+        )
+        c.execute(
+            "INSERT INTO pos_payments_v30(document_id,method,amount,status,created_at) "
+            "VALUES(?,?,?,'PAID',?)",
+            (int(document_id), method, float(total), now),
+        )
+        c.execute(
+            """
+            UPDATE documents SET payment_method=?,payment_status='PAID',
+                payment_received_at=?,payment_received_method=?,cash_session_id=COALESCE(?,cash_session_id),
+                updated_at=? WHERE id=?
+            """,
+            (method, now, method, cash_session_id, now, int(document_id)),
+        )
+        if cash_session_id:
+            record_cash_entry(
+                c, session_id=cash_session_id, entry_type="CASH_SALE",
+                amount=total, reference_type="POS_LATE_PAYMENT",
+                reference_id=int(document_id),
+                reference_no=str(doc["fiscal_invoice_no"] or doc["doc_no"]),
+                description="Poznejše gotovinsko plačilo prvotnega TRR računa",
+                operator_code=operator_code,
+            )
+        c.execute(
+            "INSERT INTO pos_audit_v30(document_id,event_type,detail,operator_code,actor_username,created_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (
+                int(document_id), "LATE_BANK_INVOICE_PAYMENT",
+                f"method={method}; amount={total}; furs={fiscal_status}",
+                operator_code, actor, now,
+            ),
+        )
+        c.commit()
+        return {
+            "document_id": int(document_id), "status": "PAID",
+            "fiscal_status": fiscal_status,
+            "eor": str((fiscal_result or {}).get("eor") or ""),
+        }
+    except Exception:
+        c.rollback()
+        raise
+    finally:
+        c.close()
+
+
 def eligible_storned_invoices(office_db: Path | str) -> list[dict]:
     """Vrne stornirane račune, ki še nimajo svojega nadomestnega računa."""
     ensure_pos_schema(office_db)
@@ -1494,6 +2493,10 @@ def storno_invoice(
     document_id: int, reason: str, operator_code: str,
     authenticated_username: str | None = None,
     action_permissions: Iterable[str] | None = None,
+    fiscalization_required: bool = False,
+    fiscalizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    numbering_structure: str = "B",
+    test_mode: bool = True,
 ) -> tuple[int, str]:
     """V celoti stornira račun, povrne njegove LOT-e in ohrani obe listini."""
     actor = _actor_username(authenticated_username)
@@ -1582,6 +2585,17 @@ def storno_invoice(
             "WHERE document_id=? AND method='CASH' AND reversal_of_id IS NULL",
             (int(document_id),),
         ).fetchone()[0])
+        original_fiscal_payment = dec(c.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM pos_payments_v30 "
+            "WHERE document_id=? AND method IN ('CASH','CARD') "
+            "AND reversal_of_id IS NULL",
+            (int(document_id),),
+        ).fetchone()[0])
+        needs_fiscalization = bool(fiscalization_required) and original_fiscal_payment > 0
+        if needs_fiscalization and fiscalizer is None:
+            raise PosError(
+                "Produkcijska davčna potrditev storna je obvezna, FURS povezava pa ni pripravljena."
+            )
         storno_cash_session_id = None
         if original_cash > 0:
             try:
@@ -1596,6 +2610,17 @@ def storno_invoice(
                 ) from exc
 
         storno_no = _next_storno_no(c)
+        storno_issued_at = datetime.fromisoformat(now)
+        storno_year, storno_sequence, storno_fiscal_no = _next_fiscal_number(
+            c,
+            premise_id=str(doc["fiscal_premise"] or ""),
+            device_id=str(doc["fiscal_device"] or ""),
+            issued_at=storno_issued_at,
+        )
+        initial_fiscal_status = (
+            "PENDING_SEND" if needs_fiscalization
+            else ("TEST_DISABLED" if test_mode else "NOT_REQUIRED")
+        )
         cur = c.execute(
             """
             INSERT INTO documents(
@@ -1606,8 +2631,8 @@ def storno_invoice(
                 customer_phone,customer_email,fiscal_status,print_status,
                 fiscal_premise,fiscal_device,operator_code_snapshot,
                 operator_tax_number_snapshot,fiscal_issued_at,linked_invoice_id,
-                cash_session_id
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                cash_session_id,fiscal_year,fiscal_sequence,fiscal_invoice_no
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 storno_no, "STORNO RAČUNA", doc["partner_name_snapshot"],
@@ -1618,10 +2643,11 @@ def storno_invoice(
                 f"Storno računa {doc['fiscal_invoice_no'] or doc['doc_no']}: {reason}",
                 now, now, now, doc["payment_method"], "REVERSED",
                 -float(dec(doc["invoice_total"])), doc["customer_phone"],
-                doc["customer_email"], "TEST_DISABLED", "AWAITING_PRINT",
+                doc["customer_email"], initial_fiscal_status, "AWAITING_PRINT",
                 doc["fiscal_premise"], doc["fiscal_device"], operator_code,
                 doc["operator_tax_number_snapshot"], now, int(document_id),
-                storno_cash_session_id,
+                storno_cash_session_id, storno_year, storno_sequence,
+                storno_fiscal_no,
             ),
         )
         storno_id = int(cur.lastrowid)
@@ -1638,8 +2664,10 @@ def storno_invoice(
                     unit_price,discount_pct,vat_pct,delivery_share,actual_unit_cost,
                     margin_pct,calculated_price,recommended_price,sell_price,line_net,
                     line_vat,line_total,line_kind,service_tier,requested_discount_pct,
+                    service_billable_minutes,service_tariff_version,
+                    service_first_rate,service_extra_half_hour_rate,
                     stock_already_consumed,origin_kind,origin_id,source_locked
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     storno_id,item["article_id"],item["barcode"],item["article_name"],
@@ -1650,6 +2678,8 @@ def storno_invoice(
                     -float(dec(item["line_net"])), -float(dec(item["line_vat"])),
                     -float(dec(item["line_total"])),item["line_kind"],
                     item["service_tier"],item["requested_discount_pct"],
+                    item["service_billable_minutes"],item["service_tariff_version"],
+                    item["service_first_rate"],item["service_extra_half_hour_rate"],
                     item["stock_already_consumed"],item["origin_kind"],
                     item["origin_id"],item["source_locked"],
                 ),
@@ -1667,22 +2697,54 @@ def storno_invoice(
             restored_qty = dec(allocations[0] if allocations else 0)
             if restored_qty <= 0:
                 continue
-            restore_allocations(
-                c, schema="inv", allocation_type="POS_INVOICE",
-                source_id=int(document_id), source_line_id=int(item["id"]),
-                reversed_at=now,
+            service_part_reopened = (
+                doc["linked_service_id"]
+                and str(item["origin_kind"] or "") == "SERVICE_PART"
+                and item["origin_id"] is not None
             )
+            if service_part_reopened:
+                # Storno ponovno odpre servis: isti fizični LOT zato ostane
+                # rezerviran za isti servisni del, ne postane prosta zaloga.
+                c.execute(
+                    """
+                    UPDATE inv.inventory_lot_allocations_v30
+                    SET allocation_type='SERVICE_RESERVATION',source_id=?,source_line_id=?
+                    WHERE allocation_type='POS_INVOICE' AND source_id=?
+                      AND source_line_id=? AND reversed_at IS NULL
+                    """,
+                    (
+                        int(doc["linked_service_id"]), int(item["origin_id"]),
+                        int(document_id), int(item["id"]),
+                    ),
+                )
+            else:
+                restore_allocations(
+                    c, schema="inv", allocation_type="POS_INVOICE",
+                    source_id=int(document_id), source_line_id=int(item["id"]),
+                    reversed_at=now,
+                )
             stock = c.execute(
-                "SELECT stock_qty,location FROM inv.inventory_items WHERE id=?",
+                "SELECT stock_qty,location,COALESCE(reserved_qty,0) "
+                "FROM inv.inventory_items WHERE id=?",
                 (int(item["article_id"]),),
             ).fetchone()
             if not stock:
                 raise PosError("Artikel storniranega računa ni več v zalogi.")
             balance = dec(stock[0]) + restored_qty
-            c.execute(
-                "UPDATE inv.inventory_items SET stock_qty=?,updated_at=? WHERE id=?",
-                (float(balance),now,int(item["article_id"])),
-            )
+            if service_part_reopened:
+                c.execute(
+                    "UPDATE inv.inventory_items SET stock_qty=?,reserved_qty=?,updated_at=? "
+                    "WHERE id=?",
+                    (
+                        float(balance), float(dec(stock[2]) + restored_qty), now,
+                        int(item["article_id"]),
+                    ),
+                )
+            else:
+                c.execute(
+                    "UPDATE inv.inventory_items SET stock_qty=?,updated_at=? WHERE id=?",
+                    (float(balance),now,int(item["article_id"])),
+                )
             c.execute(
                 """
                 INSERT INTO inv.stock_movements(
@@ -1734,11 +2796,15 @@ def storno_invoice(
         )
         if doc["linked_service_id"]:
             service_id = int(doc["linked_service_id"])
+            custody_reset = (
+                ",ready_for_pickup_at=NULL,picked_up_at=NULL,final_notice_recorded_at=NULL"
+                if "ready_for_pickup_at" in service_columns else ""
+            )
             service_update = c.execute(
-                """
-                UPDATE servicedb.service SET invoice_no=NULL,office_invoice_id=NULL
-                WHERE id=? AND office_invoice_id=? AND trim(COALESCE(invoice_no,''))<>''
-                """,
+                "UPDATE servicedb.service SET invoice_no=NULL,office_invoice_id=NULL"
+                + custody_reset
+                + " WHERE id=? AND office_invoice_id=? "
+                  "AND trim(COALESCE(invoice_no,''))<>''",
                 (service_id, int(document_id)),
             )
             if service_update.rowcount != 1:
@@ -1755,6 +2821,79 @@ def storno_invoice(
                     raise PosError(
                         "Servisnega naročila ni bilo mogoče enolično ponovno odpreti."
                     )
+        fiscal_result = None
+        if needs_fiscalization:
+            original_issue_text = str(doc["fiscal_issued_at"] or doc["date"] or "")
+            try:
+                original_issue = datetime.fromisoformat(original_issue_text)
+            except ValueError as exc:
+                raise PosError(
+                    "Izvirni račun nima veljavnega časa izdaje za FURS referenco."
+                ) from exc
+            fiscal_result = fiscalizer(
+                {
+                    "issue_datetime": storno_issued_at,
+                    "sequence": storno_sequence,
+                    "public_invoice_number": storno_fiscal_no,
+                    "premise_id": str(doc["fiscal_premise"] or ""),
+                    "device_id": str(doc["fiscal_device"] or ""),
+                    "invoice_amount": -dec(doc["invoice_total"]),
+                    "payment_amount": -dec(doc["invoice_total"]),
+                    "operator_tax_number": str(doc["operator_tax_number_snapshot"] or ""),
+                    "customer_vat_number": str(doc["partner_tax_snapshot"] or ""),
+                    "numbering_structure": numbering_structure,
+                    "reference_invoice": {
+                        "ReferenceInvoiceIdentifier": {
+                            "BusinessPremiseID": str(doc["fiscal_premise"] or ""),
+                            "ElectronicDeviceID": str(doc["fiscal_device"] or ""),
+                            "InvoiceNumber": str(doc["fiscal_sequence"]),
+                        },
+                        "ReferenceInvoiceIssueDateTime": original_issue.strftime(
+                            "%Y-%m-%dT%H:%M:%S"
+                        ),
+                    },
+                }
+            )
+            fiscal_status = str(fiscal_result.get("status") or "")
+            if fiscal_status not in {"CONFIRMED", "PENDING_RECONCILIATION"}:
+                raise PosError("FURS povezava je pri stornu vrnila neveljavno stanje.")
+            from mikrofix_furs import build_fiscal_qr_payload
+            storno_qr = build_fiscal_qr_payload(
+                zoi=fiscal_result.get("zoi", ""),
+                tax_number=str(fiscal_result.get("tax_number") or ""),
+                issue_datetime=storno_issued_at,
+            )
+            c.execute(
+                """
+                UPDATE documents SET fiscal_status=?,furs_zoi=?,furs_eor=?,
+                    furs_qr_payload=?,furs_message_id=?,furs_error_code=?,
+                    furs_error_message=?,updated_at=? WHERE id=?
+                """,
+                (
+                    fiscal_status, str(fiscal_result.get("zoi") or ""),
+                    str(fiscal_result.get("eor") or ""), storno_qr,
+                    str(fiscal_result.get("message_id") or ""),
+                    str(fiscal_result.get("error_code") or ""),
+                    str(fiscal_result.get("error_message") or "")[:1000],
+                    now, storno_id,
+                ),
+            )
+            c.execute(
+                """
+                INSERT INTO furs_outbox_v30(
+                    document_id,message_id,status,payload_json,response_json,
+                    error_code,error_message,created_at,updated_at,confirmed_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    storno_id, str(fiscal_result.get("message_id") or ""), fiscal_status,
+                    json.dumps(fiscal_result.get("payload") or {}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(fiscal_result.get("response") or {}, ensure_ascii=False, separators=(",", ":")),
+                    str(fiscal_result.get("error_code") or ""),
+                    str(fiscal_result.get("error_message") or "")[:1000],
+                    now, now, now if fiscal_status == "CONFIRMED" else None,
+                ),
+            )
         c.execute(
             "UPDATE documents SET status='STORNIRANO',storno_reason=?,storno_at=?,"
             "storno_by=?,updated_at=? WHERE id=?",
@@ -1765,7 +2904,9 @@ def storno_invoice(
             "VALUES(?,?,?,?,?,?)",
             (
                 int(document_id),"INVOICE_STORNIRANO",
-                f"storno_document={storno_id}; storno_no={storno_no}; reason={reason}",
+                f"storno_document={storno_id}; storno_no={storno_no}; "
+                f"fiscal_no={storno_fiscal_no}; "
+                f"furs={(fiscal_result or {}).get('status','NOT_REQUIRED')}; reason={reason}",
                 operator_code,actor,now,
             ),
         )
@@ -1823,12 +2964,13 @@ def generate_pos_pdfs(
     *, office_db: Path | str, document_id: int, output_dir: Path | str,
     company: dict, tax_note: str, premise: str, device: str, paper_width_mm: int = 80,
     copy_no: int = 0,
+    test_mode: bool | None = None,
 ) -> tuple[Path, Path]:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import HRFlowable, Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     doc, lines, payments = invoice_snapshot(office_db, document_id)
     regular_font, bold_font = _register_pos_pdf_fonts()
@@ -1856,6 +2998,29 @@ def generate_pos_pdfs(
         fontSize=14, leading=17,
     )
     copy_label = f"KOPIJA {copy_no}" if copy_no else "ORIGINAL"
+    furs_zoi = str(doc.get("furs_zoi") or "")
+    furs_eor = str(doc.get("furs_eor") or "")
+    fiscal_qr = str(doc.get("furs_qr_payload") or "")
+    fiscal_status = str(doc.get("fiscal_status") or "NOT_REQUIRED")
+    if test_mode is None:
+        test_mode = fiscal_status == "TEST_DISABLED"
+    qr_paths: list[Path] = []
+    fiscal_qr_path: Path | None = None
+    upn_qr_path: Path | None = None
+
+    def make_qr_png(payload: str, label: str, *, upn: bool = False) -> Path:
+        import segno
+        path = output / f".{public_invoice_no}_{label}.png"
+        if upn:
+            qr = segno.make_qr(
+                payload, version=15, error="m", mode="byte",
+                encoding="iso-8859-2", eci=True, boost_error=False,
+            )
+        else:
+            qr = segno.make_qr(payload, error="m", boost_error=False)
+        qr.save(str(path), kind="png", scale=8, border=4, dark="black", light="white")
+        qr_paths.append(path)
+        return path
 
     story = [
         Paragraph(f"<b>{escape(str(company.get('legal_name') or 'MikroFix'))}</b>", body),
@@ -1890,8 +3055,8 @@ def generate_pos_pdfs(
     rows = [["Postavka", "Kol.", "Cena", "Rabat", "Znesek"]]
     for line in lines:
         rows.append([
-            Paragraph(escape(str(line["article_name"])), small),
-            f"{float(line['qty']):.2f}", f"{float(line['unit_price']):.2f}",
+            Paragraph(escape(service_line_public_name(line)), small),
+            service_line_public_quantity(line), f"{float(line['unit_price']):.2f}",
             f"{float(line['discount_pct']):.2f} %", f"{float(line['line_total']):.2f}",
         ])
     table = Table(rows, colWidths=[88*mm, 18*mm, 25*mm, 23*mm, 27*mm], repeatRows=1)
@@ -1917,27 +3082,90 @@ def generate_pos_pdfs(
         ),
         Paragraph(escape(tax_note), small),
         Spacer(1, 4*mm),
-        Paragraph("TESTNI DOKUMENT – FURS PRODUKCIJA JE IZKLOPLJENA", ParagraphStyle("Warning", parent=body, textColor=colors.red)),
     ]
+    if furs_zoi:
+        story.extend([
+            Paragraph(f"ZOI: {escape(furs_zoi)}", small),
+            Paragraph(f"EOR: {escape(furs_eor or 'BO PRIDOBLJEN NAKNADNO')}", small),
+        ])
+        if fiscal_qr:
+            fiscal_qr_path = make_qr_png(fiscal_qr, "FURS")
+            story.extend([Image(str(fiscal_qr_path), width=22*mm, height=22*mm), Spacer(1, 2*mm)])
+    bank_amount = sum(
+        (dec(p["amount"]) for p in payments if str(p["method"]) == "BANK_TRANSFER"),
+        Decimal("0.00"),
+    )
+    if bank_amount > 0:
+        from mikrofix_upnqr import build_upnqr_payload
+        reference = str(doc.get("payment_reference") or "")
+        upn_payload = build_upnqr_payload(
+            amount=bank_amount, recipient_iban=str(company.get("iban") or ""),
+            recipient_reference=reference,
+            recipient_name=str(company.get("legal_name") or "MikroFix"),
+            recipient_street=str(company.get("street") or "Paradiž 73"),
+            recipient_city=str(company.get("city") or "2282 Cirkulane"),
+            payer_name=str(doc.get("partner_name_snapshot") or ""),
+            payer_street=str(doc.get("partner_address_snapshot") or ""),
+            purpose=f"Plačilo računa {public_invoice_no}",
+        ).decode("iso-8859-2")
+        upn_qr_path = make_qr_png(upn_payload, "UPN", upn=True)
+        story.extend([
+            Paragraph(f"<b>UPN QR – plačilo {float(bank_amount):.2f} EUR</b>", body),
+            Image(str(upn_qr_path), width=42*mm, height=42*mm),
+            Paragraph(
+                "Odpri mobilno banko: Plačila → Slikaj UPN QR. "
+                "Navadna kamera kode ne zna uporabiti za plačilo. "
+                "UPN QR računa samodejno ne označi kot plačanega.", small,
+            ),
+        ])
+    if test_mode:
+        story.append(Paragraph(
+            "TESTNI DOKUMENT – FURS PRODUKCIJA JE IZKLOPLJENA",
+            ParagraphStyle("Warning", parent=body, textColor=colors.red),
+        ))
+    elif fiscal_status == "PENDING_RECONCILIATION":
+        story.append(Paragraph(
+            "RAČUN IMA ZOI. EOR BO PRIDOBLJEN NAKNADNO OB OBNOVITVI POVEZAVE.",
+            ParagraphStyle("WarningPending", parent=body, textColor=colors.red),
+        ))
     SimpleDocTemplate(str(a4_path), pagesize=A4, leftMargin=15*mm, rightMargin=15*mm, topMargin=15*mm, bottomMargin=15*mm).build(story)
 
     width = paper_width_mm * mm
+    receipt_body = ParagraphStyle(
+        "ReceiptBodyV30", parent=body, fontSize=8.8, leading=10.8,
+    )
+    receipt_small = ParagraphStyle(
+        "ReceiptSmallV30", parent=receipt_body, fontSize=7.8, leading=9.5,
+    )
+    receipt_brand = str(company.get("short_name") or "MikroFix").strip()
+    receipt_legal = str(company.get("legal_name") or receipt_brand).strip()
     rstory = [
-        Paragraph(f"<b>{escape(str(company.get('short_name') or 'MikroFix'))}</b>", ParagraphStyle("RC", parent=small, alignment=1)),
-        Paragraph(escape(str(company.get('legal_name') or 'MikroFix')), ParagraphStyle("RLegal", parent=small, alignment=1, fontSize=6.2, leading=7.3)),
-        Paragraph(escape(str(company.get('address') or 'Paradiž 73, 2282 Cirkulane')), ParagraphStyle("RC2", parent=small, alignment=1)),
+        Paragraph(f"<b>{escape(receipt_brand)}</b>", ParagraphStyle("RC", parent=receipt_body, alignment=1, fontName=bold_font, fontSize=15, leading=17)),
+        Paragraph(escape(receipt_legal), ParagraphStyle("RLegal", parent=receipt_small, alignment=1, fontSize=7.4, leading=8.8)),
+        Paragraph(escape(str(company.get('address') or 'Paradiž 73, 2282 Cirkulane')), ParagraphStyle("RC2", parent=receipt_small, alignment=1)),
         Paragraph(
             f"Davčna: {escape(str(company.get('tax_number') or '-'))}",
-            ParagraphStyle("RTax", parent=small, alignment=1),
+            ParagraphStyle("RTax", parent=receipt_small, alignment=1),
         ),
-        Spacer(1, 2*mm), Paragraph(
-            f"<b>TEST – {'STORNO RAČUNA' if is_storno else 'NI FISKALNI RAČUN'}</b>",
-            ParagraphStyle("RW", parent=small, alignment=1, textColor=colors.red),
+        Spacer(1, 1.5*mm),
+        HRFlowable(width="100%", thickness=1, color=colors.black, spaceBefore=0, spaceAfter=2*mm),
+        Paragraph(
+            f"<b>{'TEST – ' if test_mode else ''}{'STORNO RAČUNA' if is_storno else ('DAVČNO POTRJEN RAČUN' if furs_eor else 'RAČUN')}</b>",
+            ParagraphStyle("RW", parent=receipt_body, alignment=1, fontName=bold_font, fontSize=10.5, leading=12.5, textColor=colors.red if test_mode else colors.black),
         ),
         Paragraph(
             f"<b>{escape(public_invoice_no)}</b><br/>{copy_label}<br/>"
             f"{escape(issued_at)}<br/>{escape(premise)}/{escape(device)} • {escape(operator_code)}",
-            ParagraphStyle("RH", parent=small, alignment=1),
+            ParagraphStyle("RH", parent=receipt_small, alignment=1),
+        ),
+        Paragraph(
+            f"<b>Kupec: {escape(str(doc.get('partner_name_snapshot') or 'Končni kupec'))}</b><br/>"
+            f"{escape(str(doc.get('partner_address_snapshot') or ''))}"
+            + (
+                f"<br/>Davčna kupca: {escape(str(doc.get('partner_tax_snapshot') or ''))}"
+                if str(doc.get("partner_tax_snapshot") or "").strip() else ""
+            ),
+            ParagraphStyle("RBuyer", parent=receipt_small, alignment=0),
         ),
         Spacer(1, 2*mm),
     ]
@@ -1947,15 +3175,15 @@ def generate_pos_pdfs(
                 "Nadomestni za: "
                 f"{escape(str(doc.get('replacement_original_no') or '-'))}<br/>"
                 f"Storno: {escape(str(doc.get('replacement_storno_no') or '-'))}",
-                ParagraphStyle("RReplacement", parent=small, alignment=1),
+                ParagraphStyle("RReplacement", parent=receipt_small, alignment=1),
             ),
             Spacer(1, 2*mm),
         ])
     rrows = [["Postavka", "Kol.", "Rabat", "Znesek"]]
     for line in lines:
         rrows.append([
-            Paragraph(escape(str(line['article_name'])), small),
-            f"{float(line['qty']):.2f}",
+            Paragraph(escape(service_line_public_name(line)), receipt_small),
+            service_line_public_quantity(line),
             f"{float(line['discount_pct']):.2f} %",
             f"{float(line['line_total']):.2f}",
         ])
@@ -1976,26 +3204,53 @@ def generate_pos_pdfs(
     rt.setStyle(TableStyle([
         ("FONTNAME",(0,0),(-1,-1),regular_font),
         ("FONTNAME",(0,0),(-1,0),bold_font),
-        ("FONTSIZE",(0,0),(-1,-1),6.5),
+        ("FONTSIZE",(0,0),(-1,-1),7.5),
         ("LINEBELOW",(0,0),(-1,0),.5,colors.black),
         ("ALIGN",(1,0),(-1,-1),"RIGHT"),
         ("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("PADDING",(0,0),(-1,-1),2),
+        ("PADDING",(0,0),(-1,-1),2.5),
     ]))
     rstory += [
         rt,
         Spacer(1,2*mm),
         Paragraph(
             f"<b>SKUPAJ {float(doc['invoice_total']):.2f} EUR</b>",
-            ParagraphStyle("RT", parent=body, alignment=2),
+            ParagraphStyle("RT", parent=receipt_body, alignment=2, fontSize=10.5, leading=12.5),
         ),
-        Paragraph(f"Plačilo: {escape(pay_text)}", small),
-        Paragraph(escape(tax_note), small),
-        Paragraph(
-            f"TEST {premise}/{device} • ZOI/EOR ni ustvarjen",
-            ParagraphStyle("RF", parent=small, alignment=1),
-        ),
+        Paragraph(f"Plačilo: {escape(pay_text)}", receipt_small),
+        Paragraph(escape(tax_note), receipt_small),
     ]
+    if furs_zoi:
+        rstory.extend([
+            Paragraph(f"ZOI: {escape(furs_zoi)}", ParagraphStyle("RZOI", parent=receipt_small, alignment=1, fontSize=6.8, leading=8.2)),
+            Paragraph(f"EOR: {escape(furs_eor or 'BO PRIDOBLJEN NAKNADNO')}", ParagraphStyle("REOR", parent=receipt_small, alignment=1, fontSize=6.8, leading=8.2)),
+        ])
+        if fiscal_qr and fiscal_qr_path:
+            rstory.append(Image(str(fiscal_qr_path), width=22*mm, height=22*mm, hAlign="CENTER"))
+    elif test_mode:
+        rstory.append(Paragraph(
+            f"TEST {premise}/{device} • ZOI/EOR ni ustvarjen",
+            ParagraphStyle("RF", parent=receipt_small, alignment=1),
+        ))
+    if bank_amount > 0 and upn_qr_path:
+        thermal_qr_mm = 50 if paper_width_mm >= 80 else 46
+        rstory.extend([
+            Spacer(1, 3*mm),
+            Paragraph(
+                f"<b>SKENIRAJ ZA PLAČILO {float(bank_amount):.2f} EUR</b>",
+                ParagraphStyle("RUPN", parent=receipt_small, alignment=1, fontSize=9, leading=11),
+            ),
+            Image(
+                str(upn_qr_path), width=thermal_qr_mm*mm,
+                height=thermal_qr_mm*mm, hAlign="CENTER",
+            ),
+            Paragraph(
+                f"IBAN {escape(str(company.get('iban') or ''))}<br/>"
+                f"Sklic {escape(str(doc.get('payment_reference') or ''))}<br/>"
+                "Skeniraj v mobilni banki, ne z navadno kamero.",
+                ParagraphStyle("RUPNData", parent=receipt_small, alignment=1, fontSize=7.2, leading=8.8),
+            ),
+        ])
     # Dolgi nazivi se na termičnem računu prelomijo v več vrstic. Višino zato
     # ocenimo iz dejanskega besedila, ne samo iz števila postavk.
     chars_per_row = 42 if paper_width_mm >= 80 else 28
@@ -2003,8 +3258,14 @@ def generate_pos_pdfs(
         max(1, (len(str(line["article_name"])) + chars_per_row - 1) // chars_per_row)
         for line in lines
     )
-    height = max(150, 118 + wrapped_rows * 10) * mm
+    upn_extra_height_mm = 68 if bank_amount > 0 and upn_qr_path else 0
+    height = max(165 + upn_extra_height_mm, 132 + wrapped_rows * 12 + upn_extra_height_mm) * mm
     SimpleDocTemplate(str(receipt_path), pagesize=(width, height), leftMargin=4*mm, rightMargin=4*mm, topMargin=4*mm, bottomMargin=4*mm).build(rstory)
+    for qr_path in qr_paths:
+        try:
+            qr_path.unlink()
+        except OSError:
+            pass
     return a4_path, receipt_path
 
 
@@ -2019,7 +3280,7 @@ def generate_pos_preview_pdfs(
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.lib.units import mm
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
     calculated = [calculate_line(line, labor_floor) for line in lines]
     if not calculated:
@@ -2051,10 +3312,10 @@ def generate_pos_preview_pdfs(
     )
     rows = [["Izvor", "Postavka", "Kol.", "Cena", "Rabat", "Znesek"]]
     for item in calculated:
-        source = "SERVIS" if item.source.source_locked else "DODATNA PRODAJA"
+        source = "SERVIS" if item.source.source_locked else "PRODAJA"
         rows.append([
-            source, Paragraph(escape(str(item.source.name)), small),
-            f"{dec(item.source.quantity):.2f}", f"{dec(item.source.base_unit_price):.2f}",
+            source, Paragraph(escape(service_line_public_name(item.source)), small),
+            service_line_public_quantity(item.source), f"{dec(item.source.base_unit_price):.2f}",
             f"{item.applied_discount_pct:.2f} %", f"{item.line_total:.2f}",
         ])
     story = [
@@ -2108,13 +3369,34 @@ def generate_pos_preview_pdfs(
     ).build(story)
 
     width = paper_width_mm * mm
+    preview_receipt_body = ParagraphStyle(
+        "PreviewReceiptBody", parent=body, fontSize=8.8, leading=10.8,
+    )
+    preview_receipt_small = ParagraphStyle(
+        "PreviewReceiptSmall", parent=preview_receipt_body, fontSize=7.8, leading=9.5,
+    )
+    preview_receipt_warning = ParagraphStyle(
+        "PreviewReceiptWarning", parent=preview_receipt_body, fontName=bold_font,
+        fontSize=10, leading=12, alignment=1, textColor=colors.red,
+    )
+    preview_brand = str(company.get("short_name") or "MikroFix").strip()
+    preview_legal = str(company.get("legal_name") or preview_brand).strip()
     receipt_story = [
-        Paragraph("<b>PREDOGLED – NI RAČUN</b>", warning),
         Paragraph(
-            f"{escape(str(company.get('short_name') or 'MikroFix'))}<br/>"
+            f"<b>{escape(preview_brand)}</b>",
+            ParagraphStyle("PreviewBrand", parent=preview_receipt_body, fontName=bold_font, fontSize=15, leading=17, alignment=1),
+        ),
+        Paragraph(
+            escape(preview_legal),
+            ParagraphStyle("PreviewLegal", parent=preview_receipt_small, alignment=1),
+        ),
+        Spacer(1, 1.5*mm),
+        HRFlowable(width="100%", thickness=1, color=colors.black, spaceBefore=0, spaceAfter=2*mm),
+        Paragraph("<b>PREDOGLED – NI RAČUN</b>", preview_receipt_warning),
+        Paragraph(
             f"{escape(str(premise))}/{escape(str(device))}<br/>"
             f"Kupec: {escape(str(customer.get('name') or 'Končni kupec'))}",
-            ParagraphStyle("PreviewReceiptHead", parent=small, alignment=1),
+            ParagraphStyle("PreviewReceiptHead", parent=preview_receipt_small, alignment=1),
         ),
         Spacer(1, 2*mm),
     ]
@@ -2122,15 +3404,15 @@ def generate_pos_preview_pdfs(
         receipt_story.extend([
             Paragraph(
                 "Nadomestni za: " + escape(str(replacement_of_invoice_no).strip()),
-                ParagraphStyle("PreviewReplacement", parent=small, alignment=1),
+                ParagraphStyle("PreviewReplacement", parent=preview_receipt_small, alignment=1),
             ),
             Spacer(1, 2*mm),
         ])
     receipt_rows = [["Postavka", "Kol.", "Rabat", "Znesek"]]
     for item in calculated:
         receipt_rows.append([
-            Paragraph(escape(str(item.source.name)), small),
-            f"{dec(item.source.quantity):.2f}",
+            Paragraph(escape(service_line_public_name(item.source)), preview_receipt_small),
+            service_line_public_quantity(item.source),
             f"{item.applied_discount_pct:.2f}%", f"{item.line_total:.2f}",
         ])
     usable = max(50, paper_width_mm - 8)
@@ -2141,23 +3423,22 @@ def generate_pos_preview_pdfs(
     receipt_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), regular_font),
         ("FONTNAME", (0, 0), (-1, 0), bold_font),
-        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
         ("LINEBELOW", (0, 0), (-1, 0), .5, colors.black),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("PADDING", (0, 0), (-1, -1), 2),
+        ("PADDING", (0, 0), (-1, -1), 2.5),
     ]))
     receipt_story += [
         receipt_table, Spacer(1, 2*mm),
-        Paragraph(f"<b>SKUPAJ {total:.2f} EUR</b>", ParagraphStyle("PRTotal", parent=body, alignment=2)),
-        Paragraph(f"Plačilo: {escape(payment_text)}", small),
-        Paragraph("PREDOGLED – NI RAČUN", ParagraphStyle("PRFoot", parent=small, alignment=1, textColor=colors.red)),
+        Paragraph(f"<b>SKUPAJ {total:.2f} EUR</b>", ParagraphStyle("PRTotal", parent=preview_receipt_body, alignment=2, fontSize=10.5, leading=12.5)),
+        Paragraph(f"Plačilo: {escape(payment_text)}", preview_receipt_small),
+        Paragraph("PREDOGLED – NI RAČUN", ParagraphStyle("PRFoot", parent=preview_receipt_small, alignment=1, textColor=colors.red)),
     ]
     wrapped_rows = sum(max(1, (len(str(item.source.name)) + 41) // 42) for item in calculated)
-    height = max(150, 112 + wrapped_rows * 10) * mm
+    height = max(165, 130 + wrapped_rows * 12) * mm
     SimpleDocTemplate(
         str(receipt_path), pagesize=(width, height), leftMargin=4*mm,
         rightMargin=4*mm, topMargin=4*mm, bottomMargin=4*mm,
     ).build(receipt_story)
     return a4_path, receipt_path
-

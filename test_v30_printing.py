@@ -31,6 +31,7 @@ class V30PrintingTests(unittest.TestCase):
         self.assertEqual(
             payment_method_label("BANK_TRANSFER"), "Bančno nakazilo (TRR)"
         )
+        self.assertEqual(payment_method_label("CARD"), "Plačilna kartica")
         self.assertEqual(payment_status_label("PAID"), "Plačano")
 
 

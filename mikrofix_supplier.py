@@ -7,7 +7,6 @@ spreminjata obstoječih ponudb, dokumentov ali dejanske lokalne količine.
 from __future__ import annotations
 
 import json
-import math
 import re
 import sqlite3
 import urllib.error
@@ -20,6 +19,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable
 
+from mikrofix_v29_core import recommend_price
+
 
 MAX_PRODUCT_PAGE_BYTES = 3_000_000
 
@@ -30,10 +31,6 @@ def utc_now() -> datetime:
 
 def iso_now() -> str:
     return utc_now().isoformat(timespec="seconds")
-
-
-def ceil_to_5(value: float) -> float:
-    return float(math.ceil((float(value) - 1e-9) / 5.0) * 5)
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -267,19 +264,9 @@ class SupplierCatalogStore:
         if category not in rules:
             raise ValueError(f"Manjka maržno pravilo za kategorijo {category}.")
         rule = rules[category]
-        landed = (
-            float(public_price)
-            + float(rule["consumables_eur"])
-            + float(public_price) * float(rule["warranty_reserve"])
-        )
-        target = ceil_to_5(max(
-            landed / (1.0 - float(rule["target_margin"])),
-            landed + float(rule["min_contribution_eur"]),
-        ))
-        floor = ceil_to_5(max(
-            landed / (1.0 - float(rule["hard_margin"])),
-            landed + float(rule["min_contribution_eur"]),
-        ))
+        recommendation = recommend_price(public_price, rule, profile_code=category)
+        landed = recommendation.landed_cost
+        target = recommendation.recommended_price
         t1 = float(self.pricing.get("t1_hour_eur", 30.0))
         pickup_return = float(self.pricing.get("pickup_return_eur", 20.0))
         onsite_first = float(self.pricing.get("onsite_first_hour_eur", 90.0))
@@ -299,16 +286,14 @@ class SupplierCatalogStore:
                 and part_price + onsite_first <= float(competitor_price) + onsite_premium
             )
 
-        selected = target if competitive(target) else floor
+        selected = target
         pickup = selected + t1 + pickup_return
         onsite = selected + onsite_first
         contribution = selected - landed
         margin = contribution / selected if selected else 0.0
         passes = (
             auto_eligible
-            and selected >= float(self.pricing.get("l0_eur", 22.0))
-            and margin + 1e-9 >= float(rule["hard_margin"])
-            and contribution + 1e-9 >= float(rule["min_contribution_eur"])
+            and selected + 1e-9 >= float(public_price) * 1.05
             and competitive(selected)
         )
         return {
@@ -317,7 +302,7 @@ class SupplierCatalogStore:
             "pickup_price": round(pickup, 2),
             "onsite_price": round(onsite, 2),
             "gross_margin": round(margin, 4),
-            "pricing_mode": "TARGET" if selected == target else "COMPETITIVE_FLOOR",
+            "pricing_mode": "TIERED_MARGIN_V1",
             "offer_status": "OBJAVI" if passes else "PO PONUDBI",
         }
 

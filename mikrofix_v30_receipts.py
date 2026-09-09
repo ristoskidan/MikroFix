@@ -45,10 +45,29 @@ def now_text() -> str:
 
 
 def decimal_value(value: Any, label: str, *, scale: Decimal = FOUR) -> Decimal:
+    raw = str(value if value not in (None, "") else "0").strip()
+    normalized = (
+        raw.replace("\u00a0", "")
+        .replace(" ", "")
+        .replace("EUR", "")
+        .replace("eur", "")
+        .replace("€", "")
+    )
+    # Sprejmi slovenski zapis 1.234,56 in mednarodni zapis 1,234.56.
+    if "," in normalized and "." in normalized:
+        if normalized.rfind(",") > normalized.rfind("."):
+            normalized = normalized.replace(".", "").replace(",", ".")
+        else:
+            normalized = normalized.replace(",", "")
+    else:
+        normalized = normalized.replace(",", ".")
     try:
-        result = Decimal(str(value if value not in (None, "") else "0").replace(",", "."))
+        result = Decimal(normalized)
     except (InvalidOperation, ValueError) as exc:
-        raise ReceiptError(f"{label} mora biti številka.") from exc
+        raise ReceiptError(
+            f"{label} ni veljaven znesek: »{raw}«. Vpiši samo znesek, na primer "
+            "1234,56 (presledki, oznaka EUR in znak € so dovoljeni)."
+        ) from exc
     if not result.is_finite() or result < 0:
         raise ReceiptError(f"{label} ne sme biti negativna.")
     return result.quantize(scale, rounding=ROUND_HALF_UP)
@@ -625,11 +644,12 @@ def _release_stock(
         )
         profile = connection.execute(
             """
-            SELECT p.code, p.target_margin, p.hard_margin, p.min_contribution_eur,
-                   p.consumables_eur, p.warranty_reserve, p.round_step_eur
+            SELECT v.code, v.version_no, v.tiers_json, v.warranty_reserve
             FROM inv.inventory_items i
-            LEFT JOIN inv.price_profiles p ON p.code=i.price_profile_code AND p.active=1
+            LEFT JOIN inv.price_profile_versions v
+              ON v.code=i.price_profile_code AND v.active=1
             WHERE i.id=?
+            ORDER BY v.version_no DESC LIMIT 1
             """,
             (article_id,),
         ).fetchone()
@@ -637,9 +657,8 @@ def _release_stock(
             recommendation = recommend_price(
                 Decimal(landed_text),
                 {
-                    "target_margin": profile[1], "hard_margin": profile[2],
-                    "min_contribution_eur": profile[3], "consumables_eur": profile[4],
-                    "warranty_reserve": profile[5], "round_step_eur": profile[6],
+                    "version": profile[1], "tiers": json.loads(profile[2]),
+                    "warranty_reserve": profile[3],
                 },
                 profile_code=str(profile[0]),
             )
@@ -653,13 +672,21 @@ def _release_stock(
             INSERT INTO inv.price_history(
                 article_id, active_from, acquisition_cost, recommended_price,
                 confirmed_price, profile_code, reason, source_type, source_id,
-                operator_code, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                operator_code, created_at, profile_version,
+                target_margin_snapshot, warranty_reserve_snapshot, actual_margin
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 article_id, stamp, float(Decimal(landed_text)), recommended_price,
                 float(Decimal(sale_text)), profile_code, f"Prejem {receipt_no}",
                 "RECEIPT_V30", receipt_id, operator_code, stamp,
+                recommendation.profile_version if profile and profile[0] else 1,
+                recommendation.target_margin if profile and profile[0] else 0,
+                recommendation.warranty_reserve if profile and profile[0] else 0,
+                (
+                    round(1 - recommendation.landed_cost / float(Decimal(sale_text)), 6)
+                    if profile and profile[0] and Decimal(sale_text) else 0
+                ),
             ),
         )
         connection.execute(

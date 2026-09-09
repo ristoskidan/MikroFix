@@ -260,6 +260,7 @@ def create_encrypted_backup(
         existing = sorted(target.glob(f"{DAILY_PREFIX}{date.today().isoformat()}_*.mfbak"))
         if existing:
             inspect_backup(existing[-1], passphrase)
+            existing[-1].chmod(0o600)
             return existing[-1]
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     prefix = DAILY_PREFIX if normalized_kind == "DAILY" else RESCUE_PREFIX
@@ -271,6 +272,7 @@ def create_encrypted_backup(
             schema_version=schema_version, kind=normalized_kind, zip_path=zip_path,
         )
         _encrypt_zip(zip_path, destination, passphrase)
+    destination.chmod(0o600)
     inspect_backup(destination, passphrase)
     if normalized_kind == "DAILY":
         rotate_daily_backups(target, keep=30)

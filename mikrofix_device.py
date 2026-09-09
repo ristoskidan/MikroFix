@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import socket
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 
@@ -25,17 +27,16 @@ ERROR_MESSAGES = {
         "Manjka dodatek pymobiledevice3. Zaženi namesti_v28.bat."
     ),
     "APPLE_SERVICE_MISSING": (
-        "Windows ne najde Apple USB komunikacijskega ozadja. Zaženi Apple Devices "
-        "oziroma iTunes; če se napaka ponovi, ponovno zaženi Windows ali popravi "
-        "Apple podporo za mobilne naprave."
+        "Sistem ne najde USB komunikacijskega ozadja za iPhone. Na Windows preveri "
+        "Apple Devices oziroma iTunes; na Linuxu namesti in zaženi usbmuxd."
     ),
     "APPLE_SERVICE_STOPPED": (
-        "Apple USB komunikacijsko ozadje je nameščeno, vendar ne deluje. "
-        "Ponovno zaženi Apple Devices oziroma iTunes in nato Windows."
+        "USB komunikacijsko ozadje za iPhone je nameščeno, vendar ne deluje. "
+        "Ponovno zaženi Apple Devices/iTunes oziroma storitev usbmuxd."
     ),
     "USBMUX_UNAVAILABLE": (
-        "Apple USB povezovalna storitev ni dosegljiva. Preveri iTunes oziroma "
-        "Apple Mobile Device Service."
+        "USB povezovalna storitev za iPhone ni dosegljiva. Preveri Apple Mobile "
+        "Device Service na Windows oziroma usbmuxd na Linuxu."
     ),
     "NO_DEVICE": (
         "iPhone ni zaznan. Uporabi podatkovni USB kabel, odkleni telefon in ga priklopi neposredno v računalnik."
@@ -65,8 +66,8 @@ ERROR_MESSAGES = {
         "Čas za povezavo je potekel. Odkleni iPhone, potrdi Trust in poskusi ponovno."
     ),
     "SESSION_ACTIVE": (
-        "Apple povezavo trenutno uporablja druga seja. Zapri Apple Devices oziroma iTunes, "
-        "telefon ponovno priklopi in nato znova klikni MicroDETECT."
+        "Povezavo z iPhonom trenutno uporablja druga seja. Zapri drugo aplikacijo, "
+        "ki bere telefon, ga ponovno priklopi in nato znova klikni MicroDETECT."
     ),
     "UNKNOWN": (
         "MicroDETECT ni uspel prebrati naprave. Preveri kabel, Apple podporo in Trust."
@@ -78,10 +79,34 @@ def problem(code: str) -> DeviceDetectionError:
     return DeviceDetectionError(code, ERROR_MESSAGES.get(code, ERROR_MESSAGES["UNKNOWN"]))
 
 
-def windows_apple_service_state() -> str:
-    """Vrne running, stopped, missing ali not_windows; ničesar ne spreminja."""
+def find_usbmuxd_binary() -> str | None:
+    """Najde usbmuxd tudi v sistemskih sbin mapah, ki niso v uporabnikovem PATH."""
+    resolved = shutil.which("usbmuxd")
+    if resolved:
+        return resolved
     if os.name != "nt":
-        return "not_windows"
+        for candidate in (Path("/usr/sbin/usbmuxd"), Path("/usr/local/sbin/usbmuxd")):
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def windows_apple_service_state() -> str:
+    """Vrne running, stopped ali missing; ničesar ne spreminja."""
+    if os.name != "nt":
+        if Path("/var/run/usbmuxd").exists():
+            return "running"
+        if shutil.which("systemctl"):
+            completed = subprocess.run(
+                ["systemctl", "is-active", "usbmuxd"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            if completed.stdout.strip() == "active":
+                return "running"
+        return "stopped" if find_usbmuxd_binary() else "missing"
     completed = subprocess.run(
         ["sc.exe", "query", "Apple Mobile Device Service"],
         capture_output=True,

@@ -45,10 +45,27 @@ def ensure_service_invoice_schema(connection) -> None:
             description TEXT NOT NULL,
             quantity REAL NOT NULL,
             unit_price REAL NOT NULL,
+            service_tier TEXT,
+            billable_minutes INTEGER NOT NULL DEFAULT 0,
+            tariff_version TEXT,
+            first_rate REAL NOT NULL DEFAULT 0,
+            extra_half_hour_rate REAL NOT NULL DEFAULT 0,
             FOREIGN KEY(service_id) REFERENCES service(id) ON DELETE CASCADE
         )
         """
     )
+    manual_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(service_manual_lines)")
+    }
+    for name, ddl in {
+        "service_tier": "TEXT",
+        "billable_minutes": "INTEGER NOT NULL DEFAULT 0",
+        "tariff_version": "TEXT",
+        "first_rate": "REAL NOT NULL DEFAULT 0",
+        "extra_half_hour_rate": "REAL NOT NULL DEFAULT 0",
+    }.items():
+        if name not in manual_columns:
+            connection.execute(f"ALTER TABLE service_manual_lines ADD COLUMN {name} {ddl}")
     connection.commit()
 
 
@@ -106,7 +123,10 @@ def load_service_invoice_seed(
     ).fetchall()
     manual_rows = connection.execute(
         """
-        SELECT id, line_kind, description, quantity, unit_price
+        SELECT id, line_kind, description, quantity, unit_price,
+               COALESCE(service_tier,''), COALESCE(billable_minutes,0),
+               COALESCE(tariff_version,''), COALESCE(first_rate,0),
+               COALESCE(extra_half_hour_rate,0)
         FROM service_manual_lines WHERE service_id=? ORDER BY id
         """,
         (int(service_id),),

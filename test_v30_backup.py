@@ -49,6 +49,7 @@ class V30BackupTests(unittest.TestCase):
         first = self.create()
         second = self.create()
         self.assertEqual(first, second)
+        self.assertEqual(first.stat().st_mode & 0o777, 0o600)
         self.assertEqual(len(list(self.target.glob("mikrofix_daily_*.mfbak"))), 1)
         self.assertNotIn(b"sledljivo", first.read_bytes())
         info = inspect_backup(first, self.password)

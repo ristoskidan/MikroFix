@@ -12,7 +12,12 @@ from pathlib import Path
 
 
 APP_DIR = Path(__file__).resolve().parent
-os.environ["MIKROFIX_CONFIG"] = str(APP_DIR / "mikrofix_settings_e2e_test.json")
+os.environ["MIKROFIX_CONFIG"] = str(
+    Path(
+        os.environ.get("MIKROFIX_CONFIG")
+        or APP_DIR / "mikrofix_settings_e2e_test.json"
+    ).expanduser().resolve()
+)
 os.environ.pop("MIKROFIX_ALLOW_FURS_PRODUCTION", None)
 os.environ["MIKROFIX_E2E_TEST"] = "YES"
 
@@ -257,4 +262,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

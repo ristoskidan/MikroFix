@@ -433,4 +433,3 @@ def complete_buyback_atomic(
         raise
     finally:
         connection.close()
-

@@ -1,0 +1,8 @@
+{
+  "app_version": "30.0-linux",
+  "status": "REVOKED_PENDING_REQUIREMENTS_AUDIT",
+  "created_at": "2026-09-04T23:32:15-05:00",
+  "tests_passed": 155,
+  "test_command": ".venv/bin/python -m unittest discover -v",
+  "source_sha256": "8f9410e5c43524abf26db9e7e2ddf4bd0bc9143f13ab687a8e0b3d02ffa66a1a"
+}

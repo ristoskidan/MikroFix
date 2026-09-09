@@ -1,0 +1,10 @@
+# MikroFIX v30 R9 Linux - LMDE 7 / Debian 13, Python 3.13 x64.
+reportlab>=4.4.9,<6
+pypdf>=5,<7
+Pillow>=12.3,<13
+PyMuPDF>=1.26,<2
+segno>=1.6,<2
+cryptography>=46,<51
+requests>=2.32,<3
+lzfse==0.4.2
+pymobiledevice3>=10.8.1,<11

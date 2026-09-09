@@ -150,20 +150,25 @@ def receive_lot(
 def allocate_fifo(
     connection: sqlite3.Connection, *, schema: str, article_id: int, quantity,
     allocation_type: str, source_id: int, source_line_id: int, created_at: str,
+    requested_lot_serial: str = "",
 ) -> list[dict]:
     schema = _schema(schema)
     ensure_lot_schema(connection, schema)
     needed = _q(quantity)
     if needed <= 0:
         return []
+    requested = str(requested_lot_serial or "").strip()
+    lot_filter = " AND lot_serial=?" if requested else ""
+    parameters = (int(article_id), requested) if requested else (int(article_id),)
     rows = connection.execute(
         f"""
         SELECT id, lot_serial, quantity_available, acquisition_cost
         FROM {schema}.inventory_lots_v30
         WHERE article_id=? AND status='ACTIVE' AND quantity_available>0
+          {lot_filter}
         ORDER BY received_at, id
         """,
-        (int(article_id),),
+        parameters,
     ).fetchall()
     available = sum((_q(row[2]) for row in rows), Decimal("0"))
     if available < needed:

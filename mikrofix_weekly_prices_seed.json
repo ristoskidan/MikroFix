@@ -82,6 +82,86 @@
       ],
       "battery": {"cost_eur": 17.83, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-16/baterija-za-iphone-16-3561mah-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-08-27"},
       "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 12 mini",
+      "storage": "64 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-12-mini/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 19.82, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-12-mini/baterija-za-iphone-12-mini-2227mah-a2471-service-pack/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 12 Pro Max",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-12-pro-max/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 21.80, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-12-pro-max/baterija-za-iphone-12-pro-max-3687mah-diagnostic/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 13 Pro",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-13-pro/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 14.36, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-13-pro/baterija-za-iphone-13-pro-3095mah-a2656-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 13 Pro Max",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-13-pro-max/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 14.36, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-13-pro-max/baterija-za-iphone-13-pro-max-4352mah-a2653-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 14 Pro",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-14-pro/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 15.35, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-14-pro/baterija-za-iphone-14-pro-3200mah-a2866/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 14 Pro Max",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-14-pro-max/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 15.85, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-14-pro-max/baterija-za-iphone-14-pro-max-4323mah-a2830-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 15 Pro",
+      "storage": "128 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-15-pro/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 13.87, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-15-pro/baterija-za-iphone-15-pro-3274mah-a3011-fixpremium/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
+    },
+    {
+      "model": "iPhone 15 Pro Max",
+      "storage": "256 GB",
+      "market_offers": [
+        {"seller": "Swappie", "price_eur": 1.00, "url": "https://swappie.com/si-en/iphone/", "kind": "swappie_model", "observed_on": "2026-01-01", "warranty_months": 12},
+        {"seller": "Refurbed", "price_eur": 1.00, "url": "https://www.refurbed.si/p/iphone-15-pro-max/", "kind": "refurbed_storage", "observed_on": "2026-01-01", "warranty_months": 12}
+      ],
+      "battery": {"cost_eur": 39.65, "url": "https://fixshop.si/rezervni-deli-apple-iphone-apple-iphone-15-pro-max/baterija-za-iphone-15-pro-max-4422mah-a3121-service-pack/", "kind": "fixshop_product", "observed_on": "2026-01-01"},
+      "seal_material_eur": 2.46
     }
   ]
 }

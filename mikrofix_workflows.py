@@ -111,6 +111,70 @@ def ensure_workflow_schema(connection) -> None:
         ON service_orders(device_serial, device_imei, status)
         """
     )
+    service_order_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(service_orders)")
+    }
+    for name, ddl in {
+        "work_started_at": "TEXT",
+        "work_ended_at": "TEXT",
+        "work_elapsed_minutes": "INTEGER",
+        "customer_partner_id": "INTEGER",
+    }.items():
+        if name not in service_order_columns:
+            connection.execute(f"ALTER TABLE service_orders ADD COLUMN {name} {ddl}")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS service_work_sessions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_order_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            elapsed_seconds INTEGER,
+            started_by TEXT,
+            ended_by TEXT,
+            stop_reason TEXT,
+            FOREIGN KEY(service_order_id) REFERENCES service_orders(id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_service_work_one_running
+        ON service_work_sessions(service_order_id)
+        WHERE ended_at IS NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_service_work_order
+        ON service_work_sessions(service_order_id,id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS service_order_parts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_order_id INTEGER NOT NULL,
+            line_no INTEGER NOT NULL,
+            part_name TEXT,
+            part_id TEXT,
+            barcode TEXT,
+            article_id INTEGER,
+            lot_serial TEXT,
+            unit_price REAL NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(service_order_id) REFERENCES service_orders(id)
+                ON DELETE CASCADE,
+            UNIQUE(service_order_id,line_no)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_service_order_parts_order
+        ON service_order_parts(service_order_id,line_no)
+        """
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS buybacks(
@@ -254,6 +318,71 @@ def ensure_workflow_schema(connection) -> None:
     connection.commit()
 
 
+def save_service_order_parts(
+    connection,
+    service_order_id: int,
+    parts,
+    *,
+    commit: bool = True,
+) -> None:
+    """Atomarno shrani trenutni seznam delov odprtega servisnega naloga."""
+    ensure_workflow_schema(connection)
+    order = connection.execute(
+        "SELECT status FROM service_orders WHERE id=?",
+        (int(service_order_id),),
+    ).fetchone()
+    if not order:
+        raise WorkflowError("Servisno naročilo ne obstaja.")
+    if str(order[0] or "").upper() != "OPEN":
+        raise WorkflowError("Dele je mogoče spreminjati samo na odprtem servisu.")
+
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        connection.execute(
+            "DELETE FROM service_order_parts WHERE service_order_id=?",
+            (int(service_order_id),),
+        )
+        for line_no, part in enumerate(parts, 1):
+            if len(part) != 6:
+                raise WorkflowError("Neveljaven zapis uporabljenega artikla.")
+            part_name, part_id, barcode, article_id, lot_serial, unit_price = part
+            connection.execute(
+                """
+                INSERT INTO service_order_parts(
+                    service_order_id,line_no,part_name,part_id,barcode,
+                    article_id,lot_serial,unit_price,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    int(service_order_id), line_no, str(part_name or "").strip(),
+                    str(part_id or "").strip(), str(barcode or "").strip(),
+                    int(article_id) if article_id is not None else None,
+                    str(lot_serial or "").strip(), float(unit_price or 0), stamp,
+                ),
+            )
+        if commit:
+            connection.commit()
+    except Exception:
+        if commit:
+            connection.rollback()
+        raise
+
+
+def load_service_order_parts(connection, service_order_id: int) -> list[tuple]:
+    """Vrne shranjene dele odprtega naloga v vrstnem redu vnosa."""
+    ensure_workflow_schema(connection)
+    rows = connection.execute(
+        """
+        SELECT part_name,part_id,barcode,article_id,lot_serial,unit_price
+        FROM service_order_parts
+        WHERE service_order_id=?
+        ORDER BY line_no,id
+        """,
+        (int(service_order_id),),
+    ).fetchall()
+    return [tuple(row) for row in rows]
+
+
 def _required(data: dict[str, Any], key: str, label: str) -> str:
     value = str(data.get(key) or "").strip()
     if not value:
@@ -351,7 +480,7 @@ def create_service_order(
     cursor = connection.execute(
         """
         INSERT INTO service_orders(
-            order_no, created_at, status,
+            order_no, created_at, status, customer_partner_id,
             customer_name, customer_address, customer_phone, customer_email,
             device_model, device_serial, device_imei, device_os, device_storage,
             device_type, identity_method,
@@ -359,10 +488,11 @@ def create_service_order(
             quote_eur, logistics_eur, expected_due, contract_context,
             immediate_start_requested, withdrawal_loss_ack, delivery_channel,
             microdetect_confirmed, microdetect_at, operator_code, notes
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             order_no, now, "OPEN",
+            int(data["customer_partner_id"]) if data.get("customer_partner_id") else None,
             data["customer_name"], str(data.get("customer_address") or "").strip(),
             str(data.get("customer_phone") or "").strip(),
             str(data.get("customer_email") or "").strip(),
@@ -398,6 +528,185 @@ def get_service_order(connection, order_id: int):
         "SELECT * FROM service_orders LIMIT 0"
     ).description]
     return dict(zip(columns, row))
+
+
+def start_service_work_timer(
+    connection, order_id: int, *, started_at: datetime | None = None,
+    operator_code: str = "",
+    commit: bool = True,
+) -> datetime:
+    """Začni nov obračunljivi interval ali vrni začetek že tekočega."""
+    ensure_workflow_schema(connection)
+    row = connection.execute(
+        "SELECT status,work_started_at,work_ended_at FROM service_orders WHERE id=?",
+        (int(order_id),),
+    ).fetchone()
+    if not row:
+        raise WorkflowError("Servisnega naročila ni mogoče najti.")
+    if str(row[0]) != "OPEN" or row[2]:
+        raise WorkflowError("Časovnik je mogoče zagnati samo za odprt servis.")
+    running = connection.execute(
+        "SELECT started_at FROM service_work_sessions "
+        "WHERE service_order_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+        (int(order_id),),
+    ).fetchone()
+    if running:
+        return datetime.fromisoformat(str(running[0]))
+    started = started_at or datetime.now()
+    connection.execute(
+        "INSERT INTO service_work_sessions(service_order_id,started_at,started_by) "
+        "VALUES(?,?,?)",
+        (int(order_id), started.isoformat(timespec="seconds"), str(operator_code or "")),
+    )
+    connection.execute(
+        "UPDATE service_orders SET work_started_at=COALESCE(work_started_at,?) "
+        "WHERE id=?",
+        (started.isoformat(timespec="seconds"), int(order_id)),
+    )
+    if commit:
+        connection.commit()
+    return started
+
+
+def service_work_timer_snapshot(
+    connection, order_id: int, *, at: datetime | None = None,
+) -> dict[str, Any]:
+    """Vrni shranjeni in tekoči čas brez spreminjanja podatkov."""
+    ensure_workflow_schema(connection)
+    order = connection.execute(
+        "SELECT status,work_started_at,work_ended_at,work_elapsed_minutes "
+        "FROM service_orders WHERE id=?", (int(order_id),),
+    ).fetchone()
+    if not order:
+        raise WorkflowError("Servisnega naročila ni mogoče najti.")
+    rows = connection.execute(
+        "SELECT id,started_at,ended_at,COALESCE(elapsed_seconds,0) "
+        "FROM service_work_sessions WHERE service_order_id=? ORDER BY id",
+        (int(order_id),),
+    ).fetchall()
+    now = at or datetime.now()
+    stored_seconds = sum(int(row[3] or 0) for row in rows if row[2])
+    running_row = next((row for row in reversed(rows) if not row[2]), None)
+    running_seconds = 0
+    running_started_at = None
+    if running_row:
+        running_started_at = datetime.fromisoformat(str(running_row[1]))
+        running_seconds = max(0, int((now - running_started_at).total_seconds()))
+    total_seconds = stored_seconds + running_seconds
+    return {
+        "status": str(order[0]),
+        "first_started_at": (
+            datetime.fromisoformat(str(order[1])) if order[1] else None
+        ),
+        "finished_at": datetime.fromisoformat(str(order[2])) if order[2] else None,
+        "running": running_row is not None,
+        "running_started_at": running_started_at,
+        "stored_seconds": stored_seconds,
+        "total_seconds": total_seconds,
+        "elapsed_minutes": max(1, (total_seconds + 59) // 60) if total_seconds else 0,
+        "interval_count": len(rows),
+    }
+
+
+def list_running_service_work_sessions(connection) -> list[dict[str, Any]]:
+    """Vrni vse servisne intervale, ki še nimajo zapisanega konca."""
+    ensure_workflow_schema(connection)
+    rows = connection.execute(
+        """
+        SELECT s.service_order_id,o.order_no,o.customer_name,o.device_model,
+               s.started_at
+        FROM service_work_sessions s
+        JOIN service_orders o ON o.id=s.service_order_id
+        WHERE s.ended_at IS NULL
+        ORDER BY s.started_at,s.id
+        """
+    ).fetchall()
+    return [
+        {
+            "service_order_id": int(row[0]),
+            "order_no": str(row[1] or row[0]),
+            "customer_name": str(row[2] or "").strip(),
+            "device_model": str(row[3] or "").strip(),
+            "started_at": str(row[4] or "").strip(),
+        }
+        for row in rows
+    ]
+
+
+def pause_service_work_timer(
+    connection, order_id: int, *, ended_at: datetime | None = None,
+    operator_code: str = "", reason: str = "PAUSE", commit: bool = True,
+) -> int:
+    """Zaključi samo tekoči interval in vrni dosedanji seštevek minut."""
+    ensure_workflow_schema(connection)
+    row = connection.execute(
+        "SELECT id,started_at FROM service_work_sessions "
+        "WHERE service_order_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+        (int(order_id),),
+    ).fetchone()
+    if row:
+        ended = ended_at or datetime.now()
+        started = datetime.fromisoformat(str(row[1]))
+        seconds = int((ended - started).total_seconds())
+        if seconds < 0:
+            raise WorkflowError("Čas ustavitve je pred časom začetka.")
+        connection.execute(
+            "UPDATE service_work_sessions SET ended_at=?,elapsed_seconds=?,"
+            "ended_by=?,stop_reason=? WHERE id=? AND ended_at IS NULL",
+            (
+                ended.isoformat(timespec="seconds"), seconds,
+                str(operator_code or ""), str(reason or "PAUSE"), int(row[0]),
+            ),
+        )
+    snapshot = service_work_timer_snapshot(connection, int(order_id), at=ended_at)
+    elapsed_minutes = int(snapshot["elapsed_minutes"])
+    connection.execute(
+        "UPDATE service_orders SET work_elapsed_minutes=? WHERE id=?",
+        (elapsed_minutes or None, int(order_id)),
+    )
+    if commit:
+        connection.commit()
+    return elapsed_minutes
+
+
+def finish_service_work_timer(
+    connection, order_id: int, *, ended_at: datetime | None = None,
+    operator_code: str = "",
+    commit: bool = True,
+) -> int:
+    """Zaključi tekoči interval in vrni vsoto vseh dejanskih intervalov."""
+    ensure_workflow_schema(connection)
+    row = connection.execute(
+        "SELECT status,work_started_at,work_ended_at,work_elapsed_minutes "
+        "FROM service_orders WHERE id=?",
+        (int(order_id),),
+    ).fetchone()
+    if not row:
+        raise WorkflowError("Servisnega naročila ni mogoče najti.")
+    if row[2] and row[3]:
+        return int(row[3])
+    if str(row[0]) != "OPEN":
+        raise WorkflowError("Servis ni odprt za zaključek časa.")
+    sessions = connection.execute(
+        "SELECT COUNT(*) FROM service_work_sessions WHERE service_order_id=?",
+        (int(order_id),),
+    ).fetchone()[0]
+    if not sessions:
+        raise WorkflowError("Servis nima veljavnega časa začetka.")
+    ended = ended_at or datetime.now()
+    elapsed_minutes = pause_service_work_timer(
+        connection, int(order_id), ended_at=ended,
+        operator_code=operator_code, reason="FINISH", commit=False,
+    )
+    if elapsed_minutes <= 0:
+        raise WorkflowError("Servis nima veljavnega izmerjenega časa.")
+    connection.execute(
+        "UPDATE service_orders SET work_ended_at=?,work_elapsed_minutes=? WHERE id=?",
+        (ended.isoformat(timespec="seconds"), elapsed_minutes, int(order_id)),
+    )
+    if commit:
+        connection.commit()
+    return elapsed_minutes
 
 
 def latest_open_service_order(connection, serial: str, imei: str = ""):
@@ -953,7 +1262,7 @@ def generate_service_order_pdf(
 ) -> Path:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
-    from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
+    from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -970,6 +1279,21 @@ def generate_service_order_pdf(
         "MikroFix, popravilo elektronskih in telekomunikacijskih naprav, Ristoski Daniel s.p.<br/>"
         "Paradiž 73, 2282 Cirkulane | matična 7565178000 | davčna 84514841<br/>"
         "+386 40 353 402 | mikrofixsi@gmail.com | mikrofix.si", body,
+    ))
+    import segno
+    qr_payload = "|".join((
+        "MIKROFIX-SERVICE", str(record["order_no"]),
+        str(record.get("device_serial") or ""), str(record.get("device_imei") or ""),
+    ))
+    qr_path = output_dir / f".{record['order_no']}_service_qr.png"
+    segno.make_qr(qr_payload, error="m").save(
+        str(qr_path), kind="png", scale=7, border=3, dark="black", light="white"
+    )
+    story.append(Paragraph("Identifikacijska koda servisnega naloga", h2))
+    story.append(Image(str(qr_path), width=28 * mm, height=28 * mm))
+    story.append(Paragraph(
+        "Koda vsebuje številko naloga ter serijsko številko/IMEI iz tega prevzema. "
+        "Uporabi jo za priklic pravilnega naloga pred začetkom dela.", small,
     ))
     story.append(Paragraph("Stranka in način sklenitve", h2))
     story.append(_kv_table([
@@ -1082,6 +1406,76 @@ def generate_service_order_pdf(
         onFirstPage=lambda c, d: _footer(c, d, record["order_no"], SERVICE_ORDER_VERSION),
         onLaterPages=lambda c, d: _footer(c, d, record["order_no"], SERVICE_ORDER_VERSION),
     )
+    try:
+        qr_path.unlink()
+    except OSError:
+        pass
+    return path
+
+
+def generate_service_tag_pdf(
+    record: dict[str, Any], output_dir: Path, *, test_mode: bool
+) -> Path:
+    """80-mm sprejemna oznaka za Epson in kasnejši priklic naloga."""
+    import segno
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import HRFlowable, Image, Paragraph, SimpleDocTemplate, Spacer
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{record['order_no']}_oznaka_80mm.pdf"
+    qr_path = output_dir / f".{record['order_no']}_tag_qr.png"
+    payload = "|".join((
+        "MIKROFIX-SERVICE", str(record["order_no"]),
+        str(record.get("device_serial") or ""), str(record.get("device_imei") or ""),
+    ))
+    segno.make_qr(payload, error="m").save(
+        str(qr_path), kind="png", scale=8, border=3, dark="black", light="white"
+    )
+    body, title, h2, small, warning = _pdf_context()
+    customer_lines = [
+        f"<b>{_pdf_text(record.get('customer_name'))}</b>",
+    ]
+    if str(record.get("customer_address") or "").strip():
+        customer_lines.append(_pdf_text(record.get("customer_address")))
+    if str(record.get("customer_phone") or "").strip():
+        customer_lines.append(f"Telefon: {_pdf_text(record.get('customer_phone'))}")
+    if str(record.get("customer_email") or "").strip():
+        customer_lines.append(f"E-pošta: {_pdf_text(record.get('customer_email'))}")
+
+    device_lines = [
+        f"<b>{_pdf_text(record.get('device_model'))}</b>",
+        f"S/N: {_pdf_text(record.get('device_serial'))}",
+    ]
+    if str(record.get("device_imei") or "").strip():
+        device_lines.append(f"IMEI: {_pdf_text(record.get('device_imei'))}")
+
+    story = [
+        Paragraph("MikroFix", title),
+        Paragraph(
+            "TEST / SANDBOX" if test_mode else "SERVISNI SPREJEM",
+            warning if test_mode else h2,
+        ),
+        Paragraph(f"<b>{_pdf_text(record['order_no'])}</b>", h2),
+        Paragraph(f"Sprejeto: {_pdf_text(record.get('created_at'))}", small),
+        HRFlowable(width="100%", thickness=0.6, color=colors.HexColor("#B8C0C7")),
+        Paragraph("STRANKA", h2),
+        Paragraph("<br/>".join(customer_lines), body),
+        Paragraph("NAPRAVA", h2),
+        Paragraph("<br/>".join(device_lines), body),
+        Spacer(1, 1 * mm),
+        Image(str(qr_path), width=46 * mm, height=46 * mm, hAlign="CENTER"),
+        Paragraph("Skeniraj za priklic pravilnega servisnega naloga.", small),
+    ]
+    SimpleDocTemplate(
+        str(path), pagesize=(80 * mm, 145 * mm), leftMargin=5 * mm,
+        rightMargin=5 * mm, topMargin=4 * mm, bottomMargin=4 * mm,
+    ).build(story)
+    try:
+        qr_path.unlink()
+    except OSError:
+        pass
     return path
 
 
@@ -1220,4 +1614,3 @@ def generate_buyback_pdf(
         onLaterPages=lambda c, d: _footer(c, d, record["buyback_no"], BUYBACK_VERSION),
     )
     return path
-

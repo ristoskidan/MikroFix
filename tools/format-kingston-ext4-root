@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+device=/dev/sdc1
+disk=/dev/sdc
+expected_serial=E0D55EA573CDE990D9DB01D5
+expected_uuid=37A3-8101
+mountpoint=/media/mikrofix/KINGSTON
+
+[ -b "$device" ] || { echo "Pričakovana naprava $device ne obstaja." >&2; exit 1; }
+serial=$(lsblk -dnro SERIAL "$disk" | tr -d '[:space:]')
+[ "$serial" = "$expected_serial" ] || { echo "Serijska številka Kingstona se ne ujema." >&2; exit 1; }
+uuid=$(blkid -s UUID -o value "$device")
+[ "$uuid" = "$expected_uuid" ] || { echo "UUID particije se ne ujema; formatiranje je ustavljeno." >&2; exit 1; }
+
+mounted=$(findmnt -rn -S "$device" -o TARGET || true)
+if [ -n "$mounted" ]; then
+    umount "$mounted"
+fi
+
+mkfs.ext4 -F -L KINGSTON "$device"
+mkdir -p "$mountpoint"
+mount "$device" "$mountpoint"
+chown "$(id -u mikrofix):$(id -g mikrofix)" "$mountpoint"

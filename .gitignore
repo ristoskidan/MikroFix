@@ -13,6 +13,7 @@ MikroFixData*/
 *.pfx
 *.key
 *.pem.key
+certs/DavPotRac.cer
 .env
 .env.*
 !.env.example
@@ -25,6 +26,7 @@ mikrofix_settings.json
 **/photos/
 **/pdf/
 **/backups/
+tmp/
 *.generated.pdf
 *.receipt.pdf
 

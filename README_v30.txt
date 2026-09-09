@@ -1,4 +1,4 @@
-MIKROFIX v30 DEV
+MikroFix v30.0
 ================
 
 To je locena razvojna osnova novega enotnega programa MikroFIX.

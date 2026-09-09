@@ -12,6 +12,7 @@ from mikrofix_v30_receipts import (
     confirm_receipt,
     create_draft,
     delete_draft,
+    decimal_value,
     ensure_receipt_schema,
     load_draft_payload,
     save_draft_payload,
@@ -59,6 +60,14 @@ class V30ReceiptTests(unittest.TestCase):
         connection.close()
         self.pdf = self.root / "racun.pdf"
         self.pdf.write_bytes(b"%PDF-1.4\n% MikroFIX test\n")
+
+    def test_slovenian_and_grouped_money_inputs_are_accepted(self):
+        self.assertEqual(decimal_value("1.234,56 €", "Znesek"), Decimal("1234.5600"))
+        self.assertEqual(decimal_value("1,234.56 EUR", "Znesek"), Decimal("1234.5600"))
+
+    def test_invalid_money_error_explains_expected_format(self):
+        with self.assertRaisesRegex(ReceiptError, "1234,56"):
+            decimal_value("dvanajst", "Skupni znesek dokumenta")
 
     def tearDown(self):
         self.temp.cleanup()

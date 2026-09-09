@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+import re
 
 
 class UpnQrError(RuntimeError):
@@ -25,6 +26,16 @@ def normalize_iban(value: object) -> str:
     if len(iban) != 19 or not iban.startswith("SI56") or not iban[4:].isdigit():
         raise UpnQrError("Prejemnikov IBAN mora biti veljaven slovenski račun oblike SI56 + 15 številk.")
     return iban
+
+
+def normalize_reference(value: object) -> str:
+    reference = "".join(str(value or "").upper().split())
+    if not re.fullmatch(r"SI\d{2}[0-9-]{1,22}", reference):
+        raise UpnQrError(
+            "Prejemnikov sklic mora biti zapisan kot SI + dvomestni model + sklic, "
+            "na primer SI001234567890 (brez presledkov)."
+        )
+    return reference
 
 
 def build_upnqr_payload(
@@ -49,7 +60,7 @@ def build_upnqr_payload(
         _latin2(payer_name, 33), _latin2(payer_street, 33), _latin2(payer_city, 33),
         f"{cents:011d}", "", "", code, _latin2(purpose, 42),
         (due_date or date.today()).strftime("%d.%m.%Y"),
-        normalize_iban(recipient_iban), _latin2(recipient_reference, 26),
+        normalize_iban(recipient_iban), normalize_reference(recipient_reference),
         _latin2(recipient_name, 33), _latin2(recipient_street, 33),
         _latin2(recipient_city, 33),
     ]
@@ -72,6 +83,27 @@ def generate_upnqr_pdf(
         ) from exc
     from reportlab.lib.units import mm
     from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    regular_font = "Helvetica"
+    bold_font = "Helvetica-Bold"
+    font_candidates = (
+        (
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ),
+        (
+            Path(r"C:\Windows\Fonts\arial.ttf"),
+            Path(r"C:\Windows\Fonts\arialbd.ttf"),
+        ),
+    )
+    for regular_path, bold_path in font_candidates:
+        if regular_path.is_file() and bold_path.is_file():
+            pdfmetrics.registerFont(TTFont("MikroFixUPN", str(regular_path)))
+            pdfmetrics.registerFont(TTFont("MikroFixUPNBold", str(bold_path)))
+            regular_font, bold_font = "MikroFixUPN", "MikroFixUPNBold"
+            break
 
     payload = build_upnqr_payload(
         amount=amount,
@@ -101,23 +133,26 @@ def generate_upnqr_pdf(
     height = 150 * mm
     c = canvas.Canvas(str(pdf), pagesize=(width, height))
     y = height - 8 * mm
-    c.setFont("Helvetica-Bold", 11)
-    c.drawCentredString(width / 2, y, "UPN QR – PREDLOG PLAČILA")
+    c.setFont(bold_font, 11)
+    c.drawCentredString(width / 2, y, "UPN QR - PREDLOG PLAČILA")
     y -= 8 * mm
     c.drawImage(str(png), (width - 58 * mm) / 2, y - 58 * mm, 58 * mm, 58 * mm)
     y -= 65 * mm
-    c.setFont("Helvetica-Bold", 13)
-    c.drawCentredString(width / 2, y, f"{Decimal(str(amount)):.2f} EUR")
+    c.setFont(bold_font, 13)
+    amount_decimal = Decimal(str(amount).replace(",", "."))
+    c.drawCentredString(width / 2, y, f"{amount_decimal:.2f} EUR")
     y -= 7 * mm
-    c.setFont("Helvetica", 8)
+    c.setFont(regular_font, 8)
     for label, value in (
         ("Prejemnik", company.get("legal_name") or company.get("name") or "MikroFix"),
         ("IBAN", company.get("iban") or ""), ("Sklic", reference),
     ):
         c.drawString(5 * mm, y, f"{label}: {value}")
         y -= 5 * mm
-    c.setFont("Helvetica", 7)
-    c.drawString(5 * mm, y - 2 * mm, "Ta izpis ni račun. Znesek mora biti plačan natančno do centa.")
+    c.setFont(regular_font, 6.5)
+    c.drawCentredString(width / 2, y - 2 * mm, "Skeniraj v mobilni banki: Plačila > Slikaj UPN QR.")
+    c.drawCentredString(width / 2, y - 6 * mm, "Ne uporabljaj navadne kamere. Ta izpis ni račun.")
+    c.drawCentredString(width / 2, y - 10 * mm, "Znesek mora biti plačan natančno do centa.")
     c.save()
     try:
         png.unlink()

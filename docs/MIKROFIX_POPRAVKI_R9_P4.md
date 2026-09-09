@@ -39,4 +39,3 @@ potrjene izdatke, ki še nimajo nobenega gotovinskega dogodka.
 - produkcijski FURS in produkcijsko potrdilo sta bila v E2E-preizkusu
   nedosegljiva.
 
-

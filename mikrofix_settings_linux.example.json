@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "app_version": "30.0-dev5-linux",
+  "environment": "TEST",
+  "database": {
+    "backend": "sqlite",
+    "data_dir": "MikroFixData_V30_LINUX_TEST",
+    "server_url": ""
+  },
+  "furs": {
+    "enabled": false,
+    "environment": "TEST",
+    "certificate_path": "",
+    "test_console_enabled": true,
+    "test_certificate_path": "",
+    "test_ca_bundle_path": "certs/furs-test-ca-bundle.pem",
+    "production_timeout_seconds": 15,
+    "production_ca_bundle_path": "certs/furs-test-ca-bundle.pem",
+    "production_response_certificate_path": "certs/DavPotRac.cer",
+    "production_requires_explicit_confirmation": true
+  },
+  "printer": {
+    "model": "Epson TM-T20II (M267D)",
+    "paper_width_mm": 80,
+    "connection": "USB",
+    "dpi": 203,
+    "printer_name": "",
+    "windows_printer_name": ""
+  },
+  "backup": {
+    "enabled": false,
+    "target_dir": "",
+    "retention_days": 30,
+    "max_age_hours": 24,
+    "require_distinct_volume": true,
+    "passphrase_configured": false
+  },
+  "weekly_report": {
+    "enabled": false,
+    "automatic_monday": false
+  }
+}
