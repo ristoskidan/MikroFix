@@ -83,6 +83,24 @@ class V30BackupTests(unittest.TestCase):
         self.assertEqual(value, "sledljivo")
         self.assertTrue((destination / "config" / "mikrofix_settings.json").is_file())
 
+    def test_system_backup_artifacts_do_not_block_business_backup(self):
+        system_backup = self.data / "system-backups"
+        system_backup.mkdir()
+        unreadable_ppd = system_backup / "printer.ppd"
+        unreadable_ppd.write_text("sistemska nastavitev", encoding="utf-8")
+        unreadable_ppd.chmod(0o000)
+        try:
+            package = self.create()
+            destination = self.root / "restore"
+            info = extract_verified_backup(
+                package, self.password, destination, expected_schema_version=30
+            )
+        finally:
+            unreadable_ppd.chmod(0o600)
+
+        self.assertGreaterEqual(info.file_count, 3)
+        self.assertFalse((destination / "data" / "system-backups").exists())
+
     def test_same_volume_is_not_valid_production_target(self):
         with self.assertRaisesRegex(BackupError, "drugem fizičnem nosilcu"):
             validate_target(self.data, self.target, require_distinct_volume=True)

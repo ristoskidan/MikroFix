@@ -11,7 +11,7 @@ DEVICE_URI='usb://EPSON/TM-T20II?serial=544338595145690000'
 
 mkdir -p "$BACKUP_DIR"
 if [ -f /etc/cups/ppd/TM-T20II.ppd ]; then
-    cp -p /etc/cups/ppd/TM-T20II.ppd "$BACKUP_DIR/TM-T20II.pred-mikrofix-pdf.ppd"
+    install -m 0644 /etc/cups/ppd/TM-T20II.ppd "$BACKUP_DIR/TM-T20II.pred-mikrofix-pdf.ppd"
 fi
 install -o root -g root -m 755 "$FILTER_SOURCE" "$FILTER_TARGET"
 /usr/sbin/lpadmin -p TM-T20II -E -v "$DEVICE_URI" -P "$PPD_SOURCE"

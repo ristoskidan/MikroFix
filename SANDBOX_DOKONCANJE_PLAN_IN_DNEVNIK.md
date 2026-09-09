@@ -421,3 +421,31 @@ blokiran do ločene zaključne potrditve.
 - Dodan je regresijski test začetka, zaznave in ustavitve aktivne seje. Celotni
   paket ima po spremembi 179 uspešnih testov; začasne testne baze so bile zaradi
   ločene diagnostike diskovnega I/O izvedene v `/dev/shm`.
+
+### 9. 9. 2026 – dejanski backup in testna obnova
+
+- Pred fizičnim sprejemnim scenarijem sta bili potrjeni obe CUPS vrsti
+  `HP-LaserJet-1020` in `TM-T20II`, priklopljeni KINGSTON pa je ext4. FURS TEST
+  potrdilo iz Sandbox nastavitev je na nastavljeni poti dosegljivo. Fizični tisk
+  in FURS prenos s tem še nista potrjena.
+- Prvi poskus nove dnevne kopije je odkril, da je namestitveni skript v
+  `system-backups` s `cp -p` shranil CUPS PPD kot `root:lp 0640`. Ker aplikacija
+  te datoteke ne more prebrati, je izdelava poslovne kopije odpovedala še pred
+  šifriranjem in obnovo.
+- Backup zdaj izloči samo vrhnjo mapo `system-backups`, ki vsebuje obnovitvene
+  artefakte operacijskega sistema in tiskalnika, ne poslovnih baz, revizij,
+  dokumentov ali fotografij. Namestitveni skript prihodnje PPD kopije shrani kot
+  `0644`. Dodani regresijski test in oba osnovna testa izdelave/obnove so
+  uspešni.
+- Dejanski šifrirani paket
+  `/media/mikrofix/KINGSTON/MikroFix_Backup/mikrofix_daily_2026-09-09_212154.mfbak`
+  je bil uspešno ustvarjen z dovoljenji `0600` in brez razkritja obnovitvenega
+  gesla. Obnovljen je bil v ločeno mapo
+  `/home/mikrofix/MikroFixData_V30_RESTORE_TEST_20260909` z dovoljenji `0700`.
+- Manifest vsebuje 714 datotek in 102.288.251 bajtov nešifrirane vsebine; po
+  obnovi ne manjka nobena manifestna datoteka in ni nepričakovanih dodatkov.
+  Vse obnovljene SQLite baze, vključno z glavnimi štirimi bazami, so vrnile
+  `PRAGMA integrity_check = ok`.
+- Testna obnova backupa je s tem tehnično potrjena. Produkcijski manifest ostaja
+  `REVOKED_PENDING_REQUIREMENTS_AUDIT`; odprti fizični koraki so Sandbox servisni
+  scenarij, HP/Epson izpis ter FURS TEST online/offline in poznejša uskladitev.
