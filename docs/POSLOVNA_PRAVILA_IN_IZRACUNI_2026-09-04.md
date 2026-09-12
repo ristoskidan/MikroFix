@@ -260,9 +260,11 @@ pravili zgoraj in mora biti usklajeno pred produkcijo.
 8. Delna inventura je slepi informativni popis in ne spremeni zaloge.
 9. Polna inventura zahteva zaprte vse poslovne tokove in med izvedbo zaklene delo/prodajo.
 10. Inventurna razlika: `dejansko stanje − knjigovodsko stanje`; manjko je
-    negativen, presežek pozitiven.
-11. Inventura sama ne spremeni zaloge. Spremembo atomsko izvede šele potrjeni
-    sklep o obravnavi inventurnih razlik.
+    negativen, presežek pozitiven, vendar rezultat popisa sam ni zalogovni vir.
+11. Inventura sama nikoli ne spremeni zaloge. Pozitivne razlike ni dovoljeno
+    knjižiti: najti in potrditi je treba manjkajočo dobavnico ali dokazljivi
+    donorski izvor. Zmanjšanje je mogoče samo z dokumentiranim odpisom oziroma
+    interno porabo, storno pa je vedno vezan na konkretni izvirni dokument.
 
 ## 12. Dokumenti, statusi in dovoljenja
 

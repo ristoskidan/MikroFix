@@ -11,6 +11,7 @@ import time
 from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from mikrofix_tk_bootstrap import maximize_work_window, prepare_tcl_tk
 
@@ -65,8 +66,11 @@ from mikrofix_workflows import (
     latest_open_service_order,
     list_running_service_work_sessions,
     link_service_result,
+    load_service_work_draft,
     load_service_order_parts,
     pause_service_work_timer,
+    delete_service_work_draft,
+    save_service_work_draft,
     save_service_order_parts,
     service_work_timer_snapshot,
     start_service_work_timer,
@@ -83,7 +87,25 @@ from mikrofix_v29_core import (
     register_buyback_device,
     sync_completed_buybacks_to_inventory,
 )
-from mikrofix_v30_lots import allocate_fifo, ensure_lot_schema
+from mikrofix_v30_lots import ensure_lot_schema
+from mikrofix_service_stock import consume_service_parts
+from mikrofix_service_inventory import (
+    service_inventory_by_barcode,
+    service_inventory_by_local_id,
+    service_inventory_identities,
+)
+from mikrofix_service_sync import (
+    enqueue_service_order_created,
+    enqueue_service_technical_completion,
+    service_device_id,
+)
+from mikrofix_sync_store import (
+    ensure_sync_store_schema,
+    inventory_snapshot_complete,
+    list_open_sync_conflicts,
+)
+from mikrofix_sync_client import RequestsSyncTransport
+from mikrofix_sync_runtime import BackgroundSyncWorker
 from mikrofix_v30_cash import (
     cash_session_snapshot,record_cash_entry,require_open_cash_session,
 )
@@ -220,6 +242,17 @@ device_identity_method = ""
 device_type_code = ""
 last_saved_service_id = None
 service_timer_after_id = None
+running_service_banner_after_id = None
+running_service_banner_var = None
+running_service_banner = None
+menu_running_service_banner = None
+running_service_banner_buttons = []
+running_service_banner_sessions = []
+sync_conflict_banner_var = None
+sync_conflict_banner_frames = []
+sync_conflict_notified = set()
+service_sync_worker = None
+service_sync_status_queue = queue.Queue()
 
 DEVICE_TYPE_LABELS = {
     "TELEFON": "Telefon",
@@ -330,18 +363,20 @@ def manage_users_dialog(parent):
 
 def logout_and_lock():
     global ACTIVE_SCREEN
+    if service_time_blocks_logout():
+        return
+    if not persist_active_service_draft():
+        return
     audit_event("LOGOUT", "user", AUTH_SESSION.username)
     ACTIVE_SCREEN = "LOGIN"
     root.withdraw()
-    if run_pin_login(root):
+    if run_login_or_close_safely():
         root.deiconify()
         try:
             root.state("zoomed")
         except Exception:
             pass
         show_start_menu()
-    else:
-        root.destroy()
 
 
 def note_user_activity(_event=None):
@@ -373,9 +408,8 @@ def lock_for_inactivity():
         audit_event("AUTO_LOCK", "user", required_username)
         ACTIVE_SCREEN = "LOGIN"
         root.withdraw()
-        if not run_pin_login(root, username_only=required_username):
+        if not run_login_or_close_safely(username_only=required_username):
             ACTIVE_SCREEN = "CLOSED"
-            root.destroy()
             return
         ACTIVE_SCREEN = previous_screen
         if previous_screen == "OFFICE":
@@ -417,6 +451,99 @@ def connect():
 
 def inventory_connect():
     return RUNTIME.connect_sqlite("inventory", foreign_keys=True)
+
+
+SERVICE_SYNC_DEVICE_ID = service_device_id(
+    RUNTIME.active_premise, RUNTIME.electronic_device
+)
+
+
+def _service_sync_status_from_worker(worker_status):
+    """Worker callback: enqueue only; Tk is exclusively touched by its UI thread."""
+    service_sync_status_queue.put(worker_status)
+
+
+def poll_service_sync_status():
+    latest = None
+    while True:
+        try:
+            latest = service_sync_status_queue.get_nowait()
+        except queue.Empty:
+            break
+    if latest is not None:
+        _apply_service_sync_status(latest)
+    if root.winfo_exists():
+        root.after(250, poll_service_sync_status)
+
+
+def _apply_service_sync_status(worker_status):
+    if not root.winfo_exists():
+        return
+    if worker_status.ok:
+        service_sync_status_var.set("SYNC: POVEZANO")
+        service_sync_status_label.configure(fg=SUCCESS)
+    else:
+        service_sync_status_var.set("SYNC: BREZ POVEZAVE")
+        service_sync_status_label.configure(fg=WARNING)
+    refresh_sync_conflict_banners()
+    if worker_status.ok and "service_article_search_tree" in globals():
+        # A completed bootstrap or a later stock event becomes visible without
+        # restarting Service. The search helper switches source only after the
+        # server-declared complete snapshot is durable.
+        search_service_articles()
+
+
+def start_service_sync_worker():
+    """Start opt-in background sync when URL and secret are both configured."""
+    global service_sync_worker
+    if service_sync_worker is not None and service_sync_worker.running:
+        return True
+    server_url = str(
+        RUNTIME.settings.get("database", {}).get("server_url") or ""
+    ).strip()
+    token = str(os.environ.get("MIKROFIX_SYNC_TOKEN") or "").strip()
+    if not server_url:
+        service_sync_status_var.set("SYNC: NI NASTAVLJEN")
+        service_sync_status_label.configure(fg=GRAY)
+        return False
+    if not token:
+        service_sync_status_var.set("SYNC: MANJKA SKRIVNOST")
+        service_sync_status_label.configure(fg=DANGER)
+        return False
+    try:
+        interval = max(
+            2.0, float(os.environ.get("MIKROFIX_SYNC_INTERVAL_SECONDS", "15"))
+        )
+    except ValueError:
+        interval = 15.0
+    service_sync_worker = BackgroundSyncWorker(
+        connection_factory=connect,
+        transport=RequestsSyncTransport(server_url, token),
+        device_id=SERVICE_SYNC_DEVICE_ID,
+        interval_seconds=interval,
+        on_status=_service_sync_status_from_worker,
+    )
+    service_sync_status_var.set("SYNC: POVEZUJEM …")
+    service_sync_status_label.configure(fg=BLUE)
+    service_sync_worker.start()
+    return True
+
+
+def request_service_sync():
+    """Request an immediate attempt after commit, without waiting for network."""
+    if service_sync_worker is not None:
+        service_sync_worker.request_sync()
+
+
+def stop_service_sync_worker():
+    global service_sync_worker
+    worker = service_sync_worker
+    if worker is None:
+        return True
+    stopped = worker.stop(join_timeout=20)
+    if stopped:
+        service_sync_worker = None
+    return stopped
 
 
 def init_inventory_db():
@@ -598,9 +725,21 @@ def init_db():
         "tariff_version": "TEXT",
         "first_rate": "REAL NOT NULL DEFAULT 0",
         "extra_half_hour_rate": "REAL NOT NULL DEFAULT 0",
+        "line_uuid": "TEXT",
     }.items():
         if col not in manual_columns:
             c.execute(f"ALTER TABLE service_manual_lines ADD COLUMN {col} {typ}")
+    for legacy_line_id, in c.execute(
+        "SELECT id FROM service_manual_lines WHERE line_uuid IS NULL OR line_uuid=''"
+    ).fetchall():
+        c.execute(
+            "UPDATE service_manual_lines SET line_uuid=? WHERE id=?",
+            (str(uuid4()), int(legacy_line_id)),
+        )
+    c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_manual_line_uuid "
+        "ON service_manual_lines(line_uuid)"
+    )
 
     part_columns = {row[1] for row in c.execute("PRAGMA table_info(service_parts)")}
     if "barcode" not in part_columns:
@@ -658,8 +797,16 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_service_imei ON service(imei)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_claims_service ON claims(service_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_service_order_id ON service(service_order_id)")
+    c.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_one_result_per_order "
+        "ON service(service_order_id) WHERE service_order_id IS NOT NULL"
+    )
 
     ensure_workflow_schema(c)
+    # Prazen oziroma pravkar migriran Service mora imeti sinhronizacijski
+    # dnevnik in centralni posnetek že pred zagonom ozadnega delavca. Sicer bi
+    # prvi zagon brez še ustvarjenega naloga odpovedal zaradi manjkajočih tabel.
+    ensure_sync_store_schema(c)
 
     c.commit()
     c.close()
@@ -1370,6 +1517,13 @@ def get_article_by_barcode(barcode):
     barcode = (barcode or "").strip()
     if not barcode:
         return None
+    c = connect()
+    try:
+        if inventory_snapshot_complete(c):
+            item = service_inventory_by_barcode(c, barcode)
+            return _central_service_article_tuple(item) if item else None
+    finally:
+        c.close()
     c = inventory_connect()
     row = c.execute("""
         SELECT id, barcode, article_name, internal_code,
@@ -1382,6 +1536,14 @@ def get_article_by_barcode(barcode):
 
 
 def get_article(article_id):
+    if int(article_id) < 0:
+        c = connect()
+        try:
+            if inventory_snapshot_complete(c):
+                item = service_inventory_by_local_id(c, int(article_id))
+                return _central_service_article_tuple(item) if item else None
+        finally:
+            c.close()
     c = inventory_connect()
     row = c.execute("""
         SELECT id, barcode, article_name, internal_code,
@@ -1391,6 +1553,21 @@ def get_article(article_id):
     """, (article_id,)).fetchone()
     c.close()
     return row
+
+
+def _central_service_article_tuple(item):
+    if item is None:
+        return None
+    available = 0 if item.blocked else float(item.quantity_available)
+    return (
+        item.local_article_id,
+        item.barcode,
+        item.description,
+        item.article_uuid,
+        available,
+        float(item.current_sale_price),
+        "",
+    )
 
 
 def format_price(value):
@@ -1468,29 +1645,49 @@ def search_service_articles(*_args):
     for iid in service_article_search_tree.get_children():
         service_article_search_tree.delete(iid)
 
-    sql = """
+    central_connection = connect()
+    try:
+        central_mode = inventory_snapshot_complete(central_connection)
+        if central_mode:
+            name_folded = name_q.casefold()
+            barcode_folded = barcode_q.casefold()
+            central_rows = [
+                _central_service_article_tuple(item)
+                for item in service_inventory_identities(central_connection)
+                if (not name_folded or name_folded in item.description.casefold())
+                and (not barcode_folded or barcode_folded in item.barcode.casefold())
+            ][:100]
+        else:
+            central_rows = []
+    finally:
+        central_connection.close()
+
+    if central_mode:
+        rows = central_rows
+    else:
+        sql = """
         SELECT id, barcode, article_name, internal_code,
                stock_qty, price, lot_serial
         FROM inventory_items
-    """
-    where = ["COALESCE(active, 1)=1"]
-    params = []
+        """
+        where = ["COALESCE(active, 1)=1"]
+        params = []
 
-    if name_q:
-        where.append("article_name LIKE ?")
-        params.append(f"%{name_q}%")
-    if barcode_q:
-        where.append("barcode LIKE ?")
-        params.append(f"%{barcode_q}%")
+        if name_q:
+            where.append("article_name LIKE ?")
+            params.append(f"%{name_q}%")
+        if barcode_q:
+            where.append("barcode LIKE ?")
+            params.append(f"%{barcode_q}%")
 
-    if where:
-        sql += " WHERE " + " AND ".join(where)
+        if where:
+            sql += " WHERE " + " AND ".join(where)
 
-    sql += " ORDER BY article_name COLLATE NOCASE LIMIT 100"
+        sql += " ORDER BY article_name COLLATE NOCASE LIMIT 100"
 
-    c = inventory_connect()
-    rows = c.execute(sql, params).fetchall()
-    c.close()
+        c = inventory_connect()
+        rows = c.execute(sql, params).fetchall()
+        c.close()
 
     for row in rows:
         values = list(row)
@@ -2156,6 +2353,96 @@ def remove_selected_part():
             parts_tree.insert("", index, values=values)
 
 
+def collect_active_service_draft():
+    """Zajemi vsa spremenljiva polja odprtega delovnega prostora."""
+    return {
+        "work": work.get("1.0", "end").strip(),
+        "approved_limit_eur": service_approved_limit_var.get().strip(),
+        "approval_channel": service_approval_channel_var.get().strip(),
+        "pre_tests": get_test_values("PRED"),
+        "post_tests": get_test_values("PO"),
+        "pending_photos": [
+            {
+                "path": str(item.get("path") or ""),
+                "stage": str(item.get("stage") or "PRED"),
+            }
+            for item in pending_photos
+            if str(item.get("path") or "").strip()
+        ],
+        "photo_stage": photo_stage.get().strip() or "PRED",
+    }
+
+
+def persist_active_service_draft(*, quiet=False):
+    """Trajno shrani odprti obrazec in dele pred vsakim preklopom pogleda."""
+    if not active_service_order_id or not service_editor_active:
+        return True
+    c = connect()
+    try:
+        save_service_order_parts(
+            c, int(active_service_order_id), collect_parts_from_tree(), commit=False
+        )
+        save_service_work_draft(
+            c, int(active_service_order_id), collect_active_service_draft(),
+            operator_code=RUNTIME.operator_code, commit=False,
+        )
+        c.commit()
+    except Exception as exc:
+        c.rollback()
+        c.close()
+        if not quiet:
+            messagebox.showerror(
+                "MikroFix – shranjevanje odprtega servisa",
+                "Odprtega servisnega naloga ni bilo mogoče varno shraniti. "
+                f"Preklop je preklican:\n\n{exc}",
+                parent=root,
+            )
+        return False
+    c.close()
+    return True
+
+
+def restore_active_service_draft(default_work=""):
+    """Ob ponovnem odprtju naloži shranjeni obrazec izbranega servisa."""
+    if not active_service_order_id:
+        return True
+    c = connect()
+    try:
+        draft = load_service_work_draft(c, int(active_service_order_id))
+    except Exception as exc:
+        c.close()
+        messagebox.showerror(
+            "MikroFix – nalaganje odprtega servisa",
+            f"Shranjeni servisni osnutek ni bil naložen:\n\n{exc}",
+            parent=root,
+        )
+        return False
+    c.close()
+
+    work.delete("1.0", "end")
+    work.insert("1.0", str((draft or {}).get("work") or default_work or ""))
+    if not draft:
+        return True
+    service_approved_limit_var.set(str(draft.get("approved_limit_eur") or ""))
+    service_approval_channel_var.set(str(draft.get("approval_channel") or ""))
+    for name_v, value_v in dict(draft.get("pre_tests") or {}).items():
+        if name_v in pre_test_vars:
+            pre_test_vars[name_v].set(str(value_v))
+    for name_v, value_v in dict(draft.get("post_tests") or {}).items():
+        if name_v in post_test_vars:
+            post_test_vars[name_v].set(str(value_v))
+    pending_photos.clear()
+    for item in list(draft.get("pending_photos") or []):
+        if isinstance(item, dict) and str(item.get("path") or "").strip():
+            pending_photos.append({
+                "path": str(item.get("path")),
+                "stage": str(item.get("stage") or "PRED"),
+            })
+    photo_stage.set(str(draft.get("photo_stage") or "PRED"))
+    refresh_photo_list()
+    return True
+
+
 def persist_active_service_parts(*, quiet=False):
     """Shrani dele odprtega naloga; zaloga se tu še ne odpisuje."""
     if not active_service_order_id:
@@ -2298,6 +2585,37 @@ def _save_service():
             pass
         return
 
+    existing_c = connect()
+    try:
+        existing_order = get_service_order(
+            existing_c, int(active_service_order_id)
+        )
+        existing_service_id = existing_order.get("service_id")
+        existing_service = (
+            existing_c.execute(
+                "SELECT service_no FROM service WHERE id=?",
+                (int(existing_service_id),),
+            ).fetchone()
+            if existing_service_id else None
+        )
+    finally:
+        existing_c.close()
+    if existing_service_id:
+        existing_no = (
+            str(existing_service[0])
+            if existing_service else str(existing_service_id)
+        )
+        messagebox.showinfo(
+            "MikroFix – servis je že pripravljen",
+            f"Servis {existing_no} je že tehnično zaključen in pripravljen za račun. "
+            "Ponovni klik ni ustvaril novega servisa ali nove porabe zaloge.",
+            parent=root,
+        )
+        active_service_order_id = None
+        clear_form(keep_device=True)
+        show_service_history()
+        return int(existing_service_id)
+
     # Zaključek zahteva dokumentirano identifikacijo. Apple mobilne naprave
     # uporablja MicroDETECT, druga elektronika fizični prepis oznake.
     if not device_is_identified():
@@ -2322,7 +2640,8 @@ def _save_service():
         order = get_service_order(c, int(active_service_order_id))
         elapsed_minutes_v = finish_service_work_timer(
             c, int(active_service_order_id), ended_at=service_end_v,
-            operator_code=RUNTIME.operator_code, commit=False
+            operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
+            commit=False,
         )
         labor = service_labor_from_minutes(
             order.get("contract_context"), elapsed_minutes_v,
@@ -2391,9 +2710,33 @@ def _save_service():
     try:
         c.execute("ATTACH DATABASE ? AS inventorydb", (str(INVENTORY_DB),))
         ensure_lot_schema(c, "inventorydb")
+        operation = prepare_operation(
+            c,
+            operation_type="SERVICE_TECHNICAL_COMPLETION",
+            aggregate_type="service_order",
+            aggregate_id=int(active_service_order_id),
+            operator_code=RUNTIME.operator_code,
+            payload={
+                "service_order_id": int(active_service_order_id),
+                "service_order_uuid": str(order.get("sync_uuid") or ""),
+                "completed_at": service_end_v.isoformat(timespec="seconds"),
+                "work": work.get("1.0", "end").strip(),
+                "parts": [
+                    {
+                        "article_id": article_id_v,
+                        "barcode": barcode_v,
+                        "lot_serial": lot_v,
+                        "unit_price": price_v,
+                    }
+                    for _pn, _pid, barcode_v, article_id_v, lot_v, price_v in parts
+                ],
+            },
+        )
+        start_operation(c, operation["operation_id"])
         elapsed_minutes_v = finish_service_work_timer(
             c, int(active_service_order_id), ended_at=service_end_v,
-            operator_code=RUNTIME.operator_code, commit=False
+            operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
+            commit=False,
         )
         no = next_no(c)
         now = datetime.now()
@@ -2458,95 +2801,23 @@ def _save_service():
                 INSERT INTO service_manual_lines(
                     service_id, line_kind, description, quantity, unit_price,
                     service_tier, billable_minutes, tariff_version, first_rate,
-                    extra_half_hour_rate
-                ) VALUES(?,?,?,?,?,?,?,?,?,?)
+                    extra_half_hour_rate,line_uuid
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 service_id, line_kind_v, description_v, qty_v, unit_price_v,
-                line_kind_v, minutes_v, version_v, first_v, extra_v,
+                line_kind_v, minutes_v, version_v, first_v, extra_v, str(uuid4()),
             ))
 
-        # Ob pripravi servisa se deli rezervirajo. Fizični odpis nastane šele
-        # v isti transakciji kot povezani račun.
-        article_counts = {}
-        for _pn, _pid, _barcode, article_id_v, _lot, _price in parts:
-            if article_id_v is not None:
-                article_counts[article_id_v] = article_counts.get(article_id_v, 0) + 1
-
-        for article_id_v, qty_used in article_counts.items():
-            cur_stock = c.execute(
-                """
-                SELECT stock_qty, article_name, COALESCE(reserved_qty,0)
-                FROM inventorydb.inventory_items WHERE id=?
-                """,
-                (article_id_v,)
-            ).fetchone()
-            if not cur_stock:
-                raise RuntimeError(
-                    "Eden od skeniranih artiklov ne obstaja več v zalogi."
-                )
-            available_stock = float(cur_stock[0] or 0) - float(cur_stock[2] or 0)
-            if available_stock < qty_used:
-                raise RuntimeError(
-                    f"Premalo zaloge za artikel: {cur_stock[1]} "
-                    f"(na voljo {available_stock}, zahtevano {qty_used})."
-                )
-
-        for pn, pid, barcode_v, article_id_v, lot_v, price_v in parts:
-            part_cursor = c.execute("""
-                INSERT INTO service_parts(
-                    service_id, part_name, part_id, barcode, article_id,
-                    lot_serial, unit_price
-                ) VALUES(?,?,?,?,?,?,?)
-            """, (
-                service_id, pn, pid, barcode_v, article_id_v,
-                lot_v, price_v
-            ))
-            service_part_id = int(part_cursor.lastrowid)
-            if article_id_v is None:
-                continue
-            reservation_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            allocations = allocate_fifo(
-                c,
-                schema="inventorydb",
-                article_id=int(article_id_v),
-                quantity=1,
-                allocation_type="SERVICE_RESERVATION",
-                source_id=int(service_id),
-                source_line_id=service_part_id,
-                created_at=reservation_time,
-            )
-            exact_lot = ", ".join(
-                str(entry["lot_serial"])
-                for entry in allocations if entry["lot_serial"]
-            )
-            c.execute(
-                "UPDATE service_parts SET lot_serial=? WHERE id=?",
-                (exact_lot or lot_v, service_part_id),
-            )
-            stock_row = c.execute(
-                "SELECT stock_qty,COALESCE(reserved_qty,0),location "
-                "FROM inventorydb.inventory_items WHERE id=?",
-                (int(article_id_v),),
-            ).fetchone()
-            c.execute(
-                "UPDATE inventorydb.inventory_items "
-                "SET reserved_qty=COALESCE(reserved_qty,0)+1,updated_at=? WHERE id=?",
-                (reservation_time, int(article_id_v)),
-            )
-            c.execute("""
-                INSERT INTO inventorydb.stock_movements(
-                    movement_no, created_at, article_id, quantity_delta,
-                    balance_after, movement_type, source_type, source_id,
-                    source_line_id, lot_serial, location_from, location_to,
-                    reason, operator_code, reversal_of_id
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
-            """, (
-                f"REZ-SRV-{service_id:06d}-{service_part_id}", reservation_time,
-                int(article_id_v), 0, float(stock_row[0] or 0),
-                "RESERVE_SERVICE", "SERVICE", int(service_id), service_part_id,
-                exact_lot or lot_v or "", stock_row[2] or "", "SERVIS",
-                f"Rezervacija za servis {no}", "DR",
-            ))
+        # Potrjeni uporabljeni deli so fizično že zapustili zalogo. Račun jih
+        # pozneje samo obračuna in jih ne sme odpisati še enkrat.
+        consume_service_parts(
+            c,
+            inventory_schema="inventorydb",
+            service_id=int(service_id),
+            service_no=no,
+            parts=parts,
+            operator_code=RUNTIME.operator_code,
+        )
 
         if device_type_code == "APPLE_MOBILE":
             for stage in ("PRED", "PO"):
@@ -2558,12 +2829,37 @@ def _save_service():
                     """, (service_id, stage, test_name, test_status))
 
         created_photo_paths = copy_photos_for_service(service_id, no, c)
+        enqueue_service_technical_completion(
+            c,
+            service_order_id=int(active_service_order_id),
+            service_id=int(service_id),
+            completed_at=service_end_v,
+            work_summary=work.get("1.0", "end").strip(),
+            findings="",
+            actor_id=AUTH_SESSION.username or RUNTIME.operator_code,
+            device_id=SERVICE_SYNC_DEVICE_ID,
+            data_dir=RUNTIME.data_dir,
+        )
         link_service_result(
             c, int(active_service_order_id), int(service_id), commit=False
         )
         c.execute(
             "DELETE FROM service_order_parts WHERE service_order_id=?",
             (int(active_service_order_id),),
+        )
+        delete_service_work_draft(
+            c, int(active_service_order_id), commit=False
+        )
+        complete_operation(
+            c, operation["operation_id"],
+            result={
+                "service_order_id": int(active_service_order_id),
+                "service_id": int(service_id),
+                "service_no": no,
+                "invoice_draft_state": "READY",
+                "parts_consumed": len(parts),
+            },
+            event_type="SERVICE_TECHNICALLY_COMPLETED",
         )
         c.commit()
     except Exception as exc:
@@ -2579,6 +2875,7 @@ def _save_service():
         messagebox.showerror("MikroFIX", f"Servis ni bil shranjen:\n{exc}")
         return
     c.close()
+    request_service_sync()
 
     # Podatki so od te točke že potrjeni v bazi. Gumb zato vedno sprostimo,
     # tudi če kasnejši audit, PDF ali osvežitev uporabniškega vmesnika odpove.
@@ -2592,7 +2889,7 @@ def _save_service():
     post_save_warnings = []
     try:
         audit_event(
-            "SERVICE_CREATED",
+            "SERVICE_TECHNICALLY_COMPLETED",
             "service",
             service_id,
             {
@@ -2617,35 +2914,28 @@ def _save_service():
     except Exception as exc:
         post_save_warnings.append(f"osvežitev zaloge: {exc}")
 
-    pdf_msg = ""
-    try:
-        pdf_path = generate_pdf(service_id)
-        pdf_msg = f"\nPDF: {pdf_path.name}"
-    except Exception as e:
-        pdf_msg = f"\nPDF ni bil ustvarjen: {e}"
-
-    status.set(f"Servisni list shranjen: {no}")
+    status.set(f"Servis je tehnično zaključen: {no}")
     warranty_message = (
         f"Tržna garancija na vgrajene dele: {warranty_months_v} mesece, "
         f"do {format_print_date(warranty_until_v)}."
         if warranty_scope_v == WARRANTY_SCOPE_INSTALLED_PARTS
         else "Vgrajen del ni evidentiran; dodatna tržna garancija na dele ni določena."
     )
-    open_cashier_now = messagebox.askyesno(
+    messagebox.showinfo(
         "MikroFix – servis je pripravljen za račun",
-        f"Servisni list {no} je shranjen.\n{warranty_message}{pdf_msg}"
+        f"Servis {no} je tehnično zaključen.\n{warranty_message}"
         + (f"\nOpozorilo: {'; '.join(post_save_warnings)}" if post_save_warnings else "")
         + "\n\n"
         "Servis še ni dokončno zaključen. Zaključen bo šele, ko blagajna izda "
-        "povezani račun.\n\nOdprim blagajno s prenesenimi postavkami zdaj?"
+        "povezani račun. Osnutek je lokalno pripravljen in bo v Blagajni ter "
+        "Office viden takoj, ko se Servis sinhronizira.",
+        parent=root,
     )
     clear_form(keep_device=True)
     active_service_order_id = None
     refresh_device_history_count()
     refresh_service_tab_history()
     show_service_history()
-    if open_cashier_now:
-        root.after(100, lambda sid=int(service_id): prepare_invoice_for_service(sid))
 
 
 def save():
@@ -2936,6 +3226,7 @@ def save_intake_from_tab():
         "microdetect_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "operator_code": RUNTIME.operator_code,
         "notes": _text_value(intake_notes_text),
+        "origin_device_id": SERVICE_SYNC_DEVICE_ID,
     }
 
     try:
@@ -2944,6 +3235,12 @@ def save_intake_from_tab():
         try:
             order_id, order_no = create_service_order(c, payload, commit=False)
             record = get_service_order(c, order_id)
+            enqueue_service_order_created(
+                c,
+                record,
+                actor_id=AUTH_SESSION.username or RUNTIME.operator_code,
+                device_id=SERVICE_SYNC_DEVICE_ID,
+            )
             last_intake_pdf_path = generate_service_order_pdf(
                 record, PDF_DIR, test_mode=RUNTIME.is_test
             )
@@ -2957,6 +3254,7 @@ def save_intake_from_tab():
         finally:
             c.close()
         active_service_order_id = order_id
+        request_service_sync()
         audit_event(
             "SERVICE_ORDER_CREATED", "service_order", order_id,
             {"order_no": order_no, "device": serial.get().strip()[-4:]},
@@ -4278,9 +4576,8 @@ def show_service_history():
     global service_editor_active
     if "service_home" not in globals():
         return
-    if not persist_active_service_parts():
+    if not persist_active_service_draft():
         return
-    pause_active_service_timer(reason="LEAVE_WORKSPACE", quiet=True)
     service_editor_active = False
     service_editor.pack_forget()
     service_home.pack(fill="both", expand=True)
@@ -4301,7 +4598,7 @@ def refresh_service_open_orders(*_args):
             SELECT id,order_no,created_at,customer_name,device_model,
                    device_serial,work_started_at,customer_request
             FROM service_orders
-            WHERE status='OPEN'
+            WHERE status='OPEN' AND service_id IS NULL
             ORDER BY id DESC
             LIMIT 500
             """
@@ -4359,6 +4656,281 @@ def _format_elapsed_seconds(value):
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _running_session_elapsed_seconds(session, now=None):
+    now = now or datetime.now()
+    try:
+        started = datetime.fromisoformat(str(session.get("started_at") or ""))
+        current_seconds = max(0, int((now - started).total_seconds()))
+    except (TypeError, ValueError):
+        current_seconds = 0
+    return int(session.get("stored_seconds") or 0) + current_seconds
+
+
+def _load_running_service_sessions():
+    c = connect()
+    try:
+        return list_running_service_work_sessions(c)
+    finally:
+        c.close()
+
+
+def refresh_running_service_banner():
+    """Vsako sekundo osveži skupni prikaz vseh nepavziranih servisov."""
+    global running_service_banner_after_id, running_service_banner_sessions
+    global running_service_banner_buttons
+    if running_service_banner_after_id is not None:
+        try:
+            root.after_cancel(running_service_banner_after_id)
+        except Exception:
+            pass
+        running_service_banner_after_id = None
+    try:
+        running_service_banner_sessions = _load_running_service_sessions()
+        now = datetime.now()
+        if running_service_banner_sessions:
+            rows = []
+            for session in running_service_banner_sessions[:4]:
+                identity = " · ".join(
+                    value for value in (
+                        session.get("order_no"), session.get("device_model"),
+                        session.get("customer_name"),
+                    ) if value
+                )
+                rows.append(
+                    f"{identity}  {_format_elapsed_seconds(_running_session_elapsed_seconds(session, now))}"
+                )
+            if len(running_service_banner_sessions) > 4:
+                rows.append(
+                    f"… in še {len(running_service_banner_sessions) - 4} aktivnih"
+                )
+            running_service_banner_var.set(
+                f"AKTIVNI SERVISI ({len(running_service_banner_sessions)}):  "
+                + "\n".join(rows)
+            )
+        else:
+            running_service_banner_var.set("AKTIVNI SERVISI: ni tekočih časov")
+    except Exception as exc:
+        running_service_banner_sessions = []
+        running_service_banner_var.set(
+            f"AKTIVNI SERVISI: stanja ni mogoče preveriti ({exc})"
+        )
+    state_v = "normal" if running_service_banner_sessions else "disabled"
+    live_buttons = []
+    for button in running_service_banner_buttons:
+        try:
+            button.configure(state=state_v)
+            live_buttons.append(button)
+        except Exception:
+            pass
+    running_service_banner_buttons = live_buttons
+    refresh_sync_conflict_banners()
+    if root.winfo_exists():
+        running_service_banner_after_id = root.after(
+            1000, refresh_running_service_banner
+        )
+
+
+def open_running_service_from_banner(order_id):
+    """Varno shrani trenutni obrazec in odpre izbrani tekoči servis."""
+    if not AUTH_SESSION.has_permission(PERMISSION_SERVICE):
+        messagebox.showwarning(
+            "MikroFIX", "Za odpiranje servisa nimaš dovoljenja.", parent=root
+        )
+        return
+    if service_editor_active and not persist_active_service_draft():
+        return
+    open_workflow_module(tab_service_top, "SERVICE")
+    open_service_order_for_work(int(order_id))
+
+
+def choose_running_service_from_banner():
+    """Pri več časovnikih omogoči izrecno izbiro naloga za nadaljevanje."""
+    try:
+        sessions = _load_running_service_sessions()
+    except Exception as exc:
+        messagebox.showerror(
+            "MikroFIX – aktivni servisi",
+            f"Aktivnih servisov ni mogoče prebrati:\n\n{exc}", parent=root,
+        )
+        return
+    if not sessions:
+        messagebox.showinfo(
+            "MikroFIX – aktivni servisi", "Noben servisni čas trenutno ne teče.",
+            parent=root,
+        )
+        return
+    if len(sessions) == 1:
+        open_running_service_from_banner(sessions[0]["service_order_id"])
+        return
+
+    win = tk.Toplevel(root)
+    win.title("MikroFIX – izberi aktivni servis")
+    fit_dialog_to_screen(win, 920, 440)
+    win.transient(root)
+    win.grab_set()
+    frame = tk.Frame(win, bg=PANEL)
+    frame.pack(fill="both", expand=True, padx=14, pady=14)
+    tk.Label(
+        frame, text="Hkrati teče več servisov. Izberi nalog, ki ga želiš odpreti.",
+        bg=PANEL, fg=DARK, font=("Segoe UI", 11, "bold"),
+    ).pack(anchor="w", pady=(0, 10))
+    tree = ttk.Treeview(
+        frame, columns=("id", "order", "device", "customer", "elapsed"),
+        show="headings", height=10,
+    )
+    for column, label_v, width_v in (
+        ("id", "ID", 70), ("order", "Nalog", 150),
+        ("device", "Naprava", 210), ("customer", "Stranka", 240),
+        ("elapsed", "Čas", 110),
+    ):
+        tree.heading(column, text=label_v)
+        tree.column(column, width=width_v, anchor="w")
+    now = datetime.now()
+    for session in sessions:
+        order_id_v = int(session["service_order_id"])
+        tree.insert(
+            "", "end", iid=str(order_id_v),
+            values=(
+                order_id_v, session.get("order_no") or "-",
+                session.get("device_model") or "-",
+                session.get("customer_name") or "-",
+                _format_elapsed_seconds(
+                    _running_session_elapsed_seconds(session, now)
+                ),
+            ),
+        )
+    tree.pack(fill="both", expand=True)
+    actions = tk.Frame(frame, bg=PANEL)
+    actions.pack(fill="x", pady=(10, 0))
+
+    def open_selected(_event=None):
+        selected = tree.selection()
+        if not selected:
+            return
+        order_id_v = int(selected[0])
+        win.destroy()
+        open_running_service_from_banner(order_id_v)
+
+    ttk.Button(
+        actions, text="ODPRI IZBRANI SERVIS", command=open_selected,
+        style="Blue.TButton",
+    ).pack(side="left")
+    ttk.Button(actions, text="PREKLIČI", command=win.destroy).pack(side="right")
+    tree.bind("<Double-1>", open_selected)
+    first = tree.get_children()
+    if first:
+        tree.selection_set(first[0])
+        tree.focus(first[0])
+
+
+def build_running_service_banner(parent):
+    """Zgradi skupni, vedno vidni prikaz tekočih servisnih časov."""
+    frame = tk.Frame(
+        parent, bg="#FFF4DF", highlightthickness=1,
+        highlightbackground="#D8A447",
+    )
+    tk.Label(
+        frame, textvariable=running_service_banner_var,
+        bg="#FFF4DF", fg=DARK, font=("Segoe UI", 9, "bold"),
+        justify="left", anchor="w",
+    ).pack(side="left", fill="x", expand=True, padx=12, pady=8)
+    button = ttk.Button(
+        frame, text="ODPRI AKTIVNI SERVIS",
+        command=choose_running_service_from_banner, state="disabled",
+    )
+    button.pack(side="right", padx=10, pady=8)
+    running_service_banner_buttons.append(button)
+    return frame
+
+
+def _sync_conflict_lines(conflicts):
+    lines = []
+    for conflict in conflicts:
+        order_v = conflict.get("order_no") or conflict.get("aggregate_uuid") or "-"
+        for item in conflict.get("details") or [{}]:
+            description_v = item.get("description") or "Neznan artikel"
+            barcode_v = item.get("barcode") or "brez barkode"
+            lines.append(f"{order_v}: {description_v} [barkoda {barcode_v}]")
+    return lines
+
+
+def show_sync_conflict_details():
+    c = connect()
+    try:
+        conflicts = list_open_sync_conflicts(c)
+    finally:
+        c.close()
+    lines = _sync_conflict_lines(conflicts)
+    messagebox.showerror(
+        "MikroFIX – KONFLIKT SINHRONIZACIJE",
+        "Servis ostaja lokalno tehnično zaključen, vendar do razrešitve ni "
+        "na voljo Blagajni. Zaloga ni bila umetno popravljena.\n\n"
+        + ("\n".join(lines) if lines else "Ni odprtih konfliktov."),
+        parent=root,
+    )
+
+
+def build_sync_conflict_banner(parent, *, after_widget=None):
+    frame = tk.Frame(
+        parent, bg="#FDE8E8", highlightthickness=2,
+        highlightbackground=DANGER,
+    )
+    tk.Label(
+        frame, textvariable=sync_conflict_banner_var,
+        bg="#FDE8E8", fg=DANGER, font=("Segoe UI", 10, "bold"),
+        justify="left", anchor="w",
+    ).pack(side="left", fill="x", expand=True, padx=12, pady=9)
+    ttk.Button(
+        frame, text="PRIKAŽI KONFLIKT", command=show_sync_conflict_details,
+    ).pack(side="right", padx=10, pady=8)
+    frame._sync_pack_after = after_widget
+    sync_conflict_banner_frames.append(frame)
+    return frame
+
+
+def refresh_sync_conflict_banners():
+    """Prikaži trajno in enkrat tudi modalno opozorilo za odprte konflikte."""
+    try:
+        c = connect()
+        try:
+            conflicts = list_open_sync_conflicts(c)
+        finally:
+            c.close()
+    except Exception:
+        return
+    live_frames = []
+    lines = _sync_conflict_lines(conflicts)
+    if conflicts:
+        shown = lines[:3]
+        if len(lines) > 3:
+            shown.append(f"… in še {len(lines) - 3} problematičnih artiklov")
+        sync_conflict_banner_var.set(
+            "KONFLIKT SINHRONIZACIJE – NI POSLANO V BLAGAJNO\n"
+            + "\n".join(shown)
+        )
+    for frame in sync_conflict_banner_frames:
+        try:
+            if conflicts:
+                if not frame.winfo_manager():
+                    options = {"fill": "x", "padx": 24, "pady": (8, 0)}
+                    if frame._sync_pack_after is not None:
+                        options["after"] = frame._sync_pack_after
+                    frame.pack(**options)
+            else:
+                frame.pack_forget()
+            live_frames.append(frame)
+        except Exception:
+            pass
+    sync_conflict_banner_frames[:] = live_frames
+    new_conflicts = [
+        item for item in conflicts
+        if item["operation_id"] not in sync_conflict_notified
+    ]
+    if new_conflicts:
+        sync_conflict_notified.update(item["operation_id"] for item in new_conflicts)
+        root.after_idle(show_sync_conflict_details)
+
+
 def refresh_service_timer_display():
     """Osveži namenski prikaz ure in dejanskega intervalnega časa."""
     global service_timer_after_id
@@ -4407,7 +4979,8 @@ def resume_active_service_timer():
     c = connect()
     try:
         start_service_work_timer(
-            c, int(active_service_order_id), operator_code=RUNTIME.operator_code
+            c, int(active_service_order_id),
+            operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
         )
     except Exception as exc:
         c.close()
@@ -4425,7 +4998,8 @@ def pause_active_service_timer(*, reason="MANUAL_PAUSE", quiet=False):
     try:
         before = service_work_timer_snapshot(c, int(active_service_order_id))
         minutes = pause_service_work_timer(
-            c, int(active_service_order_id), operator_code=RUNTIME.operator_code,
+            c, int(active_service_order_id),
+            operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
             reason=reason,
         )
     except Exception as exc:
@@ -4448,11 +5022,26 @@ def open_service_order_for_work(order_id):
     global service_editor_active, active_service_order_id
     global device_identity_method, device_type_code
 
+    if service_editor_active and not persist_active_service_draft():
+        return False
+
     c = connect()
     try:
         order = get_service_order(c, int(order_id))
+        if order.get("service_id"):
+            c.close()
+            messagebox.showinfo(
+                "MikroFix – servis je že pripravljen",
+                "Ta servis je že tehnično zaključen in čaka na račun v Blagajni.",
+                parent=root,
+            )
+            return False
+        timer_was_running = service_work_timer_snapshot(
+            c, int(order_id)
+        ).get("running", False)
         started_at_v = start_service_work_timer(
-            c, order_id, operator_code=RUNTIME.operator_code
+            c, order_id,
+            operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
         )
     except WorkflowError as exc:
         c.close()
@@ -4488,9 +5077,14 @@ def open_service_order_for_work(order_id):
     customer.set(order.get("customer_name") or "")
     customer_address.set(order.get("customer_address") or "")
     customer_phone.set(order.get("customer_phone") or "")
-    work.insert("1.0", order.get("customer_request") or "")
     if not restore_active_service_parts():
-        pause_active_service_timer(reason="LOAD_PARTS_FAILED", quiet=True)
+        if not timer_was_running:
+            pause_active_service_timer(reason="LOAD_PARTS_FAILED", quiet=True)
+        active_service_order_id = None
+        return False
+    if not restore_active_service_draft(order.get("customer_request") or ""):
+        if not timer_was_running:
+            pause_active_service_timer(reason="LOAD_DRAFT_FAILED", quiet=True)
         active_service_order_id = None
         return False
 
@@ -4553,7 +5147,8 @@ def choose_open_service_order():
     try:
         rows = c.execute(
             "SELECT id,order_no,created_at,customer_name,device_model,device_serial,device_imei,"
-            "customer_request FROM service_orders WHERE status='OPEN' ORDER BY id DESC"
+            "customer_request FROM service_orders "
+            "WHERE status='OPEN' AND service_id IS NULL ORDER BY id DESC"
         ).fetchall()
     finally:
         c.close()
@@ -6152,19 +6747,22 @@ def style_app():
     style.configure("TNotebook.Tab", font=("Segoe UI",9,"bold"), padding=(12,7))
 
 
-def on_close():
-    c = connect()
+def service_time_blocks_application_close():
+    """Fail closed and explain why the application must remain running."""
+    c = None
     try:
+        c = connect()
         running_sessions = list_running_service_work_sessions(c)
     except Exception as exc:
-        c.close()
+        if c is not None:
+            c.close()
         messagebox.showerror(
             "MikroFIX - preverjanje servisnega časa ni uspelo",
             "Programa ni mogoče varno zapreti, ker stanja servisnih sej ni "
             f"bilo mogoče preveriti:\n\n{exc}",
             parent=root,
         )
-        return
+        return True
     c.close()
     if running_sessions:
         details = []
@@ -6186,6 +6784,60 @@ def on_close():
               "zaključi servis.",
             parent=root,
         )
+        return True
+    return False
+
+
+def service_time_blocks_logout():
+    """Ročno odjavo blokiraj, dokler teče vsaj en servisni interval."""
+    try:
+        running_sessions = _load_running_service_sessions()
+    except Exception as exc:
+        messagebox.showerror(
+            "MikroFIX - preverjanje servisnega časa ni uspelo",
+            "Odjava ni dovoljena, ker stanja servisnih sej ni bilo mogoče "
+            f"preveriti:\n\n{exc}", parent=root,
+        )
+        return True
+    if not running_sessions:
+        return False
+    details = []
+    now = datetime.now()
+    for session in running_sessions[:8]:
+        description = " – ".join(
+            value for value in (
+                session.get("order_no"), session.get("device_model"),
+                session.get("customer_name"),
+            ) if value
+        )
+        details.append(
+            f"• {description}: "
+            f"{_format_elapsed_seconds(_running_session_elapsed_seconds(session, now))}"
+        )
+    if len(running_sessions) > 8:
+        details.append(f"• in še {len(running_sessions) - 8}")
+    messagebox.showwarning(
+        "MikroFIX - odjava ni dovoljena",
+        "Odjava ni dovoljena, ker imaš nepavzirane servisne naloge:\n\n"
+        + "\n".join(details)
+        + "\n\nNajprej ustavi čas na vseh navedenih nalogih ali jih zaključi.",
+        parent=root,
+    )
+    return True
+
+
+def run_login_or_close_safely(*, username_only=None):
+    """Keep the login gate open while active service time forbids exiting."""
+    while True:
+        if run_pin_login(root, username_only=username_only):
+            return True
+        if not service_time_blocks_application_close():
+            root.destroy()
+            return False
+
+
+def on_close():
+    if service_time_blocks_application_close():
         return
     if ACTIVE_SCREEN != "MENU":
         show_start_menu()
@@ -6202,10 +6854,20 @@ def on_close():
                 parent=root,
             ):
                 return
+    if not stop_service_sync_worker():
+        messagebox.showerror(
+            "MikroFIX – sinhronizacija se še zaključuje",
+            "Programa trenutno ni mogoče varno zapreti, ker strežniška "
+            "sinhronizacija še uporablja lokalno bazo. Počakaj in nato ponovno "
+            "zapri program.",
+            parent=root,
+        )
+        return
     if bool(RUNTIME.settings.get("data_encryption", {}).get("enabled")):
         try:
             unmount_encrypted_data(RUNTIME.data_dir)
         except DataEncryptionError as exc:
+            start_service_sync_worker()
             messagebox.showerror(
                 "MikroFIX - zaklep podatkov ni uspel",
                 f"Program ostaja odprt, ker podatkovne mape ni bilo mogoče varno zakleniti:\n\n{exc}",
@@ -6573,8 +7235,9 @@ def open_workflow_module(tab, intent):
 
 def show_start_menu():
     """Prikaže glavni meni kot zaslon istega aplikacijskega okna."""
-    global ACTIVE_SCREEN, main_menu_frame
-    pause_active_service_timer(reason="MAIN_MENU", quiet=True)
+    global ACTIVE_SCREEN, main_menu_frame, menu_running_service_banner
+    if not persist_active_service_draft():
+        return
     ACTIVE_SCREEN = "MENU"
     root.title(f"MikroFIX {RUNTIME.version_label} - Kaj želiš narediti?")
     root.deiconify()
@@ -6617,6 +7280,13 @@ def show_start_menu():
         header, text=AUTH_SESSION.caption(), bg=PANEL, fg=GRAY,
         font=("Segoe UI", 9, "bold"),
     ).pack(side="right", padx=16, pady=24)
+
+    menu_running_service_banner = build_running_service_banner(main_menu_frame)
+    menu_running_service_banner.pack(fill="x", padx=24, pady=(12, 0))
+    build_sync_conflict_banner(
+        main_menu_frame, after_widget=menu_running_service_banner
+    )
+    refresh_sync_conflict_banners()
 
     content = tk.Frame(main_menu_frame, bg=BG)
     content.pack(fill="both", expand=True, padx=36, pady=28)
@@ -6792,6 +7462,10 @@ root.geometry("1180x760")
 root.minsize(900, 620)
 root.configure(bg=BG)
 root.withdraw()
+running_service_banner_var = tk.StringVar(
+    value="AKTIVNI SERVISI: preverjam stanje …"
+)
+sync_conflict_banner_var = tk.StringVar(value="")
 
 # Program se na Windows odpre maksimiran.
 maximize_work_window(root, "1180x760")
@@ -6835,6 +7509,12 @@ tk.Label(
 ).pack(side="left", padx=(24, 0), pady=(12, 0))
 
 connected_state = tk.StringVar(value="NI POVEZAVE")
+service_sync_status_var = tk.StringVar(value="SYNC: NI NASTAVLJEN")
+service_sync_status_label = tk.Label(
+    brand, textvariable=service_sync_status_var,
+    bg=BG, fg=GRAY, font=("Segoe UI", 9, "bold")
+)
+service_sync_status_label.pack(side="right", padx=(0, 14), pady=(12, 0))
 header_connected_label = tk.Label(
     brand, textvariable=connected_state,
     bg=BG, fg=GRAY, font=("Segoe UI",9,"bold")
@@ -6869,6 +7549,10 @@ tk.Label(
     brand, textvariable=current_user_var,
     bg=BG, fg=GRAY, font=("Segoe UI", 9, "bold")
 ).pack(side="right", padx=(8,12), pady=(12,0))
+
+running_service_banner = build_running_service_banner(outer)
+running_service_banner.pack(fill="x", pady=(0, 10))
+build_sync_conflict_banner(outer, after_widget=running_service_banner)
 
 # Zgornji zavihki: Naprava / Zaloga delov
 top_nb = ttk.Notebook(outer)
@@ -8008,9 +8692,6 @@ def on_top_tab_changed(_event=None):
     except Exception:
         return
 
-    if selected != "Servisni list" and service_editor_active:
-        pause_active_service_timer(reason="MODULE_SWITCH", quiet=True)
-
     if selected == "Reklamacije" and not device_is_identified():
         top_nb.select(tab_device_top)
         messagebox.showwarning(
@@ -8722,6 +9403,8 @@ init_auth_db()
 protect_file_permissions(DB)
 protect_file_permissions(AUTH_DB)
 protect_file_permissions(INVENTORY_DB)
+root.after(200, refresh_running_service_banner)
+root.after(250, poll_service_sync_status)
 
 if os.environ.get("MIKROFIX_SMOKE_TEST") == "1":
     def _layout_bottom_ok(dialog):
@@ -8771,7 +9454,8 @@ if os.environ.get("MIKROFIX_SMOKE_TEST") == "1":
     device_dialog.destroy()
     root.update_idletasks()
     root.destroy()
-elif run_pin_login(root):
+elif run_login_or_close_safely():
+    start_service_sync_worker()
     root.deiconify()
     try:
         root.state("zoomed")
@@ -8779,5 +9463,3 @@ elif run_pin_login(root):
         pass
     root.after(180, show_start_menu)
     root.mainloop()
-else:
-    root.destroy()

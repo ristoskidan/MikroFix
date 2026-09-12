@@ -34,6 +34,7 @@ tmp/
 __pycache__/
 *.py[cod]
 .venv/
+.venv-server/
 venv/
 .pytest_cache/
 .mypy_cache/

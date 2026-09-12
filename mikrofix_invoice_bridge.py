@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from uuid import uuid4
 
 
 @dataclass(frozen=True)
@@ -63,9 +64,21 @@ def ensure_service_invoice_schema(connection) -> None:
         "tariff_version": "TEXT",
         "first_rate": "REAL NOT NULL DEFAULT 0",
         "extra_half_hour_rate": "REAL NOT NULL DEFAULT 0",
+        "line_uuid": "TEXT",
     }.items():
         if name not in manual_columns:
             connection.execute(f"ALTER TABLE service_manual_lines ADD COLUMN {name} {ddl}")
+    for legacy_line_id, in connection.execute(
+        "SELECT id FROM service_manual_lines WHERE line_uuid IS NULL OR line_uuid=''"
+    ).fetchall():
+        connection.execute(
+            "UPDATE service_manual_lines SET line_uuid=? WHERE id=?",
+            (str(uuid4()), int(legacy_line_id)),
+        )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_manual_line_uuid "
+        "ON service_manual_lines(line_uuid)"
+    )
     connection.commit()
 
 

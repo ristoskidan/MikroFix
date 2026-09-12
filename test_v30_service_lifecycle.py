@@ -5,12 +5,16 @@ from pathlib import Path
 
 from mikrofix_invoice_bridge import ensure_service_invoice_schema, mark_service_invoiced
 from mikrofix_workflows import (
+    WorkflowError,
     create_service_order,
+    delete_service_work_draft,
     ensure_workflow_schema,
     link_service_result,
     list_running_service_work_sessions,
     load_service_order_parts,
+    load_service_work_draft,
     save_service_order_parts,
+    save_service_work_draft,
     start_service_work_timer,
     pause_service_work_timer,
 )
@@ -120,6 +124,53 @@ class V30ServiceLifecycleTests(unittest.TestCase):
         save_service_order_parts(self.connection, order_id, [first])
 
         self.assertEqual(load_service_order_parts(self.connection, order_id), [first])
+
+    def test_open_service_draft_survives_switch_and_is_deleted_on_completion(self):
+        order_id = self._create_open_order("SN-DRAFT")
+        first = {
+            "work": "Očiščen priključek",
+            "pre_tests": {"Polnjenje": "NE DELA"},
+            "post_tests": {"Polnjenje": "OK"},
+            "pending_photos": [{"path": "/tmp/test.jpg", "stage": "PO"}],
+        }
+        save_service_work_draft(
+            self.connection, order_id, first, operator_code="DR"
+        )
+        self.assertEqual(load_service_work_draft(self.connection, order_id), first)
+
+        replacement = {"work": "Končano", "pending_photos": []}
+        save_service_work_draft(self.connection, order_id, replacement)
+        self.assertEqual(
+            load_service_work_draft(self.connection, order_id), replacement
+        )
+        delete_service_work_draft(self.connection, order_id)
+        self.assertIsNone(load_service_work_draft(self.connection, order_id))
+
+    def test_same_workstation_can_run_multiple_service_timers(self):
+        first_id = self._create_open_order("SN-PARALLEL-1")
+        second_id = self._create_open_order("SN-PARALLEL-2")
+        start_service_work_timer(self.connection, first_id, operator_code="DR")
+        start_service_work_timer(self.connection, second_id, operator_code="DR")
+
+        running = list_running_service_work_sessions(self.connection)
+        self.assertEqual(
+            {row["service_order_id"] for row in running},
+            {first_id, second_id},
+        )
+
+    def test_service_order_cannot_link_two_technical_results(self):
+        order_id = self._create_open_order("SN-ONE-RESULT")
+        first = self.connection.execute(
+            "INSERT INTO service(service_no,service_order_id) VALUES(?,?)",
+            ("MF-2026-0101", order_id),
+        ).lastrowid
+        second = self.connection.execute(
+            "INSERT INTO service(service_no,service_order_id) VALUES(?,?)",
+            ("MF-2026-0102", order_id),
+        ).lastrowid
+        link_service_result(self.connection, order_id, int(first))
+        with self.assertRaisesRegex(WorkflowError, "drugim tehničnim zaključkom"):
+            link_service_result(self.connection, order_id, int(second))
 
     def test_running_service_session_blocks_close_until_timer_is_paused(self):
         order_id = self._create_open_order("SN-AKTIVNA")

@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid4
 from xml.sax.saxutils import escape
 
 from mikrofix_operations import (
@@ -66,6 +67,36 @@ class WorkflowError(ValueError):
     """Vnos ni dovolj popoln ali varen za izdajo dokumenta."""
 
 
+def _new_or_normalized_uuid(value: object = None) -> str:
+    """Return a stable canonical UUID for additive sync migrations."""
+    if value is None or not str(value).strip():
+        return str(uuid4())
+    try:
+        return str(UUID(str(value)))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowError("Sinhronizacijski UUID ni veljaven.") from exc
+
+
+def _ensure_uuid_identity(
+    connection, table: str, column: str, index_name: str
+) -> None:
+    """Add and backfill a UUID column without replacing legacy integer IDs."""
+    columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column not in columns:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} TEXT")
+    missing = connection.execute(
+        f"SELECT id FROM {table} WHERE {column} IS NULL OR TRIM({column})=''"
+    ).fetchall()
+    for (legacy_id,) in missing:
+        connection.execute(
+            f"UPDATE {table} SET {column}=? WHERE id=?",
+            (str(uuid4()), int(legacy_id)),
+        )
+    connection.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table}({column})"
+    )
+
+
 def ensure_workflow_schema(connection) -> None:
     ensure_operation_schema(connection)
     connection.execute(
@@ -119,9 +150,23 @@ def ensure_workflow_schema(connection) -> None:
         "work_ended_at": "TEXT",
         "work_elapsed_minutes": "INTEGER",
         "customer_partner_id": "INTEGER",
+        "row_version": "INTEGER NOT NULL DEFAULT 1",
+        "central_version": "INTEGER NOT NULL DEFAULT 0",
+        "origin_device_id": "TEXT NOT NULL DEFAULT 'LOCAL-UNREGISTERED'",
+        "sync_state": "TEXT NOT NULL DEFAULT 'LOCAL_ONLY'",
     }.items():
         if name not in service_order_columns:
             connection.execute(f"ALTER TABLE service_orders ADD COLUMN {name} {ddl}")
+    connection.execute(
+        "UPDATE service_orders SET row_version=1 "
+        "WHERE row_version IS NULL OR row_version<1"
+    )
+    connection.execute(
+        "UPDATE service_orders SET central_version=0 WHERE central_version IS NULL"
+    )
+    _ensure_uuid_identity(
+        connection, "service_orders", "sync_uuid", "idx_service_orders_sync_uuid"
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS service_work_sessions(
@@ -144,10 +189,39 @@ def ensure_workflow_schema(connection) -> None:
         WHERE ended_at IS NULL
         """
     )
+    work_session_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(service_work_sessions)")
+    }
+    for name, ddl in {
+        "origin_device_id": "TEXT NOT NULL DEFAULT 'LOCAL-UNREGISTERED'",
+        "sync_state": "TEXT NOT NULL DEFAULT 'LOCAL_ONLY'",
+    }.items():
+        if name not in work_session_columns:
+            connection.execute(
+                f"ALTER TABLE service_work_sessions ADD COLUMN {name} {ddl}"
+            )
+    _ensure_uuid_identity(
+        connection,
+        "service_work_sessions",
+        "interval_uuid",
+        "idx_service_work_interval_uuid",
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_service_work_order
         ON service_work_sessions(service_order_id,id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS service_work_drafts(
+            service_order_id INTEGER PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT,
+            FOREIGN KEY(service_order_id) REFERENCES service_orders(id)
+                ON DELETE CASCADE
+        )
         """
     )
     connection.execute(
@@ -174,6 +248,21 @@ def ensure_workflow_schema(connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_service_order_parts_order
         ON service_order_parts(service_order_id,line_no)
         """
+    )
+    part_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(service_order_parts)")
+    }
+    for name, ddl in {
+        "origin_device_id": "TEXT NOT NULL DEFAULT 'LOCAL-UNREGISTERED'",
+        "sync_state": "TEXT NOT NULL DEFAULT 'LOCAL_ONLY'",
+    }.items():
+        if name not in part_columns:
+            connection.execute(f"ALTER TABLE service_order_parts ADD COLUMN {name} {ddl}")
+    _ensure_uuid_identity(
+        connection,
+        "service_order_parts",
+        "line_uuid",
+        "idx_service_order_parts_line_uuid",
     )
     connection.execute(
         """
@@ -350,16 +439,23 @@ def save_service_order_parts(
                 """
                 INSERT INTO service_order_parts(
                     service_order_id,line_no,part_name,part_id,barcode,
-                    article_id,lot_serial,unit_price,updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)
+                    article_id,lot_serial,unit_price,updated_at,line_uuid,
+                    origin_device_id,sync_state
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     int(service_order_id), line_no, str(part_name or "").strip(),
                     str(part_id or "").strip(), str(barcode or "").strip(),
                     int(article_id) if article_id is not None else None,
                     str(lot_serial or "").strip(), float(unit_price or 0), stamp,
+                    str(uuid4()), "LOCAL-UNREGISTERED", "LOCAL_ONLY",
                 ),
             )
+        connection.execute(
+            "UPDATE service_orders SET row_version=row_version+1,sync_state='LOCAL_ONLY' "
+            "WHERE id=?",
+            (int(service_order_id),),
+        )
         if commit:
             connection.commit()
     except Exception:
@@ -477,6 +573,10 @@ def create_service_order(
         )
     order_no = _next_number(connection, "service_orders", "order_no", "MF-SN")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sync_uuid = _new_or_normalized_uuid(data.get("sync_uuid"))
+    origin_device_id = str(
+        data.get("origin_device_id") or "LOCAL-UNREGISTERED"
+    ).strip()
     cursor = connection.execute(
         """
         INSERT INTO service_orders(
@@ -487,8 +587,9 @@ def create_service_order(
             customer_request, intake_condition, accessories,
             quote_eur, logistics_eur, expected_due, contract_context,
             immediate_start_requested, withdrawal_loss_ack, delivery_channel,
-            microdetect_confirmed, microdetect_at, operator_code, notes
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            microdetect_confirmed, microdetect_at, operator_code, notes,
+            sync_uuid,row_version,origin_device_id,sync_state
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (
             order_no, now, "OPEN",
@@ -511,6 +612,7 @@ def create_service_order(
             str(data.get("microdetect_at") or now),
             str(data.get("operator_code") or "DR").strip(),
             str(data.get("notes") or "").strip(),
+            sync_uuid, 1, origin_device_id, "LOCAL_ONLY",
         ),
     )
     if commit:
@@ -530,9 +632,74 @@ def get_service_order(connection, order_id: int):
     return dict(zip(columns, row))
 
 
+def save_service_work_draft(
+    connection, order_id: int, payload: dict[str, Any], *,
+    operator_code: str = "", commit: bool = True,
+) -> None:
+    """Trajno shrani uporabniški osnutek odprtega servisnega delovnega prostora."""
+    ensure_workflow_schema(connection)
+    exists = connection.execute(
+        "SELECT 1 FROM service_orders WHERE id=? AND status='OPEN'",
+        (int(order_id),),
+    ).fetchone()
+    if not exists:
+        raise WorkflowError("Osnutek je mogoče shraniti samo za odprt servis.")
+    connection.execute(
+        """
+        INSERT INTO service_work_drafts(
+            service_order_id,payload_json,updated_at,updated_by
+        ) VALUES(?,?,?,?)
+        ON CONFLICT(service_order_id) DO UPDATE SET
+            payload_json=excluded.payload_json,
+            updated_at=excluded.updated_at,
+            updated_by=excluded.updated_by
+        """,
+        (
+            int(order_id),
+            json.dumps(payload, ensure_ascii=False, sort_keys=True),
+            datetime.now().isoformat(timespec="seconds"),
+            str(operator_code or ""),
+        ),
+    )
+    if commit:
+        connection.commit()
+
+
+def load_service_work_draft(connection, order_id: int) -> dict[str, Any] | None:
+    """Vrni shranjeni uporabniški osnutek ali None, če še ne obstaja."""
+    ensure_workflow_schema(connection)
+    row = connection.execute(
+        "SELECT payload_json FROM service_work_drafts WHERE service_order_id=?",
+        (int(order_id),),
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        value = json.loads(str(row[0]))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise WorkflowError("Shranjeni osnutek servisnega dela je poškodovan.") from exc
+    if not isinstance(value, dict):
+        raise WorkflowError("Shranjeni osnutek servisnega dela ni veljaven.")
+    return value
+
+
+def delete_service_work_draft(
+    connection, order_id: int, *, commit: bool = True,
+) -> None:
+    """Odstrani osnutek po atomskem tehničnem zaključku servisa."""
+    ensure_workflow_schema(connection)
+    connection.execute(
+        "DELETE FROM service_work_drafts WHERE service_order_id=?",
+        (int(order_id),),
+    )
+    if commit:
+        connection.commit()
+
+
 def start_service_work_timer(
     connection, order_id: int, *, started_at: datetime | None = None,
     operator_code: str = "",
+    origin_device_id: str = "LOCAL-UNREGISTERED",
     commit: bool = True,
 ) -> datetime:
     """Začni nov obračunljivi interval ali vrni začetek že tekočega."""
@@ -554,12 +721,18 @@ def start_service_work_timer(
         return datetime.fromisoformat(str(running[0]))
     started = started_at or datetime.now()
     connection.execute(
-        "INSERT INTO service_work_sessions(service_order_id,started_at,started_by) "
-        "VALUES(?,?,?)",
-        (int(order_id), started.isoformat(timespec="seconds"), str(operator_code or "")),
+        "INSERT INTO service_work_sessions("
+        "service_order_id,started_at,started_by,interval_uuid,origin_device_id,sync_state"
+        ") VALUES(?,?,?,?,?,?)",
+        (
+            int(order_id), started.isoformat(timespec="seconds"),
+            str(operator_code or ""), str(uuid4()),
+            str(origin_device_id or "LOCAL-UNREGISTERED"), "LOCAL_ONLY",
+        ),
     )
     connection.execute(
-        "UPDATE service_orders SET work_started_at=COALESCE(work_started_at,?) "
+        "UPDATE service_orders SET work_started_at=COALESCE(work_started_at,?),"
+        "row_version=row_version+1,sync_state='LOCAL_ONLY' "
         "WHERE id=?",
         (started.isoformat(timespec="seconds"), int(order_id)),
     )
@@ -614,7 +787,14 @@ def list_running_service_work_sessions(connection) -> list[dict[str, Any]]:
     rows = connection.execute(
         """
         SELECT s.service_order_id,o.order_no,o.customer_name,o.device_model,
-               s.started_at
+               s.started_at,
+               COALESCE((
+                   SELECT SUM(COALESCE(done.elapsed_seconds,0))
+                   FROM service_work_sessions done
+                   WHERE done.service_order_id=s.service_order_id
+                     AND done.ended_at IS NOT NULL
+               ),0),
+               s.started_by
         FROM service_work_sessions s
         JOIN service_orders o ON o.id=s.service_order_id
         WHERE s.ended_at IS NULL
@@ -628,6 +808,8 @@ def list_running_service_work_sessions(connection) -> list[dict[str, Any]]:
             "customer_name": str(row[2] or "").strip(),
             "device_model": str(row[3] or "").strip(),
             "started_at": str(row[4] or "").strip(),
+            "stored_seconds": int(row[5] or 0),
+            "started_by": str(row[6] or "").strip(),
         }
         for row in rows
     ]
@@ -636,6 +818,7 @@ def list_running_service_work_sessions(connection) -> list[dict[str, Any]]:
 def pause_service_work_timer(
     connection, order_id: int, *, ended_at: datetime | None = None,
     operator_code: str = "", reason: str = "PAUSE", commit: bool = True,
+    bump_version: bool = True,
 ) -> int:
     """Zaključi samo tekoči interval in vrni dosedanji seštevek minut."""
     ensure_workflow_schema(connection)
@@ -660,10 +843,17 @@ def pause_service_work_timer(
         )
     snapshot = service_work_timer_snapshot(connection, int(order_id), at=ended_at)
     elapsed_minutes = int(snapshot["elapsed_minutes"])
-    connection.execute(
-        "UPDATE service_orders SET work_elapsed_minutes=? WHERE id=?",
-        (elapsed_minutes or None, int(order_id)),
-    )
+    if row and bump_version:
+        connection.execute(
+            "UPDATE service_orders SET work_elapsed_minutes=?,"
+            "row_version=row_version+1,sync_state='LOCAL_ONLY' WHERE id=?",
+            (elapsed_minutes or None, int(order_id)),
+        )
+    else:
+        connection.execute(
+            "UPDATE service_orders SET work_elapsed_minutes=? WHERE id=?",
+            (elapsed_minutes or None, int(order_id)),
+        )
     if commit:
         connection.commit()
     return elapsed_minutes
@@ -697,11 +887,13 @@ def finish_service_work_timer(
     elapsed_minutes = pause_service_work_timer(
         connection, int(order_id), ended_at=ended,
         operator_code=operator_code, reason="FINISH", commit=False,
+        bump_version=False,
     )
     if elapsed_minutes <= 0:
         raise WorkflowError("Servis nima veljavnega izmerjenega časa.")
     connection.execute(
-        "UPDATE service_orders SET work_ended_at=?,work_elapsed_minutes=? WHERE id=?",
+        "UPDATE service_orders SET work_ended_at=?,work_elapsed_minutes=?,"
+        "row_version=row_version+1,sync_state='LOCAL_ONLY' WHERE id=?",
         (ended.isoformat(timespec="seconds"), elapsed_minutes, int(order_id)),
     )
     if commit:
@@ -729,7 +921,8 @@ def complete_service_order(
     cursor = connection.execute(
         """
         UPDATE service_orders
-        SET status='COMPLETED', completed_at=?, service_id=?
+        SET status='COMPLETED', completed_at=?, service_id=?,
+            row_version=row_version+1,sync_state='LOCAL_ONLY'
         WHERE id=? AND status='OPEN'
         """,
         (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), service_id, order_id),
@@ -746,13 +939,20 @@ def link_service_result(
     """Poveže izvedeni servis, vendar nalog do izdanega računa ostane v obdelavi."""
     cursor = connection.execute(
         """
-        UPDATE service_orders SET service_id=?
-        WHERE id=? AND status='OPEN'
+        UPDATE service_orders SET service_id=?,row_version=row_version+1,
+            sync_state='LOCAL_ONLY'
+        WHERE id=? AND status='OPEN' AND (service_id IS NULL OR service_id=?)
         """,
-        (int(service_id), int(order_id)),
+        (int(service_id), int(order_id), int(service_id)),
     )
     if cursor.rowcount != 1:
-        raise WorkflowError("Servisnega naročila ni mogoče povezati z izvedenim servisom.")
+        existing = connection.execute(
+            "SELECT service_id FROM service_orders WHERE id=?", (int(order_id),)
+        ).fetchone()
+        if not existing or int(existing[0] or 0) != int(service_id):
+            raise WorkflowError(
+                "Servisno naročilo je že povezano z drugim tehničnim zaključkom."
+            )
     if commit:
         connection.commit()
 
@@ -766,7 +966,8 @@ def begin_service_buyback_offer(
     cursor = connection.execute(
         """
         UPDATE service_orders
-        SET previous_status=status,status='ODKUP_V_POGOVORU',conversion_started_at=?
+        SET previous_status=status,status='ODKUP_V_POGOVORU',conversion_started_at=?,
+            row_version=row_version+1,sync_state='LOCAL_ONLY'
         WHERE id=? AND status='OPEN' AND buyback_id IS NULL
         """,
         (now, int(order_id)),
@@ -790,7 +991,8 @@ def cancel_service_buyback_offer(
         """
         UPDATE service_orders
         SET status=COALESCE(NULLIF(previous_status,''),'OPEN'),previous_status=NULL,
-            conversion_started_at=NULL
+            conversion_started_at=NULL,row_version=row_version+1,
+            sync_state='LOCAL_ONLY'
         WHERE id=? AND status='ODKUP_V_POGOVORU' AND buyback_id IS NULL
         """,
         (int(order_id),),
@@ -901,7 +1103,8 @@ def convert_service_order_to_buyback(
         """
         UPDATE service_orders
         SET status='PREUSMERJENO_V_ODKUP',buyback_id=?,conversion_operation_id=?,
-            converted_at=?,completed_at=COALESCE(completed_at,?)
+            converted_at=?,completed_at=COALESCE(completed_at,?),
+            row_version=row_version+1,sync_state='LOCAL_ONLY'
         WHERE id=? AND status='ODKUP_V_POGOVORU'
         """,
         (
