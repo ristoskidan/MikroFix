@@ -367,6 +367,10 @@ def create_app(
             "ConfirmPurchaseReceipt": ("MODULE_OFFICE", "OFFICE"),
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
         }
+        additional_permissions = {
+            "ConfirmPurchaseReceipt": ("CONFIRM_DOCUMENT",),
+            "AttachPurchaseInvoice": ("CONFIRM_DOCUMENT",),
+        }
         required = requirements.get(request.operation_type)
         if identity.must_change_pin and not identity.legacy_development:
             raise HTTPException(
@@ -375,6 +379,10 @@ def create_app(
         if required and not identity.legacy_development:
             try:
                 identity.require(required[0])
+                for permission in additional_permissions.get(
+                    request.operation_type, ()
+                ):
+                    identity.require(permission)
             except AuthorizationError as exc:
                 raise HTTPException(status_code=403, detail=str(exc)) from exc
             if identity.application_type != required[1]:
@@ -433,6 +441,13 @@ def create_app(
                         connection, identity, permission=required[0],
                         application_type=required[1],
                     )
+                    for permission in additional_permissions.get(
+                        request.operation_type, ()
+                    ):
+                        assert_identity_current(
+                            connection, identity, permission=permission,
+                            application_type=required[1],
+                        )
                 if signed_service:
                     actor = connection.execute(
                         select(

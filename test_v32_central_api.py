@@ -2328,6 +2328,49 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(operation.actor_id, "office-auth")
         self.assertEqual(operation.device_id, "OFFICE-PC-OFFICE")
 
+    def test_office_cannot_confirm_receipt_without_document_permission(self):
+        from mikrofix_server.auth import create_central_user, register_workstation
+
+        with self.engine.begin() as connection:
+            user_id = create_central_user(
+                connection,
+                username="office-read-only",
+                display_name="Office Read Only",
+                role="OFFICE",
+                pin="246810",
+                permissions={"MODULE_OFFICE"},
+                must_change_pin=False,
+            )
+            _, secret = register_workstation(
+                connection,
+                workstation_code="OFFICE-PC-READ-ONLY",
+                display_name="Office read-only PC",
+                application_type="OFFICE",
+                approved_by=user_id,
+            )
+        login = self.client.post("/v1/auth/login", json={
+            "username": "office-read-only",
+            "pin": "246810",
+            "workstation_code": "OFFICE-PC-READ-ONLY",
+            "workstation_secret": secret,
+            "application_type": "OFFICE",
+        })
+        self.assertEqual(login.status_code, 200, login.text)
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=1,
+            document_type="DRA", external_no="OFFICE-NO-CONFIRM",
+        )
+
+        response = self.client.post(
+            "/v1/sync/operations",
+            json=receipt,
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIn("CONFIRM_DOCUMENT", response.json()["detail"])
+
     def test_late_receipt_rejection_rolls_back_every_stock_side_effect(self):
         from sqlalchemy import func, select
         from mikrofix_server.models import (
