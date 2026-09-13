@@ -101,6 +101,16 @@ omogoča dela Office brez strežnika. Razvojni zagonski most je pripravljen; pri
 velikega obstoječega Office zaslona se izvede po posameznih zaključenih
 funkcionalnih rezih, da se lokalno in centralno knjiženje ne pomešata.
 
+Glavni namizni program ob nastavljenem `database.server_url` zdaj odpre prvi
+centralni Office pregled za zalogo, prejeme, izdane račune in partnerje.
+Partnerje je mogoče ustvariti, urediti, deaktivirati in znova aktivirati z
+različico zapisa ter razlogom spremembe. Zaslon omogoča tudi izrecno uskladitev
+istega nedokončanega ukaza po izgubljenem odgovoru. Knjiženje prejemov v tem rezu
+še ni priklopljeno in ni preusmerjeno v stare lokalne tabele. Prazen URL odpre
+stari lokalni Office. Neposreden samostojni zagon stare datoteke
+`mikrofix_office.py` še ni centralni zaganjalnik in ni del centralnega testnega
+postopka.
+
 Centralni P7 model je že prisoten: odpiranje osnutka ne ustvari `CLAIMED`, ukaz
 izdaje pa sprejme samo plačilno izbiro in identitete blagajne. Vsebina računa se
 izračuna iz strežniškega posnetka. Enolične omejitve in zaklep vrstice preprečijo

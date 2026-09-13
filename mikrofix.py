@@ -120,6 +120,11 @@ from mikrofix_central_cashier_bootstrap import (
     CentralCashierBootstrapError,
     build_central_cashier,
 )
+from mikrofix_central_office_bootstrap import (
+    CentralOfficeBootstrapError,
+    build_central_office,
+)
+from mikrofix_central_office_ui import open_central_office
 from mikrofix_transactions import complete_buyback_atomic
 from mikrofix_operations import (
     list_recovery_operations,
@@ -3028,8 +3033,14 @@ def prepare_invoice_for_service(service_id=None):
             "MikroFIX", "Za pripravo računa nimaš dovoljenja za Blagajno."
         )
         return
-    status.set("Blagajna se odpira s predizpolnjenim osnutkom računa.")
-    launch_office("--new-invoice", "--service-id", str(int(target_id)))
+    if str(RUNTIME.settings.get("database", {}).get("server_url") or "").strip():
+        status.set(
+            "Centralna Blagajna se odpira; servisni osnutek izberi na seznamu F6."
+        )
+        launch_pos()
+    else:
+        status.set("Blagajna se odpira s predizpolnjenim osnutkom računa.")
+        launch_office("--new-invoice", "--service-id", str(int(target_id)))
 
 
 last_intake_pdf_path = None
@@ -6914,6 +6925,57 @@ def launch_office(*arguments):
             "MikroFIX", "Za izbrani del programa nimaš dovoljenja.", parent=root
         )
         return False
+    central_url = str(
+        RUNTIME.settings.get("database", {}).get("server_url") or ""
+    ).strip()
+    if central_url and "--new-invoice" not in arguments:
+        central_handle = None
+
+        def close_central_office():
+            nonlocal central_handle
+            if central_handle is not None:
+                central_handle.close()
+                central_handle = None
+            _restore_after_office()
+
+        try:
+            central_handle = build_central_office(
+                settings=RUNTIME.settings,
+                office_db=OFFICE_DB,
+                actor_id=AUTH_SESSION.username,
+                device_id=f"OFFICE-{RUNTIME.electronic_device}",
+            )
+            initial_tab = "inventory"
+            if "--open-tab" in arguments:
+                try:
+                    initial_tab = str(arguments[arguments.index("--open-tab") + 1])
+                except (IndexError, ValueError):
+                    pass
+            root.withdraw()
+            open_central_office(
+                root,
+                workflow=central_handle.workflow,
+                username=AUTH_SESSION.username,
+                initial_tab=initial_tab,
+                on_close=close_central_office,
+            )
+            return True
+        except CentralOfficeBootstrapError as exc:
+            if central_handle is not None:
+                central_handle.close()
+            messagebox.showerror(
+                "MikroFIX – centralni Office", str(exc), parent=root
+            )
+            return False
+        except Exception as exc:
+            if central_handle is not None:
+                central_handle.close()
+            root.deiconify()
+            messagebox.showerror(
+                "MikroFIX", f"Centralnega Office ni bilo mogoče odpreti:\n{exc}",
+                parent=root,
+            )
+            return False
     return_code = 0
     service_order_id = None
     previous_handoff = os.environ.get("MIKROFIX_SESSION_HANDOFF")
