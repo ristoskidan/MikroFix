@@ -537,6 +537,61 @@ partners = Table(
 )
 
 
+cash_session_number_sequences = Table(
+    "cash_session_number_sequences_v32",
+    metadata,
+    Column("fiscal_year", Integer, primary_key=True),
+    Column("last_number", BigInteger, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("fiscal_year >= 2020", name="cash_session_sequence_year"),
+    CheckConstraint("last_number >= 1", name="cash_session_sequence_positive"),
+)
+
+
+cash_sessions = Table(
+    "cash_sessions_v32",
+    metadata,
+    Column("session_uuid", UUID(as_uuid=True), primary_key=True),
+    Column("session_no", String(40), nullable=False, unique=True),
+    Column("premise_id", String(40), nullable=False),
+    Column("electronic_device_id", String(40), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("row_version", Integer, nullable=False, server_default="1"),
+    Column("opened_at", DateTime(timezone=True), nullable=False),
+    Column("opened_by_user_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    Column("opened_by", String(200), nullable=False),
+    Column("opened_by_workstation_uuid", UUID(as_uuid=True), ForeignKey("workstations_v32.workstation_uuid")),
+    Column("opening_cash", Numeric(18, 2), nullable=False),
+    Column("closed_at", DateTime(timezone=True)),
+    Column("closed_by_user_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    Column("closed_by", String(200)),
+    Column("closed_by_workstation_uuid", UUID(as_uuid=True), ForeignKey("workstations_v32.workstation_uuid")),
+    Column("expected_cash", Numeric(18, 2)),
+    Column("counted_cash", Numeric(18, 2)),
+    Column("difference", Numeric(18, 2)),
+    Column("close_note", String(1000), nullable=False, server_default=""),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("status IN ('OPEN','CLOSED')", name="cash_session_status"),
+    CheckConstraint("row_version IN (1,2)", name="cash_session_version"),
+    CheckConstraint("opening_cash >= 0", name="cash_session_opening_nonnegative"),
+    CheckConstraint(
+        "(status='OPEN' AND closed_at IS NULL AND closed_by IS NULL "
+        "AND expected_cash IS NULL AND counted_cash IS NULL AND difference IS NULL) OR "
+        "(status='CLOSED' AND closed_at IS NOT NULL AND closed_by IS NOT NULL "
+        "AND expected_cash IS NOT NULL AND counted_cash IS NOT NULL AND difference IS NOT NULL)",
+        name="cash_session_close_shape",
+    ),
+)
+Index(
+    "uq_open_cash_session_location_v32",
+    cash_sessions.c.premise_id,
+    cash_sessions.c.electronic_device_id,
+    unique=True,
+    postgresql_where=cash_sessions.c.status == "OPEN",
+)
+
+
 invoices = Table(
     "invoices_v32",
     metadata,
@@ -560,6 +615,10 @@ invoices = Table(
     Column("fiscal_sequence", BigInteger, nullable=False),
     Column("premise_id", String(40), nullable=False),
     Column("electronic_device_id", String(40), nullable=False),
+    Column(
+        "cash_session_uuid", UUID(as_uuid=True),
+        ForeignKey("cash_sessions_v32.session_uuid"), nullable=True,
+    ),
     Column("cashier_id", String(200), nullable=False),
     Column("operator_tax_number", String(8)),
     Column(
@@ -604,6 +663,41 @@ invoices = Table(
         "AND service_order_uuid IS NULL AND direct_sale_uuid IS NOT NULL)",
         name="invoice_source_identity",
     ),
+)
+
+
+cash_journal_entries = Table(
+    "cash_journal_entries_v32",
+    metadata,
+    Column("entry_uuid", UUID(as_uuid=True), primary_key=True),
+    Column(
+        "session_uuid", UUID(as_uuid=True),
+        ForeignKey("cash_sessions_v32.session_uuid"), nullable=False,
+    ),
+    Column("entry_no", Integer, nullable=False),
+    Column("occurred_at", DateTime(timezone=True), nullable=False),
+    Column("entry_type", String(30), nullable=False),
+    Column("amount", Numeric(18, 2), nullable=False),
+    Column("balance_after", Numeric(18, 2), nullable=False),
+    Column("reference_type", String(40), nullable=False),
+    Column("reference_uuid", UUID(as_uuid=True)),
+    Column("reference_no", String(200), nullable=False, server_default=""),
+    Column("description", String(500), nullable=False),
+    Column("actor_user_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    Column("actor_id", String(200), nullable=False),
+    Column("workstation_uuid", UUID(as_uuid=True), ForeignKey("workstations_v32.workstation_uuid")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("session_uuid", "entry_no", name="uq_cash_journal_entry_no"),
+    UniqueConstraint(
+        "reference_type", "reference_uuid", "entry_type",
+        name="uq_cash_journal_reference",
+    ),
+    CheckConstraint(
+        "entry_type IN ('CASH_SALE','CASH_RECEIPT','CASH_EXPENSE','CASH_REFUND','CASH_BUYBACK')",
+        name="cash_journal_entry_type",
+    ),
+    CheckConstraint("amount <> 0", name="cash_journal_amount_nonzero"),
+    CheckConstraint("balance_after >= 0", name="cash_journal_balance_nonnegative"),
 )
 
 

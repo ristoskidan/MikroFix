@@ -9,6 +9,9 @@ from mikrofix_sync_contracts import (
     BillingLineContract,
     ContractError,
     IssueServiceInvoiceContract,
+    CloseCashSessionContract,
+    ManualCashEntryContract,
+    OpenCashSessionContract,
     PaymentContract,
     ServicePartContract,
     ServiceTestContract,
@@ -381,6 +384,33 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(payload["tax_number"], "12345678")
         with self.assertRaisesRegex(ContractError, "review confirmation"):
             validated_create_partner_payload({**payload, "review_confirmed": False})
+
+    def test_cash_journal_contracts_keep_amounts_exact_and_positive(self):
+        session_id = str(uuid4())
+        opened = OpenCashSessionContract(
+            session_id=session_id, premise_id="mfd",
+            electronic_device_id="pis", opening_cash="10.129",
+        )
+        self.assertEqual(opened.opening_cash, "10.13")
+        closed = CloseCashSessionContract(
+            session_id=session_id, expected_version=1,
+            counted_cash="12.345", note="  Popis  ",
+        )
+        self.assertEqual(closed.counted_cash, "12.35")
+        self.assertEqual(closed.note, "Popis")
+        entry = ManualCashEntryContract(
+            entry_id=str(uuid4()), session_id=session_id,
+            direction="expense", amount="1.005",
+            reference_no="BI-1", description="Poštnina",
+        )
+        self.assertEqual(entry.direction, "EXPENSE")
+        self.assertEqual(entry.amount, "1.01")
+        with self.assertRaisesRegex(ContractError, "greater than zero"):
+            ManualCashEntryContract(
+                entry_id=str(uuid4()), session_id=session_id,
+                direction="RECEIPT", amount="0", reference_no="BP-1",
+                description="Nič",
+            )
 
 
 if __name__ == "__main__":

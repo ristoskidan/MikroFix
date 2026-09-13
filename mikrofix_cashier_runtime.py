@@ -9,6 +9,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
+from uuid import uuid4
 
 from mikrofix_cashier_client import CashierCommandJournal, RequestsCashierTransport
 from mikrofix_sync_store import list_dispatchable_operations, recover_stale_sending
@@ -83,6 +84,23 @@ class CentralCashierWorkflow:
             query, invoice_status=invoice_status, limit=limit
         )
 
+    def current_cash_session(
+        self, premise_id: str, electronic_device_id: str
+    ) -> dict[str, Any] | None:
+        return self.transport.current_cash_session(premise_id, electronic_device_id)
+
+    def cash_sessions(
+        self, *, premise_id: str = "", electronic_device_id: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.transport.list_cash_sessions(
+            premise_id=premise_id, electronic_device_id=electronic_device_id,
+            limit=limit,
+        )
+
+    def cash_session(self, session_id: str) -> dict[str, Any]:
+        return self.transport.get_cash_session(session_id)
+
     def partners(self, query: str = "", *, limit: int = 30) -> list[dict[str, Any]]:
         return self.transport.search_partners(query, limit=limit)
 
@@ -140,17 +158,43 @@ class CentralCashierWorkflow:
         identity = self.journal.prepare_create_partner(
             payload, operation_id=operation_id
         )
-        dispatched = self.journal.dispatch(identity)
-        if dispatched.uncertain:
-            raise CashierResultUncertain(identity)
-        receipt = dict(dispatched.receipt or {})
-        result = dict(receipt.get("result") or {})
-        if receipt.get("result_code") != "ACCEPTED":
-            raise CashierCommandRejected(
-                str(receipt.get("error_code") or "REJECTED"),
-                str(receipt.get("error_message") or "Partner je zavrnjen."), result,
-            )
-        return result
+        return self._dispatch_command(identity)
+
+    def open_cash_session(
+        self, *, premise_id: str, electronic_device_id: str, opening_cash: Any,
+        session_id: str | None = None, operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_open_cash_session({
+            "session_id": str(session_id or uuid4()), "premise_id": premise_id,
+            "electronic_device_id": electronic_device_id,
+            "opening_cash": str(opening_cash),
+        }, operation_id=operation_id)
+        return self._dispatch_command(identity)
+
+    def close_cash_session(
+        self, *, session_id: str, counted_cash: Any, note: str = "",
+        expected_version: int = 1, operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_close_cash_session({
+            "session_id": session_id, "expected_version": expected_version,
+            "counted_cash": str(counted_cash), "note": note,
+        }, operation_id=operation_id)
+        return self._dispatch_command(identity)
+
+    def record_manual_cash_entry(
+        self, *, session_id: str, direction: str, amount: Any,
+        reference_no: str, description: str, entry_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_manual_cash_entry({
+            "entry_id": str(entry_id or uuid4()), "session_id": session_id,
+            "direction": direction, "amount": str(amount),
+            "reference_no": reference_no, "description": description,
+        }, operation_id=operation_id)
+        return self._dispatch_command(identity)
 
     def unresolved_commands(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return list_dispatchable_operations(
@@ -160,6 +204,10 @@ class CentralCashierWorkflow:
     def retry(self, operation_id: str) -> CentralInvoiceResult:
         self._assert_command_order(operation_id)
         return self._dispatch_invoice(operation_id)
+
+    def retry_command(self, operation_id: str) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        return self._dispatch_command(operation_id)
 
     def _assert_command_order(self, operation_id: str | None) -> None:
         pending = self.unresolved_commands(limit=1)
@@ -173,6 +221,14 @@ class CentralCashierWorkflow:
         )
 
     def _dispatch_invoice(self, operation_id: str) -> CentralInvoiceResult:
+        result = self._dispatch_command(operation_id)
+        invoice_id = str(result.get("invoice_id") or "")
+        if not invoice_id:
+            raise CashierWorkflowError("Centralni odgovor nima identitete računa.")
+        invoice = self.transport.get_invoice(invoice_id)
+        return CentralInvoiceResult(operation_id=operation_id, invoice=invoice)
+
+    def _dispatch_command(self, operation_id: str) -> dict[str, Any]:
         dispatched = self.journal.dispatch(operation_id)
         if dispatched.uncertain:
             raise CashierResultUncertain(operation_id)
@@ -184,11 +240,7 @@ class CentralCashierWorkflow:
                 str(receipt.get("error_message") or "Centralna operacija je zavrnjena."),
                 result,
             )
-        invoice_id = str(result.get("invoice_id") or "")
-        if not invoice_id:
-            raise CashierWorkflowError("Centralni odgovor nima identitete računa.")
-        invoice = self.transport.get_invoice(invoice_id)
-        return CentralInvoiceResult(operation_id=operation_id, invoice=invoice)
+        return result
 
 
 def direct_sale_lines_from_pos(lines) -> list[dict[str, Any]]:

@@ -203,6 +203,25 @@ class CashierCommandJournalTests(unittest.TestCase):
             headers={"Authorization": "Bearer token"}, timeout=15.0,
         )
 
+    @patch("requests.get")
+    def test_current_cash_session_is_a_central_read(self, get):
+        response = Mock(status_code=200)
+        response.json.return_value = {"session": {
+            "session_id": str(uuid4()), "session_no": "BD-2026-0001",
+            "status": "OPEN", "entries": [],
+        }}
+        get.return_value = response
+        transport = RequestsCashierTransport("https://central.example", "token")
+
+        session = transport.current_cash_session("MFD", "PIS")
+
+        self.assertEqual(session["status"], "OPEN")
+        get.assert_called_once_with(
+            "https://central.example/v1/cashier/cash-sessions/current",
+            params={"premise_id": "MFD", "electronic_device_id": "PIS"},
+            headers={"Authorization": "Bearer token"}, timeout=15.0,
+        )
+
     @patch("requests.post")
     def test_direct_sale_quote_is_read_only_transport_data(self, post):
         response = Mock(status_code=200)

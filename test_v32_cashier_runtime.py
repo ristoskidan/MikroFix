@@ -19,6 +19,23 @@ class FakeCashierTransport:
         if self.result == "UNCERTAIN":
             raise RuntimeError("lost response")
         invoice_id = str(uuid4())
+        if operation["operation_type"] == "OpenCashSession":
+            result = {
+                "session_id": operation["aggregate_id"],
+                "session_no": "BD-2026-0001", "status": "OPEN",
+            }
+        elif operation["operation_type"] == "CloseCashSession":
+            result = {
+                "session_id": operation["aggregate_id"],
+                "session_no": "BD-2026-0001", "status": "CLOSED",
+            }
+        elif operation["operation_type"] == "RecordManualCashEntry":
+            result = {
+                "entry_id": operation["aggregate_id"], "entry_no": 1,
+                "balance_after": "110.00",
+            }
+        else:
+            result = {"invoice_id": invoice_id}
         return {
             "operation_id": operation["operation_id"],
             "result_code": self.result,
@@ -27,7 +44,7 @@ class FakeCashierTransport:
             "central_sequence": 7 if self.result == "ACCEPTED" else None,
             "error_code": None if self.result == "ACCEPTED" else "INSUFFICIENT_STOCK",
             "error_message": None if self.result == "ACCEPTED" else "Ni zaloge.",
-            "result": {"invoice_id": invoice_id} if self.result == "ACCEPTED" else {},
+            "result": result if self.result == "ACCEPTED" else {},
         }
 
     def get_invoice(self, invoice_id):
@@ -47,6 +64,15 @@ class FakeCashierTransport:
 
     def quote_direct_sale(self, lines):
         return {"lines": lines, "total_amount": "15.00"}
+
+    def current_cash_session(self, premise_id, electronic_device_id):
+        return None
+
+    def list_cash_sessions(self, *, premise_id, electronic_device_id, limit):
+        return []
+
+    def get_cash_session(self, session_id):
+        return {"session_id": session_id, "entries": []}
 
 
 def direct_payload():
@@ -137,3 +163,28 @@ class CentralCashierWorkflowTests(unittest.TestCase):
         })
         self.assertIn("invoice_id", result)
         self.assertEqual(workflow.unresolved_commands(), [])
+
+    def test_cash_session_commands_use_the_ordered_durable_path(self):
+        transport = FakeCashierTransport()
+        workflow = self.workflow(transport)
+        session_id = str(uuid4())
+
+        opened = workflow.open_cash_session(
+            session_id=session_id, premise_id="MFD",
+            electronic_device_id="PIS", opening_cash="100",
+        )
+        entry = workflow.record_manual_cash_entry(
+            session_id=session_id, direction="RECEIPT", amount="10",
+            reference_no="BP-1", description="Polog",
+        )
+        closed = workflow.close_cash_session(
+            session_id=session_id, counted_cash="110", note="Brez razlike",
+        )
+
+        self.assertEqual(opened["status"], "OPEN")
+        self.assertEqual(entry["balance_after"], "110.00")
+        self.assertEqual(closed["status"], "CLOSED")
+        self.assertEqual(
+            [row["operation_type"] for row in transport.submissions],
+            ["OpenCashSession", "RecordManualCashEntry", "CloseCashSession"],
+        )

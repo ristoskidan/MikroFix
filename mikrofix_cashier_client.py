@@ -16,8 +16,11 @@ from mikrofix_sync_client import RequestsSyncTransport, SyncTransportError, _wir
 from mikrofix_sync_contracts import (
     SyncOperationEnvelope,
     validated_create_partner_payload,
+    validated_close_cash_session_payload,
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
+    validated_manual_cash_entry_payload,
+    validated_open_cash_session_payload,
 )
 from mikrofix_sync_store import (
     acknowledge_operation,
@@ -94,6 +97,37 @@ class RequestsCashierTransport(RequestsSyncTransport):
             raise SyncTransportError("Central API returned an invalid invoice list.")
         return rows
 
+    def current_cash_session(
+        self, premise_id: str, electronic_device_id: str
+    ) -> dict[str, Any] | None:
+        response = self._get(
+            "/v1/cashier/cash-sessions/current", premise_id=premise_id,
+            electronic_device_id=electronic_device_id,
+        )
+        session = response.get("session")
+        if session is not None and not isinstance(session, dict):
+            raise SyncTransportError("Central API returned an invalid cash session.")
+        return session
+
+    def list_cash_sessions(
+        self, *, premise_id: str = "", electronic_device_id: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        response = self._get(
+            "/v1/cashier/cash-sessions", premise_id=premise_id,
+            electronic_device_id=electronic_device_id, limit=limit,
+        )
+        rows = response.get("sessions")
+        if not isinstance(rows, list):
+            raise SyncTransportError("Central API returned an invalid cash-session list.")
+        return rows
+
+    def get_cash_session(self, session_id: str) -> dict[str, Any]:
+        response = self._get(f"/v1/cashier/cash-sessions/{session_id}")
+        if not response.get("session_id") or not isinstance(response.get("entries"), list):
+            raise SyncTransportError("Central API returned an invalid cash journal.")
+        return response
+
     def quote_direct_sale(self, lines: list[dict[str, Any]]) -> dict[str, Any]:
         import requests
 
@@ -157,6 +191,37 @@ class CashierCommandJournal:
             expected_version=0,
             payload=normalized,
             operation_id=operation_id,
+        )
+
+    def prepare_open_cash_session(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_open_cash_session_payload(payload)
+        return self._prepare(
+            operation_type="OpenCashSession", aggregate_type="CASH_SESSION",
+            aggregate_id=normalized["session_id"], expected_version=0,
+            payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_close_cash_session(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_close_cash_session_payload(payload)
+        return self._prepare(
+            operation_type="CloseCashSession", aggregate_type="CASH_SESSION",
+            aggregate_id=normalized["session_id"],
+            expected_version=normalized["expected_version"],
+            payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_manual_cash_entry(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_manual_cash_entry_payload(payload)
+        return self._prepare(
+            operation_type="RecordManualCashEntry", aggregate_type="CASH_ENTRY",
+            aggregate_id=normalized["entry_id"], expected_version=0,
+            payload=normalized, operation_id=operation_id,
         )
 
     def prepare_issue_service_invoice(

@@ -3,11 +3,12 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 from mikrofix_v30_cash import (
     CashJournalError, book_cash_disbursement, cash_session_snapshot,
     close_cash_session, ensure_cash_schema, open_cash_session,
-    generate_cash_journal_pdf,
+    generate_cash_journal_pdf, generate_central_cash_journal_pdf,
     list_cash_sessions,
     pending_cash_disbursements, record_cash_entry,
     require_open_cash_session,
@@ -81,6 +82,40 @@ class CashJournalTests(unittest.TestCase):
         self.assertEqual(sessions[0]["id"], sid)
         self.assertEqual(sessions[0]["status"], "CLOSED")
 
+    def test_central_cash_journal_pdf_validates_and_renders_snapshot(self):
+        session_id = str(uuid4())
+        snapshot = {
+            "session_id": session_id, "session_no": "BD-2026-0042",
+            "premise_id": "MFD", "electronic_device_id": "PIS",
+            "status": "CLOSED", "opened_at": "2026-09-13T08:00:00+02:00",
+            "opened_by": "daniel", "opening_cash": "50.00",
+            "expected_cash": "65.00", "closed_at": "2026-09-13T18:00:00+02:00",
+            "closed_by": "daniel", "counted_cash": "64.50",
+            "difference": "-0.50", "close_note": "Šumniki čšž",
+            "entries": [{
+                "entry_id": str(uuid4()), "entry_no": 1,
+                "occurred_at": "2026-09-13T09:00:00+02:00",
+                "entry_type": "CASH_SALE", "amount": "15.00",
+                "balance_after": "65.00", "reference_type": "INVOICE",
+                "reference_no": "MFD-PIS-1", "description": "Gotovinski račun",
+                "actor_id": "daniel",
+            }],
+        }
+        path = generate_central_cash_journal_pdf(
+            snapshot, output_dir=self.tmp.name,
+            company={"legal_name": "MikroFix", "address": "Paradiž 73"},
+        )
+        self.assertTrue(path.is_file())
+        from pypdf import PdfReader
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
+        self.assertIn("BLAGAJNIŠKI DNEVNIK BD-2026-0042", text)
+        self.assertIn("Šumniki čšž", text)
+        broken = {**snapshot, "expected_cash": "64.99"}
+        with self.assertRaisesRegex(CashJournalError, "pričakovano stanje"):
+            generate_central_cash_journal_pdf(
+                broken, output_dir=self.tmp.name,
+                company={"legal_name": "MikroFix"},
+            )
     def test_confirmed_buyback_disbursement_is_booked_exactly_once(self):
         service_db = Path(self.tmp.name) / "service.db"
         c = sqlite3.connect(service_db)

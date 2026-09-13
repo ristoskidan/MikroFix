@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 
 CENT = Decimal("0.01")
@@ -525,6 +526,62 @@ def generate_cash_journal_pdf(
     office_db: Path | str, *, session_id: int, output_dir: Path | str,
     company: dict,
 ) -> Path:
+    ensure_cash_schema(office_db)
+    c=sqlite3.connect(str(office_db));c.row_factory=sqlite3.Row
+    try:
+        session=c.execute("SELECT * FROM cash_sessions_v30 WHERE id=?",(int(session_id),)).fetchone()
+        if not session: raise CashJournalError("Blagajniški dnevnik ni najden.")
+        entries=c.execute(
+            "SELECT * FROM cash_journal_entries_v30 WHERE session_id=? ORDER BY entry_no",
+            (int(session_id),),
+        ).fetchall()
+    finally:c.close()
+    return _render_cash_journal_pdf(
+        dict(session), [dict(entry) for entry in entries],
+        output_dir=output_dir, company=company,
+    )
+
+
+def generate_central_cash_journal_pdf(
+    session: dict, *, output_dir: Path | str, company: dict,
+) -> Path:
+    """Render an authoritative central snapshot without local accounting writes."""
+    source = dict(session or {})
+    entries = [dict(entry) for entry in source.get("entries") or []]
+    if not source.get("session_id") or not source.get("session_no"):
+        raise CashJournalError("Centralni blagajniški dnevnik nima identitete.")
+    expected_no = 1
+    running = money(source.get("opening_cash"))
+    for entry in entries:
+        if int(entry.get("entry_no") or 0) != expected_no:
+            raise CashJournalError("Centralne blagajniške vrstice niso v pravilnem vrstnem redu.")
+        running += money(entry.get("amount"))
+        if running != money(entry.get("balance_after")):
+            raise CashJournalError("Centralni saldo blagajniške vrstice ni pravilen.")
+        expected_no += 1
+    if running != money(source.get("expected_cash")):
+        raise CashJournalError("Centralno pričakovano stanje se ne ujema z vrsticami.")
+    normalized = {
+        **source,
+        "device_id": source.get("electronic_device_id"),
+        "opening_cash": money(source.get("opening_cash")),
+        "counted_cash": (
+            money(source["counted_cash"])
+            if source.get("counted_cash") is not None else None
+        ),
+        "difference": (
+            money(source["difference"])
+            if source.get("difference") is not None else None
+        ),
+    }
+    return _render_cash_journal_pdf(
+        normalized, entries, output_dir=output_dir, company=company
+    )
+
+
+def _render_cash_journal_pdf(
+    session: dict, entries: list[dict], *, output_dir: Path | str, company: dict,
+) -> Path:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet
@@ -557,27 +614,18 @@ def generate_cash_journal_pdf(
         except Exception:
             continue
 
-    ensure_cash_schema(office_db)
-    c=sqlite3.connect(str(office_db));c.row_factory=sqlite3.Row
-    try:
-        session=c.execute("SELECT * FROM cash_sessions_v30 WHERE id=?",(int(session_id),)).fetchone()
-        if not session: raise CashJournalError("Blagajniški dnevnik ni najden.")
-        entries=c.execute(
-            "SELECT * FROM cash_journal_entries_v30 WHERE session_id=? ORDER BY entry_no",
-            (int(session_id),),
-        ).fetchall()
-    finally:c.close()
     opening=money(session["opening_cash"])
     receipts=sum((money(x["amount"]) for x in entries if money(x["amount"])>0),Decimal("0"))
     expenses=-sum((money(x["amount"]) for x in entries if money(x["amount"])<0),Decimal("0"))
     expected=opening+receipts-expenses
+    safe = lambda value: escape(str(value or "-"))
     counted_text = (
         f"{money(session['counted_cash']):.2f} EUR"
-        if session["counted_cash"] is not None else "– (seja še ni zaprta)"
+        if session["counted_cash"] is not None else "- (seja še ni zaprta)"
     )
     difference_text = (
         f"{money(session['difference']):.2f} EUR"
-        if session["difference"] is not None else "–"
+        if session["difference"] is not None else "-"
     )
     output=Path(output_dir);output.mkdir(parents=True,exist_ok=True)
     path=output/f"{session['session_no']}_blagajniski_dnevnik.pdf"
@@ -595,13 +643,13 @@ def generate_cash_journal_pdf(
         Decimal("0"),
     )
     story=[
-        Paragraph(str(company.get("legal_name") or "MikroFix"),styles["Heading2"]),
-        Paragraph(str(company.get("address") or "Paradiž 73, 2282 Cirkulane"),body),
-        Spacer(1,5*mm),Paragraph(f"BLAGAJNIŠKI DNEVNIK {session['session_no']}",styles["Title"]),
+        Paragraph(safe(company.get("legal_name") or "MikroFix"),styles["Heading2"]),
+        Paragraph(safe(company.get("address") or "Paradiž 73, 2282 Cirkulane"),body),
+        Spacer(1,5*mm),Paragraph(f"BLAGAJNIŠKI DNEVNIK {safe(session['session_no'])}",styles["Title"]),
         Paragraph(
-            f"Prostor/naprava: {session['premise_id']}/{session['device_id']}<br/>"
-            f"Odprto: {str(session['opened_at']).replace('T',' ')} – {session['opened_by']}<br/>"
-            f"Zaprto: {str(session['closed_at'] or '-').replace('T',' ')} – {session['closed_by'] or '-'}",
+            f"Prostor/naprava: {safe(session['premise_id'])}/{safe(session['device_id'])}<br/>"
+            f"Odprto: {safe(str(session['opened_at']).replace('T',' '))} - {safe(session['opened_by'])}<br/>"
+            f"Zaprto: {safe(str(session['closed_at'] or '-').replace('T',' '))} - {safe(session['closed_by'])}",
             body,
         ),Spacer(1,6*mm),
         Paragraph("ZAKLJUČNI POVZETEK", styles["Heading2"]),
@@ -615,7 +663,7 @@ def generate_cash_journal_pdf(
             f"<b>Pričakovano stanje: {expected:.2f} EUR</b><br/>"
             f"Prešteto stanje: {counted_text}<br/>"
             f"<b>Razlika: {difference_text}</b><br/>"
-            f"Opomba: {session['close_note'] or '-'}",
+            f"Opomba: {safe(session['close_note'])}",
             body,
         ),
         Spacer(1,14*mm),
@@ -623,7 +671,7 @@ def generate_cash_journal_pdf(
         Spacer(1,8*mm),
         Paragraph("Odgovorna oseba: ____________________",body),
         PageBreak(),
-        Paragraph(f"ARHIVSKA PRILOGA – {session['session_no']}", styles["Heading2"]),
+        Paragraph(f"ARHIVSKA PRILOGA - {safe(session['session_no'])}", styles["Heading2"]),
         Paragraph(
             "Popoln nespremenljiv seznam knjižb. Glavni zaključni povzetek je na prvi strani.",
             body,
@@ -635,7 +683,7 @@ def generate_cash_journal_pdf(
         amount=money(x["amount"])
         rows.append([
             str(x["entry_no"]),str(x["occurred_at"])[11:19],str(x["entry_type"]),
-            str(x["reference_no"] or "-"),Paragraph(str(x["description"]),body),
+            str(x["reference_no"] or "-"),Paragraph(safe(x["description"]),body),
             f"{amount:.2f}" if amount>0 else "",f"{-amount:.2f}" if amount<0 else "",
             f"{money(x['balance_after']):.2f}",
         ])
@@ -649,7 +697,7 @@ def generate_cash_journal_pdf(
         ("ALIGN",(5,1),(-1,-1),"RIGHT"),
     ]))
     story.extend([table,Spacer(1,5*mm),Paragraph(
-        f"Kontrolni seštevek priloge – prejemki {receipts:.2f} EUR, "
+        f"Kontrolni seštevek priloge - prejemki {receipts:.2f} EUR, "
         f"izdatki {expenses:.2f} EUR, stanje {expected:.2f} EUR.", body,
     )])
     SimpleDocTemplate(str(path),pagesize=A4,leftMargin=10*mm,rightMargin=10*mm,topMargin=12*mm,bottomMargin=12*mm).build(story)

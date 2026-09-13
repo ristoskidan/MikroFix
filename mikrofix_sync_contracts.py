@@ -959,6 +959,132 @@ def validated_direct_sale_quote_payload(value: Mapping[str, Any]) -> dict[str, A
         raise ContractError("direct-sale quote payload is invalid.") from exc
 
 
+def _cash_location(value: object, *, field: str) -> str:
+    cleaned = str(value or "").strip().upper()
+    if not cleaned or len(cleaned) > 40:
+        raise ContractError(f"{field} is required and must be at most 40 characters.")
+    if not all(character.isalnum() or character in {"-", "_"} for character in cleaned):
+        raise ContractError(f"{field} contains unsupported characters.")
+    return cleaned
+
+
+@dataclass(frozen=True, slots=True)
+class OpenCashSessionContract:
+    session_id: str
+    premise_id: str
+    electronic_device_id: str
+    opening_cash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "session_id", normalized_uuid(self.session_id, field="session_id")
+        )
+        object.__setattr__(
+            self, "premise_id", _cash_location(self.premise_id, field="premise_id")
+        )
+        object.__setattr__(
+            self, "electronic_device_id",
+            _cash_location(self.electronic_device_id, field="electronic_device_id"),
+        )
+        object.__setattr__(
+            self, "opening_cash",
+            scaled_decimal_text(self.opening_cash, field="opening_cash", scale="0.01"),
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_open_cash_session_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return OpenCashSessionContract(**dict(value)).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("cash-session opening payload is invalid.") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class CloseCashSessionContract:
+    session_id: str
+    expected_version: int
+    counted_cash: str
+    note: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "session_id", normalized_uuid(self.session_id, field="session_id")
+        )
+        if int(self.expected_version) != 1:
+            raise ContractError("an OPEN cash session requires expected_version 1.")
+        object.__setattr__(self, "expected_version", 1)
+        object.__setattr__(
+            self, "counted_cash",
+            scaled_decimal_text(self.counted_cash, field="counted_cash", scale="0.01"),
+        )
+        note = str(self.note or "").strip()
+        if len(note) > 1000:
+            raise ContractError("cash-session close note must be at most 1000 characters.")
+        object.__setattr__(self, "note", note)
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_close_cash_session_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return CloseCashSessionContract(**dict(value)).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("cash-session closing payload is invalid.") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ManualCashEntryContract:
+    entry_id: str
+    session_id: str
+    direction: str
+    amount: str
+    reference_no: str
+    description: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "entry_id", normalized_uuid(self.entry_id, field="entry_id")
+        )
+        object.__setattr__(
+            self, "session_id", normalized_uuid(self.session_id, field="session_id")
+        )
+        direction = str(self.direction or "").strip().upper()
+        if direction not in {"RECEIPT", "EXPENSE"}:
+            raise ContractError("manual cash direction must be RECEIPT or EXPENSE.")
+        object.__setattr__(self, "direction", direction)
+        amount = scaled_decimal_text(self.amount, field="amount", scale="0.01")
+        if Decimal(amount) <= 0:
+            raise ContractError("manual cash amount must be greater than zero.")
+        object.__setattr__(self, "amount", amount)
+        for field_name, maximum in (("reference_no", 200), ("description", 500)):
+            cleaned = str(getattr(self, field_name) or "").strip()
+            if not cleaned or len(cleaned) > maximum:
+                raise ContractError(
+                    f"{field_name} is required and must be at most {maximum} characters."
+                )
+            object.__setattr__(self, field_name, cleaned)
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_manual_cash_entry_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        return ManualCashEntryContract(**dict(value)).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("manual cash entry payload is invalid.") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class SyncOperationEnvelope:
     operation_id: str

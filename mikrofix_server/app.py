@@ -35,6 +35,8 @@ from .auth import (
 from .database import create_database_engine
 from .models import (
     accepted_operations,
+    cash_journal_entries,
+    cash_sessions,
     central_user_permissions,
     central_user_permission_history,
     central_users,
@@ -358,6 +360,9 @@ def create_app(
             "CreatePartner": ("MODULE_CASHIER", "CASHIER"),
             "IssueServiceInvoice": ("MODULE_CASHIER", "CASHIER"),
             "IssueDirectSaleInvoice": ("MODULE_CASHIER", "CASHIER"),
+            "OpenCashSession": ("MODULE_CASHIER", "CASHIER"),
+            "CloseCashSession": ("MODULE_CASHIER", "CASHIER"),
+            "RecordManualCashEntry": ("MODULE_CASHIER", "CASHIER"),
             "ConfirmPurchaseReceipt": ("MODULE_OFFICE", "OFFICE"),
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
         }
@@ -546,6 +551,112 @@ def create_app(
             ]
         }
 
+    def public_cash_session(connection, row, *, include_entries: bool) -> dict:
+        entries = connection.execute(
+            select(cash_journal_entries).where(
+                cash_journal_entries.c.session_uuid == row.session_uuid
+            ).order_by(cash_journal_entries.c.entry_no)
+        ).all()
+        movement = sum((entry.amount for entry in entries), start=0)
+        expected = row.expected_cash
+        if expected is None:
+            expected = row.opening_cash + movement
+        result = {
+            "session_id": row.session_uuid, "session_no": row.session_no,
+            "aggregate_version": row.row_version,
+            "premise_id": row.premise_id,
+            "electronic_device_id": row.electronic_device_id,
+            "status": row.status, "opened_at": row.opened_at,
+            "opened_by": row.opened_by,
+            "opening_cash": format(row.opening_cash, ".2f"),
+            "expected_cash": format(expected, ".2f"),
+            "closed_at": row.closed_at, "closed_by": row.closed_by,
+            "counted_cash": (
+                format(row.counted_cash, ".2f") if row.counted_cash is not None else None
+            ),
+            "difference": (
+                format(row.difference, ".2f") if row.difference is not None else None
+            ),
+            "close_note": row.close_note,
+            "entry_count": len(entries),
+        }
+        if include_entries:
+            result["entries"] = [{
+                "entry_id": entry.entry_uuid, "entry_no": entry.entry_no,
+                "occurred_at": entry.occurred_at, "entry_type": entry.entry_type,
+                "amount": format(entry.amount, ".2f"),
+                "balance_after": format(entry.balance_after, ".2f"),
+                "reference_type": entry.reference_type,
+                "reference_id": entry.reference_uuid,
+                "reference_no": entry.reference_no,
+                "description": entry.description, "actor_id": entry.actor_id,
+            } for entry in entries]
+        return result
+
+    @app.get(
+        "/v1/cashier/cash-sessions/current",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def get_current_cash_session(
+        premise_id: str = Query(..., min_length=1, max_length=40),
+        electronic_device_id: str = Query(..., min_length=1, max_length=40),
+    ) -> dict:
+        with database_engine.connect() as connection:
+            row = connection.execute(select(cash_sessions).where(
+                cash_sessions.c.premise_id == premise_id.strip().upper(),
+                cash_sessions.c.electronic_device_id
+                == electronic_device_id.strip().upper(),
+                cash_sessions.c.status == "OPEN",
+            )).one_or_none()
+            return {
+                "session": (
+                    public_cash_session(connection, row, include_entries=True)
+                    if row else None
+                )
+            }
+
+    @app.get(
+        "/v1/cashier/cash-sessions",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def list_cash_sessions(
+        premise_id: str = Query(default="", max_length=40),
+        electronic_device_id: str = Query(default="", max_length=40),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict:
+        statement = select(cash_sessions)
+        if premise_id.strip():
+            statement = statement.where(
+                cash_sessions.c.premise_id == premise_id.strip().upper()
+            )
+        if electronic_device_id.strip():
+            statement = statement.where(
+                cash_sessions.c.electronic_device_id
+                == electronic_device_id.strip().upper()
+            )
+        with database_engine.connect() as connection:
+            rows = connection.execute(statement.order_by(
+                cash_sessions.c.opened_at.desc(), cash_sessions.c.session_uuid.desc()
+            ).limit(limit)).all()
+            sessions = [
+                public_cash_session(connection, row, include_entries=False)
+                for row in rows
+            ]
+        return {"sessions": sessions}
+
+    @app.get(
+        "/v1/cashier/cash-sessions/{session_id}",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def get_cash_session(session_id: UUID) -> dict:
+        with database_engine.connect() as connection:
+            row = connection.execute(select(cash_sessions).where(
+                cash_sessions.c.session_uuid == session_id
+            )).one_or_none()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Cash session does not exist.")
+            return public_cash_session(connection, row, include_entries=True)
+
     def public_cashier_invoice(row) -> dict:
         return {
             "invoice_id": row.invoice_uuid,
@@ -554,6 +665,7 @@ def create_app(
             "direct_sale_id": row.direct_sale_uuid,
             "draft_id": row.draft_uuid,
             "service_order_id": row.service_order_uuid,
+            "cash_session_id": row.cash_session_uuid,
             "status": row.status,
             "payment_status": row.payment_status,
             "total_amount": format(row.total_amount, ".2f"),

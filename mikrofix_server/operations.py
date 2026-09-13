@@ -16,16 +16,22 @@ from mikrofix_sync_contracts import (
     normalized_uuid,
     payload_sha256,
     validated_attach_receipt_invoice_payload,
+    validated_close_cash_session_payload,
     validated_confirm_receipt_payload,
     validated_create_partner_payload,
     validated_create_service_order_payload,
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
+    validated_manual_cash_entry_payload,
+    validated_open_cash_session_payload,
     validated_technical_completion_payload,
 )
 
 from .models import (
     accepted_operations,
+    cash_journal_entries,
+    cash_session_number_sequences,
+    cash_sessions,
     change_feed,
     direct_sale_discount_audit,
     direct_sale_stock_allocations,
@@ -59,6 +65,12 @@ class ProtocolConflict(RuntimeError):
 class DirectSalePreparationError(RuntimeError):
     """A direct-sale quote or issue failed before any business write."""
 
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class CentralCashJournalError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
@@ -396,12 +408,273 @@ def _next_invoice_number(
     return sequence, f"{premise_id}-{electronic_device_id}-{sequence}"
 
 
+def _next_cash_session_number(connection: Connection, *, fiscal_year: int) -> str:
+    sequence = int(connection.execute(
+        insert(cash_session_number_sequences)
+        .values(fiscal_year=fiscal_year, last_number=1)
+        .on_conflict_do_update(
+            index_elements=[cash_session_number_sequences.c.fiscal_year],
+            set_={
+                "last_number": cash_session_number_sequences.c.last_number + 1,
+                "updated_at": datetime.now().astimezone(),
+            },
+        )
+        .returning(cash_session_number_sequences.c.last_number)
+    ).scalar_one())
+    return f"BD-{fiscal_year}-{sequence:04d}"
+
+
+def _cash_payment_amount(payments: list[dict]) -> Decimal:
+    return sum(
+        (
+            Decimal(str(payment["amount"]))
+            for payment in payments if payment["method"] == "CASH"
+        ),
+        Decimal("0"),
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _open_cash_session_for_invoice(
+    connection: Connection, *, premise_id: str, electronic_device_id: str,
+    payments: list[dict],
+):
+    if _cash_payment_amount(payments) == 0:
+        return None
+    session = connection.execute(
+        select(cash_sessions).where(
+            cash_sessions.c.premise_id == premise_id,
+            cash_sessions.c.electronic_device_id == electronic_device_id,
+            cash_sessions.c.status == "OPEN",
+        ).with_for_update()
+    ).one_or_none()
+    if session is None:
+        raise CentralCashJournalError(
+            "CASH_SESSION_REQUIRED",
+            "Cash payment requires an open cash session for this premise and device.",
+        )
+    return session
+
+
+def _record_central_cash_entry(
+    connection: Connection, *, session, entry_uuid: UUID, entry_type: str,
+    amount: Decimal, reference_type: str, reference_uuid: UUID | None,
+    reference_no: str, description: str, actor_id: str,
+    actor_user_uuid: UUID | None, workstation_uuid: UUID | None,
+    occurred_at: datetime,
+) -> dict:
+    value = Decimal(str(amount)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if value == 0:
+        raise CentralCashJournalError(
+            "CASH_ENTRY_ZERO", "A cash journal entry cannot be zero."
+        )
+    last_no, movement = connection.execute(select(
+        func.coalesce(func.max(cash_journal_entries.c.entry_no), 0),
+        func.coalesce(func.sum(cash_journal_entries.c.amount), 0),
+    ).where(cash_journal_entries.c.session_uuid == session.session_uuid)).one()
+    balance = (
+        Decimal(session.opening_cash) + Decimal(movement) + value
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if balance < 0:
+        raise CentralCashJournalError(
+            "NEGATIVE_CASH_BALANCE",
+            "The cash expense would create a negative physical cash balance.",
+        )
+    entry_no = int(last_no) + 1
+    connection.execute(insert(cash_journal_entries).values(
+        entry_uuid=entry_uuid, session_uuid=session.session_uuid,
+        entry_no=entry_no, occurred_at=occurred_at, entry_type=entry_type,
+        amount=value, balance_after=balance, reference_type=reference_type,
+        reference_uuid=reference_uuid, reference_no=str(reference_no or ""),
+        description=description, actor_user_uuid=actor_user_uuid,
+        actor_id=actor_id, workstation_uuid=workstation_uuid,
+    ))
+    return {
+        "entry_id": str(entry_uuid), "entry_no": entry_no,
+        "amount": f"{value:.2f}", "balance_after": f"{balance:.2f}",
+    }
+
+
+def _open_cash_session(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    session_uuid: UUID, *, actor_user_uuid: UUID | None,
+    workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "CASH_SESSION":
+        return _reject("INVALID_AGGREGATE_TYPE", "OpenCashSession requires CASH_SESSION.")
+    try:
+        payload = validated_open_cash_session_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["session_id"] != envelope.aggregate_id:
+        return _reject("AGGREGATE_ID_MISMATCH", "payload.session_id must equal aggregate_id.")
+    if envelope.expected_version != 0:
+        return _reject("VERSION_CONFLICT", "A new cash session requires version 0.")
+    connection.execute(select(func.pg_advisory_xact_lock(func.hashtextextended(
+        f"{payload['premise_id']}|{payload['electronic_device_id']}", 0
+    ))))
+    if connection.execute(select(cash_sessions.c.session_uuid).where(
+        cash_sessions.c.session_uuid == session_uuid
+    )).scalar_one_or_none() is not None:
+        return _reject("CASH_SESSION_ALREADY_EXISTS", "This cash session already exists.")
+    opened = connection.execute(select(cash_sessions).where(
+        cash_sessions.c.premise_id == payload["premise_id"],
+        cash_sessions.c.electronic_device_id == payload["electronic_device_id"],
+        cash_sessions.c.status == "OPEN",
+    )).one_or_none()
+    if opened is not None:
+        return _reject(
+            "CASH_SESSION_ALREADY_OPEN",
+            f"Cash session {opened.session_no} is already open for this location.",
+        )
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    session_no = _next_cash_session_number(connection, fiscal_year=now.year)
+    connection.execute(insert(cash_sessions).values(
+        session_uuid=session_uuid, session_no=session_no,
+        premise_id=payload["premise_id"],
+        electronic_device_id=payload["electronic_device_id"],
+        status="OPEN", row_version=1, opened_at=now,
+        opened_by_user_uuid=actor_user_uuid, opened_by=envelope.actor_id,
+        opened_by_workstation_uuid=workstation_uuid,
+        opening_cash=Decimal(payload["opening_cash"]),
+    ))
+    sequence = _publish_change(
+        connection, event_type="CashSessionOpened", aggregate_type="CASH_SESSION",
+        aggregate_uuid=session_uuid, aggregate_version=1,
+        payload={
+            "session_id": str(session_uuid), "session_no": session_no,
+            "status": "OPEN", "premise_id": payload["premise_id"],
+            "electronic_device_id": payload["electronic_device_id"],
+            "opening_cash": f"{Decimal(payload['opening_cash']):.2f}",
+        },
+        occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 1, "central_sequence": sequence,
+        "session_id": str(session_uuid), "session_no": session_no,
+        "status": "OPEN", "opening_cash": f"{Decimal(payload['opening_cash']):.2f}",
+    }, sequence
+
+
+def _close_cash_session(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    session_uuid: UUID, *, actor_user_uuid: UUID | None,
+    workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "CASH_SESSION":
+        return _reject("INVALID_AGGREGATE_TYPE", "CloseCashSession requires CASH_SESSION.")
+    try:
+        payload = validated_close_cash_session_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["session_id"] != envelope.aggregate_id:
+        return _reject("AGGREGATE_ID_MISMATCH", "payload.session_id must equal aggregate_id.")
+    if int(payload["expected_version"]) != envelope.expected_version:
+        return _reject("VERSION_CONFLICT", "Cash session version does not match the envelope.")
+    session = connection.execute(
+        select(cash_sessions).where(cash_sessions.c.session_uuid == session_uuid).with_for_update()
+    ).one_or_none()
+    if session is None:
+        return _reject("CASH_SESSION_NOT_FOUND", "The cash session does not exist.")
+    if session.status != "OPEN" or int(session.row_version) != 1:
+        return _reject("VERSION_CONFLICT", "The cash session is no longer open at version 1.")
+    movement = Decimal(connection.execute(select(
+        func.coalesce(func.sum(cash_journal_entries.c.amount), 0)
+    ).where(cash_journal_entries.c.session_uuid == session_uuid)).scalar_one())
+    expected = (Decimal(session.opening_cash) + movement).quantize(Decimal("0.01"))
+    counted = Decimal(payload["counted_cash"])
+    difference = (counted - expected).quantize(Decimal("0.01"))
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    connection.execute(update(cash_sessions).where(
+        cash_sessions.c.session_uuid == session_uuid,
+        cash_sessions.c.status == "OPEN",
+    ).values(
+        status="CLOSED", row_version=2, closed_at=now,
+        closed_by_user_uuid=actor_user_uuid, closed_by=envelope.actor_id,
+        closed_by_workstation_uuid=workstation_uuid,
+        expected_cash=expected, counted_cash=counted, difference=difference,
+        close_note=payload["note"], updated_at=now,
+    ))
+    sequence = _publish_change(
+        connection, event_type="CashSessionClosed", aggregate_type="CASH_SESSION",
+        aggregate_uuid=session_uuid, aggregate_version=2,
+        payload={
+            "session_id": str(session_uuid), "session_no": session.session_no,
+            "status": "CLOSED", "expected_cash": f"{expected:.2f}",
+            "counted_cash": f"{counted:.2f}", "difference": f"{difference:.2f}",
+        },
+        occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 2, "central_sequence": sequence,
+        "session_id": str(session_uuid), "session_no": session.session_no,
+        "status": "CLOSED", "expected_cash": f"{expected:.2f}",
+        "counted_cash": f"{counted:.2f}", "difference": f"{difference:.2f}",
+    }, sequence
+
+
+def _record_manual_cash_entry(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    entry_uuid: UUID, *, actor_user_uuid: UUID | None,
+    workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "CASH_ENTRY":
+        return _reject("INVALID_AGGREGATE_TYPE", "RecordManualCashEntry requires CASH_ENTRY.")
+    try:
+        payload = validated_manual_cash_entry_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["entry_id"] != envelope.aggregate_id:
+        return _reject("AGGREGATE_ID_MISMATCH", "payload.entry_id must equal aggregate_id.")
+    if envelope.expected_version != 0:
+        return _reject("VERSION_CONFLICT", "A new cash entry requires version 0.")
+    session_uuid = UUID(payload["session_id"])
+    session = connection.execute(
+        select(cash_sessions).where(cash_sessions.c.session_uuid == session_uuid).with_for_update()
+    ).one_or_none()
+    if session is None or session.status != "OPEN":
+        return _reject("CASH_SESSION_NOT_OPEN", "The selected cash session is not open.")
+    amount = Decimal(payload["amount"])
+    if payload["direction"] == "EXPENSE":
+        amount = -amount
+    try:
+        result = _record_central_cash_entry(
+            connection, session=session, entry_uuid=entry_uuid,
+            entry_type=(
+                "CASH_RECEIPT" if payload["direction"] == "RECEIPT"
+                else "CASH_EXPENSE"
+            ),
+            amount=amount, reference_type="MANUAL_DOCUMENT",
+            reference_uuid=entry_uuid, reference_no=payload["reference_no"],
+            description=payload["description"], actor_id=envelope.actor_id,
+            actor_user_uuid=actor_user_uuid, workstation_uuid=workstation_uuid,
+            occurred_at=datetime.now(ZoneInfo("Europe/Ljubljana")),
+        )
+    except CentralCashJournalError as exc:
+        return _reject(exc.code, str(exc))
+    sequence = _publish_change(
+        connection, event_type="CashJournalEntryRecorded",
+        aggregate_type="CASH_SESSION", aggregate_uuid=session_uuid,
+        aggregate_version=result["entry_no"],
+        payload={**result, "session_id": str(session_uuid),
+                 "entry_type": (
+                     "CASH_RECEIPT" if amount > 0 else "CASH_EXPENSE"
+                 )},
+        occurred_at=datetime.now(ZoneInfo("Europe/Ljubljana")).isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 1, "central_sequence": sequence,
+        "session_id": str(session_uuid), **result,
+    }, sequence
+
+
 def _issue_service_invoice(
     connection: Connection,
     envelope: SyncOperationEnvelope,
     draft_uuid: UUID,
     operation_uuid: UUID,
     operator_tax_number: str = "",
+    actor_user_uuid: UUID | None = None,
+    workstation_uuid: UUID | None = None,
 ) -> tuple[str, dict, int | None]:
     """Create at most one invoice from server-owned immutable draft content."""
     if envelope.aggregate_type != "INVOICE_DRAFT":
@@ -482,6 +755,14 @@ def _issue_service_invoice(
         )
     except ContractError as exc:
         return _reject("BILLING_CUSTOMER_CONFLICT", str(exc))
+    try:
+        cash_session = _open_cash_session_for_invoice(
+            connection, premise_id=payload["premise_id"],
+            electronic_device_id=payload["electronic_device_id"],
+            payments=payments,
+        )
+    except CentralCashJournalError as exc:
+        return _reject(exc.code, str(exc))
     fiscal_year = now.year
     sequence, invoice_number = _next_invoice_number(
         connection,
@@ -511,6 +792,7 @@ def _issue_service_invoice(
         "operator_tax_number": str(operator_tax_number or ""),
         "premise_id": payload["premise_id"],
         "electronic_device_id": payload["electronic_device_id"],
+        "cash_session_id": str(cash_session.session_uuid) if cash_session else "",
         "issued_at": now.isoformat(timespec="seconds"),
     }
     connection.execute(insert(invoices).values(
@@ -523,6 +805,7 @@ def _issue_service_invoice(
         fiscal_sequence=sequence,
         premise_id=payload["premise_id"],
         electronic_device_id=payload["electronic_device_id"],
+        cash_session_uuid=cash_session.session_uuid if cash_session else None,
         cashier_id=envelope.actor_id,
         operator_tax_number=str(operator_tax_number or "") or None,
         billing_partner_uuid=billing_partner_uuid,
@@ -538,6 +821,17 @@ def _issue_service_invoice(
         issued_at=now,
         finalized_at=None if cash_like else now,
     ))
+    cash_amount = _cash_payment_amount(payments)
+    if cash_session is not None:
+        _record_central_cash_entry(
+            connection, session=cash_session, entry_uuid=uuid4(),
+            entry_type="CASH_SALE", amount=cash_amount,
+            reference_type="INVOICE", reference_uuid=invoice_uuid,
+            reference_no=invoice_number,
+            description=f"Gotovinsko plačilo računa {invoice_number}",
+            actor_id=envelope.actor_id, actor_user_uuid=actor_user_uuid,
+            workstation_uuid=workstation_uuid, occurred_at=now,
+        )
     connection.execute(
         update(invoice_drafts)
         .where(invoice_drafts.c.draft_uuid == draft_uuid)
@@ -811,6 +1105,8 @@ def _issue_direct_sale_invoice(
     sale_uuid: UUID,
     operation_uuid: UUID,
     operator_tax_number: str = "",
+    actor_user_uuid: UUID | None = None,
+    workstation_uuid: UUID | None = None,
 ) -> tuple[str, dict, int | None]:
     """Sell central stock once, keeping customer lines and FIFO costs separate."""
     if envelope.aggregate_type != "DIRECT_SALE":
@@ -882,6 +1178,14 @@ def _issue_direct_sale_invoice(
         and payments[0]["method"] == "BANK_TRANSFER"
         and not payments[0]["confirmed"]
     )
+    try:
+        cash_session = _open_cash_session_for_invoice(
+            connection, premise_id=payload["premise_id"],
+            electronic_device_id=payload["electronic_device_id"],
+            payments=payments,
+        )
+    except CentralCashJournalError as exc:
+        return _reject(exc.code, str(exc))
     sequence, invoice_number = _next_invoice_number(
         connection, fiscal_year=now.year, premise_id=payload["premise_id"],
         electronic_device_id=payload["electronic_device_id"],
@@ -904,6 +1208,7 @@ def _issue_direct_sale_invoice(
         "operator_tax_number": str(operator_tax_number or ""),
         "premise_id": payload["premise_id"],
         "electronic_device_id": payload["electronic_device_id"],
+        "cash_session_id": str(cash_session.session_uuid) if cash_session else "",
         "issued_at": now.isoformat(timespec="seconds"),
     }
     connection.execute(insert(invoices).values(
@@ -913,6 +1218,7 @@ def _issue_direct_sale_invoice(
         fiscal_year=now.year, fiscal_sequence=sequence,
         premise_id=payload["premise_id"],
         electronic_device_id=payload["electronic_device_id"],
+        cash_session_uuid=cash_session.session_uuid if cash_session else None,
         cashier_id=envelope.actor_id,
         operator_tax_number=str(operator_tax_number or "") or None,
         billing_partner_uuid=billing_partner_uuid,
@@ -922,6 +1228,17 @@ def _issue_direct_sale_invoice(
         tax_rate=Decimal("0"), tax_note=tax_note, snapshot_json=snapshot,
         issued_at=now, finalized_at=None if cash_like else now,
     ))
+    cash_amount = _cash_payment_amount(payments)
+    if cash_session is not None:
+        _record_central_cash_entry(
+            connection, session=cash_session, entry_uuid=uuid4(),
+            entry_type="CASH_SALE", amount=cash_amount,
+            reference_type="INVOICE", reference_uuid=invoice_uuid,
+            reference_no=invoice_number,
+            description=f"Gotovinsko plačilo računa {invoice_number}",
+            actor_id=envelope.actor_id, actor_user_uuid=actor_user_uuid,
+            workstation_uuid=workstation_uuid, occurred_at=now,
+        )
     for line in prepared_lines:
         requested = Decimal(line["requested_discount_percent"])
         applied = Decimal(line["applied_discount_percent"])
@@ -1934,11 +2251,33 @@ def process_operation(
         result_code, response, central_sequence = _issue_service_invoice(
             connection, envelope, aggregate_uuid, operation_uuid,
             operator_tax_number=operator_tax_number,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
         )
     elif envelope.operation_type == "IssueDirectSaleInvoice":
         result_code, response, central_sequence = _issue_direct_sale_invoice(
             connection, envelope, aggregate_uuid, operation_uuid,
             operator_tax_number=operator_tax_number,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "OpenCashSession":
+        result_code, response, central_sequence = _open_cash_session(
+            connection, envelope, aggregate_uuid,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "CloseCashSession":
+        result_code, response, central_sequence = _close_cash_session(
+            connection, envelope, aggregate_uuid,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "RecordManualCashEntry":
+        result_code, response, central_sequence = _record_manual_cash_entry(
+            connection, envelope, aggregate_uuid,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
         )
     elif envelope.operation_type == "ConfirmPurchaseReceipt":
         receipt_savepoint = connection.begin_nested()

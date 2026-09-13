@@ -6,6 +6,13 @@ To je prvi, namenoma ozek sinhronizacijski rez. Sprejema `CreateServiceOrder`,
 in testni bazi imata centralni model uporabnikov, dovoljenj, registriranih
 delovnih postaj, sej in revizijske sledi; produkcijski preklop ni izveden.
 
+Centralna Blagajna podpira tudi `OpenCashSession`, `RecordManualCashEntry` in
+`CloseCashSession`. Za posamezen poslovni prostor in elektronsko napravo je
+dovoljena samo ena odprta seja. Gotovinska izdaja računa in pripadajoča knjižba
+sta ena transakcija; kartično ali TRR plačilo fizičnega blagajniškega salda ne
+spreminja. Zaporedje knjižb, tekoči saldo in končni PDF se vedno sestavijo iz
+avtoritativnega centralnega posnetka.
+
 ## Enkratna priprava
 
 Kot `root`:
@@ -41,6 +48,11 @@ zaklenjenih osnutkov brez zakupa, sočasna izdaja istega osnutka, eno centralno
 starejših testih pripravljena neposredno. P8 testi uporabljajo dovoljeni tok
 `DOB`/`DRA`/`PRA`: blokirana količina ni razpoložljiva, sprostitev se zgodi
 natanko enkrat, servisna poraba pa se FIFO poveže s konkretnim LOT-om.
+
+Integracijski paket preverja še sočasno odpiranje iste blagajne, sočasno
+knjiženje dveh dogodkov, nespremenljivo zaporedje salda, idempotentno ponovitev
+odprtja, ročne knjižbe in zaprtja ter zavrnitev gotovinskega računa brez odprte
+seje. Trenutna migracijska glava je `20260913_17`.
 
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do

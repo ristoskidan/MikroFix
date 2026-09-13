@@ -60,6 +60,9 @@ class CentralApiIntegrationTests(unittest.TestCase):
 
         from mikrofix_server.models import (
             accepted_operations,
+            cash_journal_entries,
+            cash_session_number_sequences,
+            cash_sessions,
             central_audit_events,
             central_sessions,
             central_user_permissions,
@@ -106,7 +109,10 @@ class CentralApiIntegrationTests(unittest.TestCase):
             connection.execute(delete(receipt_number_sequences))
             connection.execute(delete(receipt_document_types))
             connection.execute(delete(fiscal_outbox))
+            connection.execute(delete(cash_journal_entries))
             connection.execute(delete(invoices))
+            connection.execute(delete(cash_sessions))
+            connection.execute(delete(cash_session_number_sequences))
             connection.execute(delete(invoice_number_sequences))
             connection.execute(delete(invoice_drafts))
             connection.execute(delete(service_part_consumptions))
@@ -268,6 +274,55 @@ class CentralApiIntegrationTests(unittest.TestCase):
                     "requested_discount_percent": discount,
                     "lot_serial": lot_serial,
                 }],
+            },
+            "contract_version": 1,
+        }
+
+    def open_cash_operation(self, *, sequence, session_id=None, opening="100"):
+        session_id = str(session_id or uuid4())
+        return {
+            "operation_id": str(uuid4()), "operation_type": "OpenCashSession",
+            "aggregate_type": "CASH_SESSION", "aggregate_id": session_id,
+            "expected_version": 0, "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-12T07:00:00+02:00",
+            "payload": {
+                "session_id": session_id, "premise_id": "MFD",
+                "electronic_device_id": "PIS", "opening_cash": opening,
+            },
+            "contract_version": 1,
+        }
+
+    def close_cash_operation(self, session_id, *, sequence, counted, note=""):
+        return {
+            "operation_id": str(uuid4()), "operation_type": "CloseCashSession",
+            "aggregate_type": "CASH_SESSION", "aggregate_id": str(session_id),
+            "expected_version": 1, "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-12T18:00:00+02:00",
+            "payload": {
+                "session_id": str(session_id), "expected_version": 1,
+                "counted_cash": counted, "note": note,
+            },
+            "contract_version": 1,
+        }
+
+    def manual_cash_operation(
+        self, session_id, *, sequence, direction, amount,
+        reference="BL-TEST", description="Ročni dogodek",
+    ):
+        entry_id = str(uuid4())
+        return {
+            "operation_id": str(uuid4()),
+            "operation_type": "RecordManualCashEntry",
+            "aggregate_type": "CASH_ENTRY", "aggregate_id": entry_id,
+            "expected_version": 0, "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-12T12:00:00+02:00",
+            "payload": {
+                "entry_id": entry_id, "session_id": str(session_id),
+                "direction": direction, "amount": amount,
+                "reference_no": reference, "description": description,
             },
             "contract_version": 1,
         }
@@ -1043,9 +1098,17 @@ class CentralApiIntegrationTests(unittest.TestCase):
 
     def test_cash_invoice_is_queued_once_and_does_not_close_before_furs(self):
         from sqlalchemy import func, select
-        from mikrofix_server.models import fiscal_outbox, invoice_drafts, invoices, service_orders
+        from mikrofix_server.models import (
+            cash_journal_entries, cash_sessions, fiscal_outbox,
+            invoice_drafts, invoices, service_orders,
+        )
 
         order, draft_id = self.prepared_draft(sequence=71, barcode="CASH-PART")
+        opened = self.client.post(
+            "/v1/sync/operations", json=self.open_cash_operation(sequence=72),
+            headers=self.headers,
+        )
+        self.assertEqual(opened.json()["result_code"], "ACCEPTED")
         issue = self.issue_operation(
             draft_id, sequence=73, method="CASH", confirmed=True
         )
@@ -1063,6 +1126,13 @@ class CentralApiIntegrationTests(unittest.TestCase):
             self.assertEqual(connection.execute(
                 select(func.count()).select_from(fiscal_outbox)
             ).scalar_one(), 1)
+            entry = connection.execute(select(cash_journal_entries)).one()
+            invoice = connection.execute(select(invoices)).one()
+            session = connection.execute(select(cash_sessions)).one()
+            self.assertEqual(str(entry.amount), "55.00")
+            self.assertEqual(entry.entry_type, "CASH_SALE")
+            self.assertEqual(entry.reference_uuid, invoice.invoice_uuid)
+            self.assertEqual(invoice.cash_session_uuid, session.session_uuid)
             self.assertEqual(connection.execute(
                 select(invoice_drafts.c.status).where(
                     invoice_drafts.c.draft_uuid == draft_id
@@ -1073,6 +1143,153 @@ class CentralApiIntegrationTests(unittest.TestCase):
             )).one()
             self.assertEqual(service.row_version, 2)
             self.assertEqual(service.payload_json["technical_status"], "READY_FOR_INVOICE")
+
+    def test_cash_payment_without_open_session_changes_nothing(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import (
+            cash_journal_entries, invoice_drafts, invoice_number_sequences, invoices,
+        )
+
+        _, draft_id = self.prepared_draft(sequence=74, barcode="NO-CASH-SESSION")
+        response = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(
+                draft_id, sequence=76, method="CASH", confirmed=True
+            ),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(response["result_code"], "REJECTED")
+        self.assertEqual(response["error_code"], "CASH_SESSION_REQUIRED")
+        with self.engine.connect() as connection:
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(invoices)
+            ).scalar_one(), 0)
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(invoice_number_sequences)
+            ).scalar_one(), 0)
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(cash_journal_entries)
+            ).scalar_one(), 0)
+            self.assertEqual(connection.execute(select(
+                invoice_drafts.c.status
+            )).scalar_one(), "READY")
+
+    def test_central_cash_session_manual_entries_and_close_are_idempotent(self):
+        session_id = str(uuid4())
+        opening = self.open_cash_operation(
+            sequence=77, session_id=session_id, opening="100"
+        )
+        first = self.client.post(
+            "/v1/sync/operations", json=opening, headers=self.headers
+        ).json()
+        repeated = self.client.post(
+            "/v1/sync/operations", json=opening, headers=self.headers
+        ).json()
+        self.assertEqual(first, repeated)
+        self.assertEqual(first["result"]["session_no"], "BD-2026-0001")
+
+        receipt = self.client.post(
+            "/v1/sync/operations",
+            json=self.manual_cash_operation(
+                session_id, sequence=78, direction="RECEIPT", amount="25"
+            ), headers=self.headers,
+        ).json()
+        expense = self.client.post(
+            "/v1/sync/operations",
+            json=self.manual_cash_operation(
+                session_id, sequence=79, direction="EXPENSE", amount="10"
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(receipt["result"]["balance_after"], "125.00")
+        self.assertEqual(expense["result"]["balance_after"], "115.00")
+
+        excessive = self.client.post(
+            "/v1/sync/operations",
+            json=self.manual_cash_operation(
+                session_id, sequence=80, direction="EXPENSE", amount="116"
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(excessive["error_code"], "NEGATIVE_CASH_BALANCE")
+
+        close = self.close_cash_operation(
+            session_id, sequence=81, counted="114.50", note="Popis"
+        )
+        closed = self.client.post(
+            "/v1/sync/operations", json=close, headers=self.headers
+        ).json()
+        closed_again = self.client.post(
+            "/v1/sync/operations", json=close, headers=self.headers
+        ).json()
+        self.assertEqual(closed, closed_again)
+        self.assertEqual(closed["result"]["expected_cash"], "115.00")
+        self.assertEqual(closed["result"]["difference"], "-0.50")
+
+        detail = self.client.get(
+            f"/v1/cashier/cash-sessions/{session_id}", headers=self.headers
+        ).json()
+        self.assertEqual(detail["status"], "CLOSED")
+        self.assertEqual(len(detail["entries"]), 2)
+        current = self.client.get(
+            "/v1/cashier/cash-sessions/current",
+            params={"premise_id": "MFD", "electronic_device_id": "PIS"},
+            headers=self.headers,
+        ).json()
+        self.assertIsNone(current["session"])
+
+    def test_two_cashiers_cannot_open_two_sessions_for_one_device(self):
+        requests = (
+            self.open_cash_operation(sequence=82),
+            self.open_cash_operation(sequence=83),
+        )
+
+        def submit(payload):
+            return self.client.post(
+                "/v1/sync/operations", json=payload, headers=self.headers
+            ).json()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(submit, requests))
+        self.assertEqual(
+            sorted(row["result_code"] for row in receipts),
+            ["ACCEPTED", "REJECTED"],
+        )
+        rejected = next(row for row in receipts if row["result_code"] == "REJECTED")
+        self.assertEqual(rejected["error_code"], "CASH_SESSION_ALREADY_OPEN")
+
+    def test_simultaneous_cash_entries_have_one_ordered_balance(self):
+        session_id = str(uuid4())
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations",
+            json=self.open_cash_operation(
+                sequence=84, session_id=session_id, opening="0"
+            ), headers=self.headers,
+        ).json()["result_code"], "ACCEPTED")
+        requests = (
+            self.manual_cash_operation(
+                session_id, sequence=85, direction="RECEIPT", amount="10",
+                reference="BP-10",
+            ),
+            self.manual_cash_operation(
+                session_id, sequence=86, direction="RECEIPT", amount="20",
+                reference="BP-20",
+            ),
+        )
+
+        def submit(payload):
+            return self.client.post(
+                "/v1/sync/operations", json=payload, headers=self.headers
+            ).json()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            receipts = list(pool.map(submit, requests))
+        self.assertTrue(all(row["result_code"] == "ACCEPTED" for row in receipts))
+        detail = self.client.get(
+            f"/v1/cashier/cash-sessions/{session_id}", headers=self.headers
+        ).json()
+        self.assertEqual(
+            [entry["entry_no"] for entry in detail["entries"]], [1, 2]
+        )
+        self.assertEqual(detail["entries"][-1]["balance_after"], "30.00")
 
     def test_two_cashiers_issue_at_most_one_invoice_and_consume_one_number(self):
         from sqlalchemy import func, select
@@ -1142,6 +1359,11 @@ class CentralApiIntegrationTests(unittest.TestCase):
         from mikrofix_server.models import fiscal_outbox, invoices, service_orders
 
         order, draft_id = self.prepared_draft(sequence=101, barcode="FURS-PART")
+        opened = self.client.post(
+            "/v1/sync/operations", json=self.open_cash_operation(sequence=102),
+            headers=self.headers,
+        )
+        self.assertEqual(opened.json()["result_code"], "ACCEPTED")
         issue = self.issue_operation(
             draft_id, sequence=103, method="CASH", confirmed=True
         )
@@ -1866,6 +2088,11 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(self.client.post(
             "/v1/sync/operations", json=receipt, headers=self.headers
         ).json()["result_code"], "ACCEPTED")
+        opened = self.client.post(
+            "/v1/sync/operations", json=self.open_cash_operation(sequence=227),
+            headers=self.headers,
+        )
+        self.assertEqual(opened.json()["result_code"], "ACCEPTED")
         issue = self.direct_sale_operation(
             uuid4(), sequence=228, amount="15.00", method="CASH", confirmed=True,
         )

@@ -24,7 +24,8 @@ from mikrofix_furs import (
 )
 from mikrofix_v30_cash import (
     book_cash_disbursement,cash_session_snapshot,close_cash_session,
-    generate_cash_journal_pdf,open_cash_session,pending_cash_disbursements,
+    generate_cash_journal_pdf,generate_central_cash_journal_pdf,
+    open_cash_session,pending_cash_disbursements,
     record_cash_entry,list_cash_sessions,
 )
 from mikrofix_v30_pos import (
@@ -794,6 +795,18 @@ class PosWindow:
         if not hasattr(self,"cash_status_var"):
             return
         try:
+            if self.central_mode:
+                session = self.central_cashier.current_cash_session(
+                    str(self.premise_var.get()), self.runtime.electronic_device
+                )
+                if session:
+                    self.cash_status_var.set(
+                        f"GOTOVINA: {session['session_no']} • "
+                        f"{dec(session['expected_cash']):.2f} EUR"
+                    )
+                else:
+                    self.cash_status_var.set("GOTOVINA: BLAGAJNA ZAPRTA")
+                return
             session,_entries=cash_session_snapshot(
                 self.office_db,premise_id=str(self.premise_var.get()),
                 device_id=self.runtime.electronic_device,
@@ -808,6 +821,8 @@ class PosWindow:
             self.cash_status_var.set(f"GOTOVINA: napaka {exc}")
 
     def manage_cash_journal(self):
+        if self.central_mode:
+            return self._manage_central_cash_journal()
         win=tk.Toplevel(self.win);win.title("MikroFIX – blagajniški dnevnik")
         win.transient(self.win);maximize_work_window(win,"1180x720")
         summary=tk.StringVar()
@@ -1074,6 +1089,242 @@ class PosWindow:
             buttons,text="PRENESI ODKUPNI IZDATEK",command=import_pending_disbursement
         ).pack(side="left",padx=5)
         ttk.Button(buttons,text="IZVOZI PDF",command=lambda:export(current["session"]["id"]) if current["session"] else None).pack(side="right",padx=5)
+        refresh()
+
+    def _manage_central_cash_journal(self):
+        win = tk.Toplevel(self.win)
+        win.title("MikroFIX – centralni blagajniški dnevnik")
+        win.transient(self.win)
+        maximize_work_window(win, "1180x720")
+        summary = tk.StringVar()
+        pending_text = tk.StringVar()
+        ttk.Label(
+            win, textvariable=summary, font=("Segoe UI", 11, "bold")
+        ).pack(fill="x", padx=12, pady=(10, 2))
+        ttk.Label(win, textvariable=pending_text, foreground=RED).pack(
+            fill="x", padx=12, pady=(0, 8)
+        )
+        columns = ("no", "time", "type", "ref", "description", "in", "out", "balance")
+        tree = ttk.Treeview(win, columns=columns, show="headings")
+        for key, label, width, anchor in (
+            ("no", "Št.", 45, "e"), ("time", "Čas", 75, "w"),
+            ("type", "Vrsta", 120, "w"), ("ref", "Listina", 120, "w"),
+            ("description", "Opis", 300, "w"), ("in", "Prejemek", 90, "e"),
+            ("out", "Izdatek", 90, "e"), ("balance", "Saldo", 90, "e"),
+        ):
+            tree.heading(key, text=label)
+            tree.column(key, width=width, anchor=anchor, stretch=key == "description")
+        tree.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        current = {"session": None, "pending": None}
+        controls = {}
+
+        def refresh():
+            try:
+                session = self.central_cashier.current_cash_session(
+                    str(self.premise_var.get()), self.runtime.electronic_device
+                )
+                pending = self.central_cashier.unresolved_commands(limit=1)
+            except Exception as exc:
+                messagebox.showerror("Centralna blagajna", str(exc), parent=win)
+                return
+            current["session"] = session
+            current["pending"] = pending[0] if pending else None
+            for iid in tree.get_children():
+                tree.delete(iid)
+            if session is None:
+                summary.set(
+                    f"{self.premise_var.get()}/{self.runtime.electronic_device} – "
+                    "blagajna je ZAPRTA"
+                )
+            else:
+                summary.set(
+                    f"{session['session_no']} • začetno "
+                    f"{dec(session['opening_cash']):.2f} EUR • pričakovano "
+                    f"{dec(session['expected_cash']):.2f} EUR"
+                )
+                for entry in session.get("entries", []):
+                    amount = dec(entry["amount"])
+                    tree.insert("", "end", values=(
+                        entry["entry_no"], str(entry["occurred_at"])[11:19],
+                        entry["entry_type"], entry.get("reference_no") or "-",
+                        entry["description"], f"{amount:.2f}" if amount > 0 else "",
+                        f"{-amount:.2f}" if amount < 0 else "",
+                        f"{dec(entry['balance_after']):.2f}",
+                    ))
+            if current["pending"]:
+                pending_text.set(
+                    "NEDOKONČAN ZAHTEVEK: "
+                    f"{current['pending']['operation_type']} • najprej ga uskladi"
+                )
+            else:
+                pending_text.set("")
+            if controls:
+                controls["open"].configure(
+                    state="disabled" if session or current["pending"] else "normal"
+                )
+                controls["close"].configure(
+                    state="normal" if session and not current["pending"] else "disabled"
+                )
+                controls["retry"].configure(
+                    state="normal" if current["pending"] else "disabled"
+                )
+            self.update_cash_status()
+
+        def open_register():
+            value = simpledialog.askfloat(
+                "Odprtje blagajne", "Začetna gotovina v blagajni:",
+                initialvalue=0, minvalue=0, parent=win,
+            )
+            if value is None:
+                return
+            try:
+                result = self.central_cashier.open_cash_session(
+                    premise_id=str(self.premise_var.get()),
+                    electronic_device_id=self.runtime.electronic_device,
+                    opening_cash=value,
+                )
+                refresh()
+                messagebox.showinfo(
+                    "Blagajna", f"Odprta je blagajna {result['session_no']}.", parent=win
+                )
+            except Exception as exc:
+                messagebox.showerror("Blagajna", str(exc), parent=win)
+                refresh()
+
+        def manual_entry(direction):
+            session = current["session"]
+            if not session:
+                return
+            value = simpledialog.askfloat(
+                "Blagajniški dogodek", "Znesek:", minvalue=0.01, parent=win
+            )
+            if value is None:
+                return
+            reference = simpledialog.askstring(
+                "Blagajniški dogodek", "Številka povezane listine:", parent=win
+            )
+            if not reference:
+                return
+            description = simpledialog.askstring(
+                "Blagajniški dogodek", "Namen oziroma opis:", parent=win
+            )
+            if not description:
+                return
+            try:
+                self.central_cashier.record_manual_cash_entry(
+                    session_id=str(session["session_id"]), direction=direction,
+                    amount=value, reference_no=reference, description=description,
+                )
+            except Exception as exc:
+                messagebox.showerror("Blagajna", str(exc), parent=win)
+            refresh()
+
+        def close_register():
+            session = current["session"]
+            if not session:
+                return
+            counted = simpledialog.askfloat(
+                "Zaprtje blagajne", "Dejansko prešteta gotovina:",
+                initialvalue=float(session["expected_cash"]), minvalue=0, parent=win,
+            )
+            if counted is None:
+                return
+            note = simpledialog.askstring(
+                "Zaprtje blagajne", "Opomba k razliki (lahko prazno):", parent=win
+            ) or ""
+            try:
+                result = self.central_cashier.close_cash_session(
+                    session_id=str(session["session_id"]), counted_cash=counted,
+                    note=note, expected_version=int(session["aggregate_version"]),
+                )
+            except Exception as exc:
+                messagebox.showerror("Blagajna", str(exc), parent=win)
+                refresh()
+                return
+            refresh()
+            try:
+                closed_snapshot = self.central_cashier.cash_session(
+                    str(session["session_id"])
+                )
+                pdf_path = generate_central_cash_journal_pdf(
+                    closed_snapshot, output_dir=self.pdf_dir,
+                    company=self._company_data(),
+                )
+                open_local_file(pdf_path)
+            except Exception as exc:
+                messagebox.showwarning(
+                    "Blagajna je zaprta",
+                    f"{result['session_no']} je uspešno zaprta, vendar PDF-ja ni bilo "
+                    f"mogoče pripraviti ali odpreti:\n{exc}", parent=win,
+                )
+                return
+            messagebox.showinfo(
+                "Blagajna",
+                f"{result['session_no']} je zaprta. Razlika: "
+                f"{dec(result['difference']):.2f} EUR.", parent=win,
+            )
+
+        def retry_pending():
+            pending = current["pending"]
+            if not pending:
+                return
+            if pending["operation_type"] not in {
+                "OpenCashSession", "CloseCashSession", "RecordManualCashEntry"
+            }:
+                messagebox.showwarning(
+                    "Uskladitev",
+                    "Starejši zahtevek pripada računu ali partnerju. Uskladi ga v "
+                    "ustreznem blagajniškem pogledu.", parent=win,
+                )
+                return
+            try:
+                self.central_cashier.retry_command(str(pending["operation_id"]))
+            except Exception as exc:
+                messagebox.showerror("Uskladitev", str(exc), parent=win)
+            refresh()
+
+        def show_history():
+            try:
+                rows = self.central_cashier.cash_sessions(
+                    premise_id=str(self.premise_var.get()),
+                    electronic_device_id=self.runtime.electronic_device,
+                )
+            except Exception as exc:
+                messagebox.showerror("Pregled blagajn", str(exc), parent=win)
+                return
+            text = "\n".join(
+                f"{row['session_no']} • {row['status']} • pričakovano "
+                f"{dec(row['expected_cash']):.2f} EUR • razlika "
+                f"{dec(row['difference']):.2f} EUR" if row.get("difference") is not None
+                else f"{row['session_no']} • {row['status']} • pričakovano "
+                     f"{dec(row['expected_cash']):.2f} EUR"
+                for row in rows
+            ) or "Ni blagajniških sej."
+            messagebox.showinfo("Pregled blagajn", text, parent=win)
+
+        primary = ttk.Frame(win)
+        primary.pack(fill="x", padx=12, pady=(0, 8))
+        controls["open"] = ttk.Button(primary, text="1  ODPRI BLAGAJNO", command=open_register)
+        controls["open"].pack(side="left", fill="x", expand=True, padx=(0, 5))
+        controls["close"] = ttk.Button(primary, text="2  ZAPRI BLAGAJNO", command=close_register)
+        controls["close"].pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(primary, text="3  PREGLED PO DNEVIH", command=show_history).pack(
+            side="left", fill="x", expand=True, padx=(5, 0)
+        )
+        actions = ttk.Frame(win)
+        actions.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(
+            actions, text="BLAGAJNIŠKI PREJEMEK",
+            command=lambda: manual_entry("RECEIPT"),
+        ).pack(side="left", padx=(0, 5))
+        ttk.Button(
+            actions, text="BLAGAJNIŠKI IZDATEK",
+            command=lambda: manual_entry("EXPENSE"),
+        ).pack(side="left")
+        controls["retry"] = ttk.Button(
+            actions, text="USKLADI NEDOKONČAN ZAHTEVEK", command=retry_pending
+        )
+        controls["retry"].pack(side="right")
         refresh()
 
     def manage_issued_invoices(self):
@@ -2410,6 +2661,14 @@ class PosWindow:
                 "method": method, "amount": f"{dec(amount):.2f}",
                 "confirmed": confirmed,
             })
+        if any(item["method"] == "CASH" for item in result):
+            session = self.central_cashier.current_cash_session(
+                self.selected_premise(), self.runtime.electronic_device
+            )
+            if session is None:
+                raise PosError(
+                    "Gotovinsko plačilo zahteva odprt centralni blagajniški dnevnik."
+                )
         return result
 
     def _central_billing_customer(self):
