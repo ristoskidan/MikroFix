@@ -2342,6 +2342,17 @@ class CentralApiIntegrationTests(unittest.TestCase):
             inventory.json()["inventory"][0]["identity_quantity_available"],
             "2.0000",
         )
+        receipt_list = self.client.get(
+            "/v1/office/purchase-receipts", headers=headers
+        )
+        self.assertEqual(receipt_list.status_code, 200, receipt_list.text)
+        read_model = receipt_list.json()["receipts"][0]
+        self.assertEqual(read_model["invoice_due_date"], "2026-10-12")
+        self.assertEqual(read_model["invoice_payment_status"], "NEPLACAN")
+        self.assertEqual(read_model["lines"][0]["net_unit_price"], "10.0000")
+        self.assertEqual(read_model["lines"][0]["discount_percent"], "0.0000")
+        self.assertEqual(read_model["lines"][0]["vat_rate"], "11.0000")
+        self.assertEqual(read_model["lines"][0]["supplier_line_total"], "22.20")
         with self.engine.connect() as connection:
             operation = connection.execute(select(accepted_operations).where(
                 accepted_operations.c.operation_id == receipt["operation_id"]

@@ -111,6 +111,12 @@ stari lokalni Office. Neposreden samostojni zagon stare datoteke
 `mikrofix_office.py` še ni centralni zaganjalnik in ni del centralnega testnega
 postopka.
 
+Centralni seznam prejemov vrne tudi izvirne finančne podatke vsake vrstice
+(neto ceno, rabat, DDV, dobaviteljev znesek in razporeditev prevoza) ter podatke
+povezanega računa. To je nespremenljiva osnova, ki jo bo naslednji UI rez uporabil
+za primerjavo pozneje prejetega računa; odjemalec teh vrednosti ne rekonstruira
+in ne ugiba.
+
 Centralni P7 model je že prisoten: odpiranje osnutka ne ustvari `CLAIMED`, ukaz
 izdaje pa sprejme samo plačilno izbiro in identitete blagajne. Vsebina računa se
 izračuna iz strežniškega posnetka. Enolične omejitve in zaklep vrstice preprečijo
