@@ -20,6 +20,15 @@ potrditev; gotovina se hkrati natanko enkrat vpiše v odprto blagajno. Strežnik
 shrani čas prejema in varni rok desetih delovnih dni, prvotni posnetek postavk in
 zneskov pa ostane nespremenjen.
 
+Centralno zgodovino izdanih računov bereta Blagajna in Office iz istega vira.
+Iskanje pokriva številko in datum računa, kupca in davčno številko, opis artikla,
+barkodo ter identiteto oziroma številko povezanega servisa. Office je pri tem
+samo bralec; izdaja in potrjevanje plačila ostajata odgovornost Blagajne.
+
+Knjiženje prejema oziroma pripenjanje poznejšega dobaviteljevega računa zahteva
+poleg dostopa do Office tudi ločeno centralno dovoljenje `CONFIRM_DOCUMENT`.
+Strežnik obe pravici preveri znova ob poslovnem ukazu.
+
 ## Enkratna priprava
 
 Kot `root`:

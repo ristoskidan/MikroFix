@@ -8,7 +8,7 @@ import secrets
 from uuid import UUID
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, status
-from sqlalchemy import Engine, func, or_, select, text
+from sqlalchemy import Engine, String, cast, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
 from mikrofix_sync_contracts import (
@@ -50,6 +50,7 @@ from .models import (
     purchase_receipt_lines,
     purchase_receipts,
     receipt_document_types,
+    service_orders,
     workstations,
 )
 from .operations import (
@@ -706,6 +707,10 @@ def create_app(
         "/v1/cashier/invoices",
         dependencies=[Depends(cashier_identity)],
     )
+    @app.get(
+        "/v1/office/invoices",
+        dependencies=[Depends(office_identity)],
+    )
     def list_cashier_invoices(
         q: str = Query(default="", max_length=130),
         invoice_status: str | None = Query(default=None),
@@ -713,7 +718,11 @@ def create_app(
         limit: int = Query(default=100, ge=1, le=500),
     ) -> dict:
         """List central invoices for history and interrupted-issue recovery."""
-        statement = select(invoices)
+        invoice_source = invoices.outerjoin(
+            service_orders,
+            service_orders.c.sync_uuid == invoices.c.service_order_uuid,
+        )
+        statement = select(invoices).select_from(invoice_source)
         cleaned_status = str(invoice_status or "").strip().upper()
         if cleaned_status:
             if cleaned_status not in {
@@ -728,8 +737,17 @@ def create_app(
             statement = statement.where(invoices.c.payment_status == cleaned_payment)
         cleaned_query = str(q or "").strip()
         if cleaned_query:
+            pattern = f"%{cleaned_query}%"
             statement = statement.where(
-                invoices.c.invoice_number.ilike(f"%{cleaned_query}%")
+                or_(
+                    invoices.c.invoice_number.ilike(pattern),
+                    cast(invoices.c.issued_at, String).ilike(pattern),
+                    cast(invoices.c.service_order_uuid, String).ilike(pattern),
+                    invoices.c.billing_customer_json["name"].as_string().ilike(pattern),
+                    invoices.c.billing_customer_json["tax_number"].as_string().ilike(pattern),
+                    cast(invoices.c.snapshot_json["lines"], String).ilike(pattern),
+                    service_orders.c.payload_json["service_no"].as_string().ilike(pattern),
+                )
             )
         with database_engine.connect() as connection:
             rows = connection.execute(
@@ -742,6 +760,10 @@ def create_app(
     @app.get(
         "/v1/cashier/invoices/{invoice_id}",
         dependencies=[Depends(cashier_identity)],
+    )
+    @app.get(
+        "/v1/office/invoices/{invoice_id}",
+        dependencies=[Depends(office_identity)],
     )
     def get_cashier_invoice(invoice_id: UUID) -> dict:
         """Return the server-owned immutable invoice used for print/recovery."""

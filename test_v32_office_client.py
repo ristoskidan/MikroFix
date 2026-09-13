@@ -105,6 +105,29 @@ class OfficeCommandJournalTests(unittest.TestCase):
             headers={"Authorization": "Bearer token"}, timeout=15.0,
         )
 
+    @patch("requests.get")
+    def test_office_reads_and_opens_central_invoices(self, get):
+        first = Mock(status_code=200)
+        first.json.return_value = {
+            "invoices": [{"invoice_id": "invoice-1", "payment_status": "UNPAID"}]
+        }
+        second = Mock(status_code=200)
+        second.json.return_value = {
+            "invoice_id": "invoice-1", "invoice_number": "MFD-PIS-1",
+            "snapshot": {"lines": []},
+        }
+        get.side_effect = [first, second]
+        transport = RequestsOfficeTransport("https://central.example", "token")
+
+        invoices = transport.list_issued_invoices(
+            "kupec", payment_status="UNPAID", limit=25,
+        )
+        invoice = transport.get_issued_invoice("invoice-1")
+
+        self.assertEqual(invoices[0]["payment_status"], "UNPAID")
+        self.assertEqual(invoice["invoice_number"], "MFD-PIS-1")
+        self.assertEqual(get.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

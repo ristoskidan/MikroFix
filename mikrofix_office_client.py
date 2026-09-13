@@ -64,6 +64,21 @@ class RequestsOfficeTransport(RequestsSyncTransport):
         )
         return self._list(payload, "receipts")
 
+    def list_issued_invoices(
+        self, query: str = "", *, payment_status: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if payment_status:
+            params["payment_status"] = payment_status
+        payload = self._get("/v1/office/invoices", **params)
+        return self._list(payload, "invoices")
+
+    def get_issued_invoice(self, invoice_id: str) -> dict[str, Any]:
+        payload = self._get(f"/v1/office/invoices/{invoice_id}")
+        if not payload.get("invoice_id") or not isinstance(payload.get("snapshot"), dict):
+            raise SyncTransportError("Central API returned an invalid invoice.")
+        return payload
+
     def list_custom_document_types(self) -> list[dict[str, Any]]:
         payload = self._get("/v1/office/receipt-document-types")
         return self._list(payload, "custom_types")

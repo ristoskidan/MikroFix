@@ -1110,6 +1110,27 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200, history.text)
         self.assertEqual(len(history.json()["invoices"]), 1)
         self.assertEqual(history.json()["invoices"][0]["invoice_id"], invoice_id)
+        for query in (
+            "Testna stranka",
+            "Testni del",
+            "BANK-PART",
+            order["aggregate_id"],
+            str(recovered["issued_at"])[:10],
+        ):
+            searched = self.client.get(
+                "/v1/cashier/invoices", params={"q": query}, headers=self.headers,
+            )
+            self.assertEqual(searched.status_code, 200, searched.text)
+            self.assertEqual(
+                [row["invoice_id"] for row in searched.json()["invoices"]],
+                [invoice_id],
+            )
+
+        office_history = self.client.get(
+            "/v1/office/invoices", params={"q": "BANK-PART"}, headers=self.headers,
+        )
+        self.assertEqual(office_history.status_code, 200, office_history.text)
+        self.assertEqual(office_history.json()["invoices"][0]["invoice_id"], invoice_id)
 
     def test_cash_invoice_is_queued_once_and_does_not_close_before_furs(self):
         from sqlalchemy import func, select
@@ -2370,6 +2391,35 @@ class CentralApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertIn("CONFIRM_DOCUMENT", response.json()["detail"])
+
+    def test_office_invoice_history_is_read_only_and_session_scoped(self):
+        _, draft_id = self.prepared_draft(sequence=1, barcode="OFFICE-HISTORY")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(draft_id, sequence=3),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        login = self.central_login(role="OFFICE", application="OFFICE")
+        self.assertEqual(login.status_code, 200, login.text)
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        history = self.client.get(
+            "/v1/office/invoices", params={"q": "OFFICE-HISTORY"},
+            headers=headers,
+        )
+        invoice = self.client.get(
+            f"/v1/office/invoices/{invoice_id}", headers=headers,
+        )
+
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual(history.json()["invoices"][0]["invoice_id"], invoice_id)
+        self.assertEqual(invoice.status_code, 200, invoice.text)
+        self.assertEqual(invoice.json()["invoice_id"], invoice_id)
+        self.assertEqual(
+            self.client.get("/v1/cashier/invoices", headers=headers).status_code,
+            403,
+        )
 
     def test_late_receipt_rejection_rolls_back_every_stock_side_effect(self):
         from sqlalchemy import func, select
