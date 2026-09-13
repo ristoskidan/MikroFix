@@ -89,6 +89,34 @@ class OfficeCommandJournalTests(unittest.TestCase):
             "SELECT COUNT(*) FROM sync_outbox_v32"
         ).fetchone()[0], 0)
 
+    def test_partner_commands_keep_partner_aggregate_and_versions(self):
+        partner_id = str(uuid4())
+        common = {
+            "partner_id": partner_id, "verification_source": "MANUAL_REVIEW",
+            "review_confirmed": True, "name": "Partner", "address": "",
+            "post_city": "", "country": "Slovenija", "tax_number": "",
+            "registration_number": "", "phone": "040000000", "email": "",
+            "source_reference": "OFFICE",
+        }
+        created = self.journal.prepare_create_partner(common)
+        updated = self.journal.prepare_update_partner({
+            **common, "expected_version": 1, "name": "Partner popravljen",
+        })
+        deactivated = self.journal.prepare_set_partner_active({
+            "partner_id": partner_id, "expected_version": 2,
+            "active": False, "reason": "Podvojen zapis",
+        })
+
+        rows = [outbox_operation(self.connection, item) for item in (
+            created, updated, deactivated,
+        )]
+        self.assertEqual(
+            [row["operation_type"] for row in rows],
+            ["CreateOfficePartner", "UpdatePartner", "SetPartnerActive"],
+        )
+        self.assertEqual({row["aggregate_type"] for row in rows}, {"PARTNER"})
+        self.assertEqual([row["expected_version"] for row in rows], [0, 1, 2])
+
     @patch("requests.get")
     def test_office_reads_pending_receipts(self, get):
         response = Mock(status_code=200)

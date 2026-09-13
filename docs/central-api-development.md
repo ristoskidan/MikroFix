@@ -86,6 +86,12 @@ poslovnim pošiljanjem trajno shrani nespremenljiv ukaz. Digitalne priloge so
 neobvezne; pogodba sprejme njihov kontrolni opis, dejanski prenos datotek v
 centralni upravljani arhiv pa še ni produkcijsko priklopljen.
 
+Office lahko partnerja tudi ustvari, popravi, deaktivira ali ponovno aktivira.
+Vsaka sprememba zahteva pričakovano različico zapisa; sočasna popravka istega
+partnerja zato nimata tihega zadnjega zmagovalca. Davčna številka ostaja enolična,
+deaktiviran partner ostane v Office zgodovini, Blagajna pa ga ne ponuja za nove
+račune. Že izdani računi vedno ohranijo svoj prvotni posnetek kupca.
+
 Centralni P7 model je že prisoten: odpiranje osnutka ne ustvari `CLAIMED`, ukaz
 izdaje pa sprejme samo plačilno izbiro in identitete blagajne. Vsebina računa se
 izračuna iz strežniškega posnetka. Enolične omejitve in zaklep vrstice preprečijo

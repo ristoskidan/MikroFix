@@ -2421,6 +2421,143 @@ class CentralApiIntegrationTests(unittest.TestCase):
             403,
         )
 
+    def test_office_updates_and_deactivates_partner_without_rewriting_invoice(self):
+        login = self.central_login(role="OFFICE", application="OFFICE")
+        self.assertEqual(login.status_code, 200, login.text)
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        created = self.create_partner_operation(sequence=1, tax_number="87654321")
+        created["operation_type"] = "CreateOfficePartner"
+        partner_id = created["aggregate_id"]
+        created_response = self.client.post(
+            "/v1/sync/operations", json=created, headers=headers,
+        ).json()
+        self.assertEqual(created_response["result_code"], "ACCEPTED")
+
+        update_payload = dict(created["payload"])
+        update_payload.update(
+            expected_version=1, name="Posodobljen kupec d.o.o.",
+            address="Nova cesta 2", source_reference="OFFICE_EDIT",
+        )
+        update_request = {
+            **created,
+            "operation_id": str(uuid4()), "operation_type": "UpdatePartner",
+            "expected_version": 1, "device_sequence": 2,
+            "payload": update_payload,
+        }
+        updated = self.client.post(
+            "/v1/sync/operations", json=update_request, headers=headers,
+        ).json()
+        self.assertEqual(updated["result_code"], "ACCEPTED")
+        self.assertEqual(updated["aggregate_version"], 2)
+
+        _, draft_id = self.prepared_draft(sequence=301, barcode="PARTNER-SNAPSHOT")
+        issue = self.issue_operation(draft_id, sequence=303)
+        issue["payload"]["billing_customer"] = {
+            "source": "CENTRAL_PARTNER", "confirmed": True,
+            "partner_id": partner_id, "expected_version": 2,
+        }
+        issued = self.client.post(
+            "/v1/sync/operations", json=issue, headers=self.headers,
+        ).json()
+        self.assertEqual(issued["result_code"], "ACCEPTED")
+        invoice_id = issued["result"]["invoice_id"]
+
+        status_request = {
+            **created,
+            "operation_id": str(uuid4()), "operation_type": "SetPartnerActive",
+            "expected_version": 2, "device_sequence": 3,
+            "payload": {
+                "partner_id": partner_id, "expected_version": 2,
+                "active": False, "reason": "Partner je podvojen",
+            },
+        }
+        deactivated = self.client.post(
+            "/v1/sync/operations", json=status_request, headers=headers,
+        ).json()
+        self.assertEqual(deactivated["result_code"], "ACCEPTED")
+        self.assertFalse(deactivated["result"]["active"])
+
+        stale = {
+            **update_request,
+            "operation_id": str(uuid4()), "device_sequence": 4,
+        }
+        stale_response = self.client.post(
+            "/v1/sync/operations", json=stale, headers=headers,
+        ).json()
+        self.assertEqual(stale_response["result_code"], "REJECTED")
+        self.assertEqual(stale_response["error_code"], "VERSION_CONFLICT")
+
+        office_rows = self.client.get(
+            "/v1/office/partners", params={"q": "87654321"}, headers=headers,
+        ).json()["partners"]
+        cashier_rows = self.client.get(
+            "/v1/cashier/partners", params={"q": "87654321"}, headers=self.headers,
+        ).json()["partners"]
+        invoice = self.client.get(
+            f"/v1/office/invoices/{invoice_id}", headers=headers,
+        ).json()
+        self.assertEqual(office_rows[0]["row_version"], 3)
+        self.assertFalse(office_rows[0]["active"])
+        self.assertEqual(cashier_rows, [])
+        self.assertEqual(
+            invoice["snapshot"]["billing_customer"]["name"],
+            "Posodobljen kupec d.o.o.",
+        )
+
+    def test_concurrent_partner_edits_have_one_winner_and_tax_identity_is_unique(self):
+        first = self.create_partner_operation(sequence=401, tax_number="11112222")
+        second = self.create_partner_operation(sequence=402, tax_number="33334444")
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=first, headers=self.headers,
+        ).json()["result_code"], "ACCEPTED")
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=second, headers=self.headers,
+        ).json()["result_code"], "ACCEPTED")
+
+        edits = []
+        for sequence, name in ((403, "Prva sprememba"), (404, "Druga sprememba")):
+            payload = dict(first["payload"])
+            payload.update(
+                expected_version=1, name=name, source_reference="OFFICE_EDIT",
+            )
+            edits.append({
+                **first, "operation_id": str(uuid4()),
+                "operation_type": "UpdatePartner", "expected_version": 1,
+                "device_sequence": sequence, "payload": payload,
+            })
+
+        def submit(request):
+            return self.client.post(
+                "/v1/sync/operations", json=request, headers=self.headers,
+            ).json()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(submit, edits))
+        self.assertEqual(
+            sorted(result["result_code"] for result in results),
+            ["ACCEPTED", "REJECTED"],
+        )
+        rejected = next(result for result in results if result["result_code"] == "REJECTED")
+        self.assertEqual(rejected["error_code"], "VERSION_CONFLICT")
+
+        duplicate_payload = dict(second["payload"])
+        duplicate_payload.update(
+            expected_version=1, tax_number="11112222",
+            source_reference="OFFICE_EDIT",
+        )
+        duplicate = {
+            **second, "operation_id": str(uuid4()),
+            "operation_type": "UpdatePartner", "expected_version": 1,
+            "device_sequence": 405, "payload": duplicate_payload,
+        }
+        duplicate_response = self.client.post(
+            "/v1/sync/operations", json=duplicate, headers=self.headers,
+        ).json()
+        self.assertEqual(duplicate_response["result_code"], "REJECTED")
+        self.assertEqual(
+            duplicate_response["error_code"], "PARTNER_TAX_NUMBER_EXISTS"
+        )
+
     def test_late_receipt_rejection_rolls_back_every_stock_side_effect(self):
         from sqlalchemy import func, select
         from mikrofix_server.models import (

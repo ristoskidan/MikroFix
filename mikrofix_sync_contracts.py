@@ -195,9 +195,10 @@ def validated_create_partner_payload(value: Mapping[str, Any]) -> dict[str, Any]
         raise ContractError("partner.name is required.")
     if len(result["name"]) > 300:
         raise ContractError("partner.name is too long.")
-    tax = result["tax_number"].upper().removeprefix("SI")
+    supplied_tax = result["tax_number"]
+    tax = supplied_tax.upper().removeprefix("SI")
     tax = "".join(character for character in tax if character.isdigit())
-    if tax and len(tax) != 8:
+    if supplied_tax and len(tax) != 8:
         raise ContractError("partner.tax_number must contain 8 digits.")
     result["tax_number"] = tax
     if source is PartnerVerificationSource.AJPES_REVIEW:
@@ -207,7 +208,73 @@ def validated_create_partner_payload(value: Mapping[str, Any]) -> dict[str, Any]
             )
     if result["email"] and "@" not in result["email"]:
         raise ContractError("partner.email is invalid.")
+    maximum_lengths = {
+        "address": 300, "post_city": 200, "country": 100,
+        "registration_number": 30, "phone": 100, "email": 300,
+        "source_reference": 300,
+    }
+    for field_name, maximum in maximum_lengths.items():
+        if len(result[field_name]) > maximum:
+            raise ContractError(
+                f"partner.{field_name} must be at most {maximum} characters."
+            )
     return result
+
+
+def validated_update_partner_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a reviewed Office edit without allowing identity replacement."""
+    raw = dict(value)
+    allowed = {
+        "partner_id", "expected_version", "verification_source",
+        "review_confirmed", "name", "address", "post_city", "country",
+        "tax_number", "registration_number", "phone", "email",
+        "source_reference",
+    }
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "partner update contains unsupported fields: " + ", ".join(unexpected)
+        )
+    try:
+        expected_version = int(raw.get("expected_version"))
+    except (TypeError, ValueError) as exc:
+        raise ContractError("partner.expected_version must be an integer.") from exc
+    if expected_version < 1:
+        raise ContractError("partner.expected_version must be at least 1.")
+    normalized = validated_create_partner_payload({
+        key: value for key, value in raw.items() if key != "expected_version"
+    })
+    normalized["expected_version"] = expected_version
+    return normalized
+
+
+def validated_set_partner_active_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    raw = dict(value)
+    allowed = {"partner_id", "expected_version", "active", "reason"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "partner status change contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    partner_id = normalized_uuid(raw.get("partner_id"), field="partner_id")
+    try:
+        expected_version = int(raw.get("expected_version"))
+    except (TypeError, ValueError) as exc:
+        raise ContractError("partner.expected_version must be an integer.") from exc
+    if expected_version < 1:
+        raise ContractError("partner.expected_version must be at least 1.")
+    if not isinstance(raw.get("active"), bool):
+        raise ContractError("partner.active must be true or false.")
+    reason = str(raw.get("reason") or "").strip()
+    if len(reason) < 3 or len(reason) > 500:
+        raise ContractError("partner status change requires a reason from 3 to 500 characters.")
+    return {
+        "partner_id": partner_id,
+        "expected_version": expected_version,
+        "active": raw["active"],
+        "reason": reason,
+    }
 
 
 @dataclass(frozen=True, slots=True)

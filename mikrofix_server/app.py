@@ -359,6 +359,9 @@ def create_app(
             "CreateServiceOrder": ("MODULE_SERVICE", "SERVICE"),
             "CompleteServiceTechnically": ("MODULE_SERVICE", "SERVICE"),
             "CreatePartner": ("MODULE_CASHIER", "CASHIER"),
+            "CreateOfficePartner": ("MODULE_OFFICE", "OFFICE"),
+            "UpdatePartner": ("MODULE_OFFICE", "OFFICE"),
+            "SetPartnerActive": ("MODULE_OFFICE", "OFFICE"),
             "IssueServiceInvoice": ("MODULE_CASHIER", "CASHIER"),
             "IssueDirectSaleInvoice": ("MODULE_CASHIER", "CASHIER"),
             "OpenCashSession": ("MODULE_CASHIER", "CASHIER"),
@@ -879,7 +882,7 @@ def create_app(
         q: str = Query(default="", max_length=120),
         limit: int = Query(default=50, ge=1, le=200),
     ) -> dict:
-        query = select(partners).where(partners.c.active.is_(True))
+        query = select(partners)
         cleaned = q.strip()
         if cleaned:
             pattern = f"%{cleaned}%"
@@ -898,7 +901,7 @@ def create_app(
             "post_city": row.post_city, "country": row.country,
             "tax_number": row.tax_number,
             "registration_number": row.registration_number,
-            "phone": row.phone, "email": row.email,
+            "phone": row.phone, "email": row.email, "active": row.active,
         } for row in rows]}
 
     @app.get(

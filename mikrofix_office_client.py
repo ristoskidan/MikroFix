@@ -17,6 +17,9 @@ from mikrofix_sync_contracts import (
     SyncOperationEnvelope,
     validated_attach_receipt_invoice_payload,
     validated_confirm_receipt_payload,
+    validated_create_partner_payload,
+    validated_set_partner_active_payload,
+    validated_update_partner_payload,
 )
 from mikrofix_sync_store import (
     acknowledge_operation,
@@ -125,6 +128,48 @@ class OfficeCommandJournal:
             payload=normalized, operation_id=operation_id,
         )
 
+    def prepare_create_partner(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> str:
+        normalized = validated_create_partner_payload(payload)
+        return self._prepare_partner(
+            operation_type="CreateOfficePartner", normalized=normalized,
+            expected_version=0, operation_id=operation_id,
+        )
+
+    def prepare_update_partner(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> str:
+        normalized = validated_update_partner_payload(payload)
+        return self._prepare_partner(
+            operation_type="UpdatePartner", normalized=normalized,
+            expected_version=normalized["expected_version"],
+            operation_id=operation_id,
+        )
+
+    def prepare_set_partner_active(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> str:
+        normalized = validated_set_partner_active_payload(payload)
+        return self._prepare_partner(
+            operation_type="SetPartnerActive", normalized=normalized,
+            expected_version=normalized["expected_version"],
+            operation_id=operation_id,
+        )
+
+    def _prepare_partner(
+        self, *, operation_type: str, normalized: Mapping[str, Any],
+        expected_version: int, operation_id: str | None,
+    ) -> str:
+        return self._prepare(
+            operation_type=operation_type,
+            aggregate_id=str(normalized["partner_id"]),
+            expected_version=expected_version,
+            payload=normalized,
+            operation_id=operation_id,
+            aggregate_type="PARTNER",
+        )
+
     def prepare_attach_purchase_invoice(
         self, payload: Mapping[str, Any], *, operation_id: str | None = None,
     ) -> str:
@@ -139,7 +184,7 @@ class OfficeCommandJournal:
     def _prepare(
         self, *, operation_type: str, aggregate_id: str,
         expected_version: int, payload: Mapping[str, Any],
-        operation_id: str | None,
+        operation_id: str | None, aggregate_type: str = "PURCHASE_RECEIPT",
     ) -> str:
         identity = str(operation_id or uuid4())
         existing = outbox_operation(self.connection, identity)
@@ -147,7 +192,7 @@ class OfficeCommandJournal:
             if existing:
                 envelope = SyncOperationEnvelope(
                     operation_id=identity, operation_type=operation_type,
-                    aggregate_type="PURCHASE_RECEIPT", aggregate_id=aggregate_id,
+                    aggregate_type=aggregate_type, aggregate_id=aggregate_id,
                     expected_version=expected_version, actor_id=self.actor_id,
                     device_id=self.device_id,
                     device_sequence=int(existing["device_sequence"]),
@@ -156,7 +201,7 @@ class OfficeCommandJournal:
             else:
                 envelope = SyncOperationEnvelope(
                     operation_id=identity, operation_type=operation_type,
-                    aggregate_type="PURCHASE_RECEIPT", aggregate_id=aggregate_id,
+                    aggregate_type=aggregate_type, aggregate_id=aggregate_id,
                     expected_version=expected_version, actor_id=self.actor_id,
                     device_id=self.device_id,
                     device_sequence=next_device_sequence(

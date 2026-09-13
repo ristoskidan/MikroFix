@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from uuid import UUID, uuid4
@@ -25,7 +26,9 @@ from mikrofix_sync_contracts import (
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
     validated_settle_unpaid_bank_invoice_payload,
+    validated_set_partner_active_payload,
     validated_technical_completion_payload,
+    validated_update_partner_payload,
 )
 
 from .models import (
@@ -195,6 +198,7 @@ def _create_partner(
         )
     now = datetime.now(ZoneInfo("Europe/Ljubljana"))
     tax_normalized = payload["tax_number"] or None
+    _lock_partner_keys(connection, str(tax_normalized or ""))
     created = connection.execute(
         insert(partners)
         .values(
@@ -259,6 +263,142 @@ def _create_partner(
         },
         sequence,
     )
+
+
+def _partner_lock_key(value: str) -> int:
+    digest = hashlib.sha256(f"MikroFIX:partner:{value}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
+
+
+def _lock_partner_keys(connection: Connection, *values: str) -> None:
+    for value in sorted({str(item or "").strip() for item in values if item}):
+        connection.execute(select(func.pg_advisory_xact_lock(_partner_lock_key(value))))
+
+
+def _update_partner(
+    connection: Connection, envelope: SyncOperationEnvelope, partner_uuid: UUID,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "PARTNER":
+        return _reject("INVALID_AGGREGATE_TYPE", "UpdatePartner requires PARTNER.")
+    try:
+        payload = validated_update_partner_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["partner_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.partner_id must equal aggregate_id."
+        )
+    if payload["expected_version"] != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT", "payload.expected_version must equal expected_version."
+        )
+    row = connection.execute(
+        select(partners).where(
+            partners.c.partner_uuid == partner_uuid
+        ).with_for_update()
+    ).one_or_none()
+    if row is None:
+        return _reject("PARTNER_NOT_FOUND", "The selected partner does not exist.")
+    if row.row_version != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            f"Partner version is {row.row_version}, not {envelope.expected_version}.",
+        )
+    tax_normalized = payload["tax_number"] or None
+    _lock_partner_keys(
+        connection, str(row.tax_number_normalized or ""), str(tax_normalized or "")
+    )
+    duplicate = None
+    if tax_normalized:
+        duplicate = connection.execute(select(partners.c.partner_uuid).where(
+            partners.c.tax_number_normalized == tax_normalized,
+            partners.c.partner_uuid != partner_uuid,
+        )).scalar_one_or_none()
+    if duplicate is not None:
+        return _reject(
+            "PARTNER_TAX_NUMBER_EXISTS",
+            "Another partner already uses this tax number.",
+        )
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    new_version = int(row.row_version) + 1
+    connection.execute(update(partners).where(
+        partners.c.partner_uuid == partner_uuid
+    ).values(
+        name=payload["name"], address=payload["address"],
+        post_city=payload["post_city"], country=payload["country"] or "Slovenija",
+        tax_number=payload["tax_number"], tax_number_normalized=tax_normalized,
+        registration_number=payload["registration_number"],
+        phone=payload["phone"], email=payload["email"],
+        row_version=new_version, verified_by=envelope.actor_id,
+        verified_at=now, verification_source=payload["verification_source"],
+        source_reference=payload["source_reference"], updated_at=now,
+    ))
+    sequence = _publish_change(
+        connection, event_type="PartnerUpdated", aggregate_type="PARTNER",
+        aggregate_uuid=partner_uuid, aggregate_version=new_version,
+        payload={
+            "partner_id": str(partner_uuid), "row_version": new_version,
+            "name": payload["name"], "active": bool(row.active),
+        }, occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": new_version, "central_sequence": sequence,
+        "partner_id": str(partner_uuid), "row_version": new_version,
+        "active": bool(row.active),
+    }, sequence
+
+
+def _set_partner_active(
+    connection: Connection, envelope: SyncOperationEnvelope, partner_uuid: UUID,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "PARTNER":
+        return _reject("INVALID_AGGREGATE_TYPE", "SetPartnerActive requires PARTNER.")
+    try:
+        payload = validated_set_partner_active_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["partner_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.partner_id must equal aggregate_id."
+        )
+    if payload["expected_version"] != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT", "payload.expected_version must equal expected_version."
+        )
+    row = connection.execute(select(partners).where(
+        partners.c.partner_uuid == partner_uuid
+    ).with_for_update()).one_or_none()
+    if row is None:
+        return _reject("PARTNER_NOT_FOUND", "The selected partner does not exist.")
+    if row.row_version != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            f"Partner version is {row.row_version}, not {envelope.expected_version}.",
+        )
+    if bool(row.active) == payload["active"]:
+        return _reject(
+            "PARTNER_STATUS_UNCHANGED", "The partner already has the requested status."
+        )
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    new_version = int(row.row_version) + 1
+    connection.execute(update(partners).where(
+        partners.c.partner_uuid == partner_uuid
+    ).values(active=payload["active"], row_version=new_version, updated_at=now))
+    event_type = "PartnerReactivated" if payload["active"] else "PartnerDeactivated"
+    sequence = _publish_change(
+        connection, event_type=event_type, aggregate_type="PARTNER",
+        aggregate_uuid=partner_uuid, aggregate_version=new_version,
+        payload={
+            "partner_id": str(partner_uuid), "row_version": new_version,
+            "name": row.name, "active": payload["active"],
+            "reason": payload["reason"],
+        }, occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": new_version, "central_sequence": sequence,
+        "partner_id": str(partner_uuid), "row_version": new_version,
+        "active": payload["active"],
+    }, sequence
 
 
 def _invoice_total(draft_payload: dict) -> Decimal:
@@ -2388,8 +2528,16 @@ def process_operation(
         result_code, response, central_sequence = _create_service_order(
             connection, envelope, aggregate_uuid
         )
-    elif envelope.operation_type == "CreatePartner":
+    elif envelope.operation_type in {"CreatePartner", "CreateOfficePartner"}:
         result_code, response, central_sequence = _create_partner(
+            connection, envelope, aggregate_uuid
+        )
+    elif envelope.operation_type == "UpdatePartner":
+        result_code, response, central_sequence = _update_partner(
+            connection, envelope, aggregate_uuid
+        )
+    elif envelope.operation_type == "SetPartnerActive":
+        result_code, response, central_sequence = _set_partner_active(
             connection, envelope, aggregate_uuid
         )
     elif envelope.operation_type == "CompleteServiceTechnically":

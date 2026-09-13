@@ -26,6 +26,8 @@ from mikrofix_sync_contracts import (
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
     validated_technical_completion_payload,
+    validated_set_partner_active_payload,
+    validated_update_partner_payload,
 )
 from mikrofix_workflows import (
     create_service_order,
@@ -385,6 +387,30 @@ class SyncContractTests(unittest.TestCase):
         self.assertEqual(payload["tax_number"], "12345678")
         with self.assertRaisesRegex(ContractError, "review confirmation"):
             validated_create_partner_payload({**payload, "review_confirmed": False})
+        with self.assertRaisesRegex(ContractError, "must contain 8 digits"):
+            validated_create_partner_payload({**payload, "tax_number": "napačna"})
+
+    def test_partner_update_and_status_contracts_require_version_and_reason(self):
+        partner_id = str(uuid4())
+        updated = validated_update_partner_payload({
+            "partner_id": partner_id, "expected_version": 2,
+            "verification_source": "MANUAL_REVIEW", "review_confirmed": True,
+            "name": "Popravljen partner", "address": "Nova 1",
+            "post_city": "1000 Ljubljana", "country": "Slovenija",
+            "tax_number": "12345678", "registration_number": "",
+            "phone": "040000000", "email": "partner@example.test",
+            "source_reference": "OFFICE_EDIT",
+        })
+        self.assertEqual(updated["expected_version"], 2)
+        status = validated_set_partner_active_payload({
+            "partner_id": partner_id, "expected_version": 3,
+            "active": False, "reason": "Podvojen zapis",
+        })
+        self.assertFalse(status["active"])
+        with self.assertRaisesRegex(ContractError, "requires a reason"):
+            validated_set_partner_active_payload({
+                **status, "reason": "x",
+            })
 
     def test_cash_journal_contracts_keep_amounts_exact_and_positive(self):
         session_id = str(uuid4())
