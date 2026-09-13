@@ -92,6 +92,15 @@ partnerja zato nimata tihega zadnjega zmagovalca. Davčna številka ostaja enoli
 deaktiviran partner ostane v Office zgodovini, Blagajna pa ga ne ponuja za nove
 račune. Že izdani računi vedno ohranijo svoj prvotni posnetek kupca.
 
+`mikrofix_office_runtime.py` združuje centralne Office bralne poti in spremembe v
+en UI-neodvisen potek. Vsak potrjen prejem, pozneje pripeti račun ali sprememba
+partnerja se najprej nespremenljivo shrani v lokalni dnevnik ukazov. Nejasen
+omrežni rezultat blokira nove Office spremembe na isti postaji, dokler se ne
+ponovi isti ukaz z isto identiteto. Lokalni dnevnik ni druga poslovna baza in ne
+omogoča dela Office brez strežnika. Razvojni zagonski most je pripravljen; priklop
+velikega obstoječega Office zaslona se izvede po posameznih zaključenih
+funkcionalnih rezih, da se lokalno in centralno knjiženje ne pomešata.
+
 Centralni P7 model je že prisoten: odpiranje osnutka ne ustvari `CLAIMED`, ukaz
 izdaje pa sprejme samo plačilno izbiro in identitete blagajne. Vsebina računa se
 izračuna iz strežniškega posnetka. Enolične omejitve in zaklep vrstice preprečijo
