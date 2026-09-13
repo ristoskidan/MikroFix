@@ -3132,6 +3132,8 @@ class PosWindow:
             messagebox.showerror("Storno računa",str(exc),parent=self.win)
 
     def manage_unpaid_bank_invoices(self):
+        if self.central_mode:
+            return self._manage_central_unpaid_bank_invoices()
         try:
             rows = unpaid_bank_invoices(self.office_db)
         except Exception as exc:
@@ -3180,10 +3182,13 @@ class PosWindow:
         tree.pack(fill="both", expand=True, padx=14, pady=8)
         if tree.get_children():
             tree.selection_set(tree.get_children()[0])
-        method = tk.StringVar(value="CASH")
+        method = tk.StringVar(value="BANK_TRANSFER")
         methods = ttk.Frame(dialog)
         methods.pack(fill="x", padx=14, pady=6)
         ttk.Label(methods, text="Dejansko prejeto:").pack(side="left")
+        ttk.Radiobutton(
+            methods, text="Nakazilo na TRR", variable=method, value="BANK_TRANSFER"
+        ).pack(side="left", padx=10)
         if "CASH" in self.enabled_payment_methods:
             ttk.Radiobutton(methods, text="Gotovina", variable=method, value="CASH").pack(side="left", padx=10)
         if "CARD" in self.enabled_payment_methods:
@@ -3195,21 +3200,29 @@ class PosWindow:
                 messagebox.showwarning("Neplačani TRR", "Izberi račun.", parent=dialog)
                 return
             row = row_map[selected[0]]
-            method_label = "gotovino" if method.get() == "CASH" else "kartico"
+            method_label = {
+                "BANK_TRANSFER": "nakazilom na TRR", "CASH": "gotovino",
+                "CARD": "kartico",
+            }[method.get()]
             if not messagebox.askyesno(
                 "Potrdi dejansko plačilo",
                 f"Potrjuješ, da je račun {row['invoice_no']} v znesku "
                 f"{dec(row['invoice_total']):.2f} EUR zdaj v celoti plačan z {method_label}?\n\n"
-                "Račun ostane isti in bo takoj poslan FURS-u.",
+                + ("Račun ostane isti; FURS ni potreben."
+                 if method.get() == "BANK_TRANSFER"
+                 else "Račun ostane isti in bo takoj poslan FURS-u."),
                 parent=dialog,
             ):
                 return
             try:
-                fiscalizer = self._fiscalizer_for_issue()
+                fiscalizer = (
+                    None if method.get() == "BANK_TRANSFER"
+                    else self._fiscalizer_for_issue()
+                )
                 result = settle_unpaid_bank_invoice(
                     office_db=self.office_db, document_id=int(row["id"]),
                     method=method.get(), operator_code=self.operator_code,
-                    fiscalization_required=fiscalizer is not None,
+                    fiscalization_required=method.get() != "BANK_TRANSFER",
                     fiscalizer=fiscalizer,
                     authenticated_username=self.authenticated_username,
                     numbering_structure=str(
@@ -3217,24 +3230,30 @@ class PosWindow:
                     ),
                     test_mode=self.runtime.is_test,
                 )
-                copy_no = register_copy(self.office_db, int(row["id"]), self.operator_code)
-                a4, receipt = generate_pos_pdfs(
-                    office_db=self.office_db, document_id=int(row["id"]),
-                    output_dir=self.pdf_dir, company=self._company_data(),
-                    tax_note=self.runtime.tax_invoice_note,
-                    premise=self.selected_premise(), device=self.runtime.electronic_device,
-                    paper_width_mm=self._paper_width(), copy_no=copy_no,
-                    test_mode=self.runtime.is_test,
-                )
-                try:
-                    self._attempt_print(receipt)
-                except Exception:
-                    open_local_file(a4)
+                if method.get() != "BANK_TRANSFER":
+                    copy_no = register_copy(
+                        self.office_db, int(row["id"]), self.operator_code
+                    )
+                    a4, receipt = generate_pos_pdfs(
+                        office_db=self.office_db, document_id=int(row["id"]),
+                        output_dir=self.pdf_dir, company=self._company_data(),
+                        tax_note=self.runtime.tax_invoice_note,
+                        premise=self.selected_premise(), device=self.runtime.electronic_device,
+                        paper_width_mm=self._paper_width(), copy_no=copy_no,
+                        test_mode=self.runtime.is_test,
+                    )
+                    try:
+                        self._attempt_print(receipt)
+                    except Exception:
+                        open_local_file(a4)
                 dialog.destroy()
                 eor = str(result.get("eor") or "")
                 messagebox.showinfo(
                     "Plačilo evidentirano",
-                    f"Račun {row['invoice_no']} je plačan in davčno potrjen.\nEOR: {eor}",
+                    (f"Račun {row['invoice_no']} je označen kot plačan na TRR."
+                     if method.get() == "BANK_TRANSFER"
+                     else f"Račun {row['invoice_no']} je plačan in poslan v davčno "
+                          f"potrditev.\nEOR: {eor or 'čaka na potrditev'}"),
                     parent=self.win,
                 )
             except Exception as exc:
@@ -3245,7 +3264,116 @@ class PosWindow:
         footer = ttk.Frame(dialog)
         footer.pack(fill="x", padx=14, pady=(5, 14))
         ttk.Button(footer, text="PREKLIČI", command=dialog.destroy).pack(side="left")
-        ttk.Button(footer, text="POTRDI PLAČILO IN POŠLJI FURS", command=confirm).pack(side="right")
+        ttk.Button(footer, text="POTRDI PLAČILO", command=confirm).pack(side="right")
+
+    def _manage_central_unpaid_bank_invoices(self):
+        try:
+            rows = self.central_cashier.invoices(payment_status="UNPAID", limit=500)
+            rows = [
+                row for row in rows
+                if len(row.get("snapshot", {}).get("payments", [])) == 1
+                and str(row["snapshot"]["payments"][0].get("method") or "").upper()
+                == "BANK_TRANSFER"
+                and not bool(row["snapshot"]["payments"][0].get("confirmed"))
+            ]
+        except Exception as exc:
+            messagebox.showerror("Neplačani TRR", str(exc), parent=self.win)
+            return
+        if not rows:
+            messagebox.showinfo(
+                "Neplačani TRR", "Ni centralnih TRR računov, ki čakajo na plačilo.",
+                parent=self.win,
+            )
+            return
+        dialog = tk.Toplevel(self.win)
+        dialog.title("Potrditev plačila neplačanega TRR računa")
+        dialog.geometry("820x460")
+        dialog.transient(self.win)
+        dialog.grab_set()
+        ttk.Label(
+            dialog,
+            text=(
+                "Izberi isti izdani račun in potrdi, kako je bilo celotno plačilo "
+                "dejansko prejeto. Prejem na TRR ne sproži FURS; gotovina ali "
+                "kartica sprožita naknadno davčno potrditev."
+            ), wraplength=770,
+        ).pack(fill="x", padx=14, pady=(14, 8))
+        tree = ttk.Treeview(
+            dialog, columns=("invoice", "date", "customer", "amount"),
+            show="headings", selectmode="browse", height=11,
+        )
+        for key, title, width in (
+            ("invoice", "Račun", 170), ("date", "Datum", 170),
+            ("customer", "Kupec", 300), ("amount", "Znesek", 120),
+        ):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, anchor="e" if key == "amount" else "w")
+        row_map = {}
+        for row in rows:
+            customer = row.get("snapshot", {}).get("billing_customer", {})
+            iid = tree.insert("", "end", values=(
+                row["invoice_number"], str(row["issued_at"]).replace("T", " ")[:19],
+                customer.get("name") or "Končni kupec",
+                f"{dec(row['total_amount']):.2f} EUR",
+            ))
+            row_map[iid] = row
+        tree.pack(fill="both", expand=True, padx=14, pady=8)
+        tree.selection_set(tree.get_children()[0])
+        method = tk.StringVar(value="BANK_TRANSFER")
+        methods = ttk.Frame(dialog)
+        methods.pack(fill="x", padx=14, pady=6)
+        ttk.Label(methods, text="Dejansko prejeto:").pack(side="left")
+        ttk.Radiobutton(
+            methods, text="Nakazilo na TRR", variable=method, value="BANK_TRANSFER"
+        ).pack(side="left", padx=10)
+        if "CASH" in self.enabled_payment_methods:
+            ttk.Radiobutton(
+                methods, text="Gotovina", variable=method, value="CASH"
+            ).pack(side="left", padx=10)
+        if "CARD" in self.enabled_payment_methods:
+            ttk.Radiobutton(
+                methods, text="Kartica", variable=method, value="CARD"
+            ).pack(side="left", padx=10)
+
+        def confirm():
+            selected = tree.selection()
+            if not selected:
+                return
+            row = row_map[selected[0]]
+            label = {
+                "BANK_TRANSFER": "nakazilo na TRR", "CASH": "gotovino",
+                "CARD": "kartico",
+            }[method.get()]
+            if not messagebox.askyesno(
+                "Potrdi dejansko plačilo",
+                f"Potrjuješ, da je isti račun {row['invoice_number']} v znesku "
+                f"{dec(row['total_amount']):.2f} EUR v celoti plačan z {label}?",
+                parent=dialog,
+            ):
+                return
+            try:
+                result = self.central_cashier.settle_unpaid_bank_invoice(
+                    invoice_id=str(row["invoice_id"]), method=method.get()
+                )
+            except Exception as exc:
+                messagebox.showerror("Plačilo ni potrjeno", str(exc), parent=dialog)
+                return
+            dialog.destroy()
+            fiscal_note = (
+                " FURS ni potreben." if method.get() == "BANK_TRANSFER"
+                else " Naknadna davčna potrditev je uvrščena v varno vrsto."
+            )
+            messagebox.showinfo(
+                "Plačilo potrjeno",
+                f"Račun {result.invoice['invoice_number']} je označen kot plačan."
+                + fiscal_note,
+                parent=self.win,
+            )
+
+        footer = ttk.Frame(dialog)
+        footer.pack(fill="x", padx=14, pady=(5, 14))
+        ttk.Button(footer, text="PREKLIČI", command=dialog.destroy).pack(side="left")
+        ttk.Button(footer, text="POTRDI PLAČILO", command=confirm).pack(side="right")
 
     def manage_pending_furs(self):
         try:

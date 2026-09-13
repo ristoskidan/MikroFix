@@ -188,3 +188,21 @@ class CentralCashierWorkflowTests(unittest.TestCase):
             [row["operation_type"] for row in transport.submissions],
             ["OpenCashSession", "RecordManualCashEntry", "CloseCashSession"],
         )
+
+    def test_late_bank_payment_uses_same_durable_invoice_identity(self):
+        transport = FakeCashierTransport()
+        workflow = self.workflow(transport)
+        invoice_id = str(uuid4())
+
+        result = workflow.settle_unpaid_bank_invoice(
+            invoice_id=invoice_id, method="BANK_TRANSFER"
+        )
+
+        operation = transport.submissions[0]
+        self.assertEqual(operation["operation_type"], "SettleUnpaidBankInvoice")
+        self.assertEqual(operation["aggregate_id"], invoice_id)
+        self.assertEqual(operation["payload"], {
+            "invoice_id": invoice_id, "expected_version": 1,
+            "method": "BANK_TRANSFER",
+        })
+        self.assertEqual(result.invoice["invoice_number"], "MFD-PIS-1")

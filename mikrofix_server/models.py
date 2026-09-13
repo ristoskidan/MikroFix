@@ -629,6 +629,13 @@ invoices = Table(
     Column("status", String(40), nullable=False),
     Column("payment_status", String(20), nullable=False),
     Column("payments_json", JSONB, nullable=False),
+    Column(
+        "settlement_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), unique=True,
+    ),
+    Column("payment_received_at", DateTime(timezone=True)),
+    Column("payment_received_method", String(20)),
+    Column("fiscal_submission_deadline", Date),
     Column("total_amount", Numeric(18, 2), nullable=False),
     Column("currency", String(3), nullable=False, server_default="EUR"),
     Column("tax_mode", String(20), nullable=False),
@@ -650,6 +657,11 @@ invoices = Table(
         name="invoice_status",
     ),
     CheckConstraint("payment_status IN ('UNPAID','PAID')", name="invoice_payment_status"),
+    CheckConstraint(
+        "payment_received_method IS NULL OR payment_received_method IN "
+        "('BANK_TRANSFER','CASH','CARD')",
+        name="invoice_received_method",
+    ),
     CheckConstraint("total_amount >= 0", name="invoice_total_nonnegative"),
     CheckConstraint("currency = 'EUR'", name="invoice_currency_eur"),
     CheckConstraint(

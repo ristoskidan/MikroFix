@@ -363,6 +363,7 @@ def create_app(
             "OpenCashSession": ("MODULE_CASHIER", "CASHIER"),
             "CloseCashSession": ("MODULE_CASHIER", "CASHIER"),
             "RecordManualCashEntry": ("MODULE_CASHIER", "CASHIER"),
+            "SettleUnpaidBankInvoice": ("MODULE_CASHIER", "CASHIER"),
             "ConfirmPurchaseReceipt": ("MODULE_OFFICE", "OFFICE"),
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
         }
@@ -391,12 +392,18 @@ def create_app(
                 raw["actor_authorization_version"] = identity.user_version
                 raw["workstation_signature"] = ""
                 if (
-                    request.operation_type in {
-                        "IssueServiceInvoice", "IssueDirectSaleInvoice"
-                    }
-                    and any(
-                        str(payment.get("method") or "").upper() in {"CASH", "CARD"}
-                        for payment in request.payload.get("payments", [])
+                    (
+                        request.operation_type in {
+                            "IssueServiceInvoice", "IssueDirectSaleInvoice",
+                        }
+                        and any(
+                            str(payment.get("method") or "").upper()
+                            in {"CASH", "CARD"}
+                            for payment in request.payload.get("payments", [])
+                        )
+                        or request.operation_type == "SettleUnpaidBankInvoice"
+                        and str(request.payload.get("method") or "").upper()
+                        in {"CASH", "CARD"}
                     )
                     and not identity.operator_tax_number
                 ):
@@ -668,6 +675,9 @@ def create_app(
             "cash_session_id": row.cash_session_uuid,
             "status": row.status,
             "payment_status": row.payment_status,
+            "payment_received_at": row.payment_received_at,
+            "payment_received_method": row.payment_received_method,
+            "fiscal_submission_deadline": row.fiscal_submission_deadline,
             "total_amount": format(row.total_amount, ".2f"),
             "currency": row.currency,
             "furs_zoi": row.furs_zoi,
@@ -684,6 +694,7 @@ def create_app(
     def list_cashier_invoices(
         q: str = Query(default="", max_length=130),
         invoice_status: str | None = Query(default=None),
+        payment_status: str | None = Query(default=None),
         limit: int = Query(default=100, ge=1, le=500),
     ) -> dict:
         """List central invoices for history and interrupted-issue recovery."""
@@ -695,6 +706,11 @@ def create_app(
             }:
                 raise HTTPException(status_code=422, detail="Unsupported invoice status.")
             statement = statement.where(invoices.c.status == cleaned_status)
+        cleaned_payment = str(payment_status or "").strip().upper()
+        if cleaned_payment:
+            if cleaned_payment not in {"UNPAID", "PAID"}:
+                raise HTTPException(status_code=422, detail="Unsupported payment status.")
+            statement = statement.where(invoices.c.payment_status == cleaned_payment)
         cleaned_query = str(q or "").strip()
         if cleaned_query:
             statement = statement.where(

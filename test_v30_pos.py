@@ -336,6 +336,41 @@ class V30PosTests(unittest.TestCase):
         self.assertEqual(repeated["status"], "ALREADY_PAID")
         self.assertEqual(len(requests), 1)
 
+    def test_late_bank_transfer_confirmation_never_enters_cash_or_furs(self):
+        document_id, _invoice_no, _total = issue_invoice(
+            office_db=self.office, inventory_db=self.inventory,
+            service_db=self.service, lines=[self.line()],
+            payments={"BANK_TRANSFER": 100}, customer={"name": "Testni kupec"},
+            operator_code="DR", labor_floor=22,
+            payment_reference="SI0012345678901234",
+            fiscalization_required=False, fiscalizer=None,
+            test_mode=False, **self.fiscal(),
+        )
+        result = settle_unpaid_bank_invoice(
+            office_db=self.office, document_id=document_id,
+            method="BANK_TRANSFER", operator_code="DR",
+            fiscalization_required=False, fiscalizer=None,
+            authenticated_username="daniel", test_mode=False,
+        )
+        self.assertEqual(result["status"], "PAID")
+        connection = sqlite3.connect(self.office)
+        try:
+            payment = connection.execute(
+                "SELECT method,status FROM pos_payments_v30 WHERE document_id=?",
+                (document_id,),
+            ).fetchall()
+            cash_count = connection.execute(
+                "SELECT COUNT(*) FROM cash_journal_entries_v30"
+            ).fetchone()[0]
+            furs_count = connection.execute(
+                "SELECT COUNT(*) FROM furs_outbox_v30"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(payment, [("BANK_TRANSFER", "PAID")])
+        self.assertEqual(cash_count, 0)
+        self.assertEqual(furs_count, 0)
+
     def test_pending_furs_request_retries_same_payload_and_unblocks_queue(self):
         zoi = "2" * 32
         message_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"

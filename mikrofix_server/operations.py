@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -24,6 +24,7 @@ from mikrofix_sync_contracts import (
     validated_issue_direct_sale_invoice_payload,
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
+    validated_settle_unpaid_bank_invoice_payload,
     validated_technical_completion_payload,
 )
 
@@ -553,6 +554,17 @@ def _open_cash_session(
         "session_id": str(session_uuid), "session_no": session_no,
         "status": "OPEN", "opening_cash": f"{Decimal(payload['opening_cash']):.2f}",
     }, sequence
+
+
+def _ten_working_day_deadline(value: date) -> date:
+    """Conservative deadline; public holidays may extend it, never shorten it."""
+    cursor = value
+    remaining = 10
+    while remaining:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            remaining -= 1
+    return cursor
 
 
 def _close_cash_session(
@@ -1309,6 +1321,143 @@ def _issue_direct_sale_invoice(
         "total_amount": format(total, ".2f"), "lines": public_lines,
         "inventory_updates": inventory_updates,
     }, central_sequence
+
+
+def _settle_unpaid_bank_invoice(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    invoice_uuid: UUID, operation_uuid: UUID, *,
+    operator_tax_number: str, actor_user_uuid: UUID | None,
+    workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "INVOICE":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE", "SettleUnpaidBankInvoice requires INVOICE."
+        )
+    try:
+        payload = validated_settle_unpaid_bank_invoice_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["invoice_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.invoice_id must equal aggregate_id."
+        )
+    if envelope.expected_version != 1:
+        return _reject("VERSION_CONFLICT", "An unpaid bank invoice requires version 1.")
+    invoice = connection.execute(
+        select(invoices).where(invoices.c.invoice_uuid == invoice_uuid).with_for_update()
+    ).one_or_none()
+    if invoice is None:
+        return _reject("INVOICE_NOT_FOUND", "The selected invoice does not exist.")
+    if invoice.status != "ISSUED" or invoice.payment_status != "UNPAID":
+        return _reject(
+            "INVOICE_NOT_UNPAID",
+            "Only an issued, unpaid bank-transfer invoice can receive late payment.",
+        )
+    original_payments = [dict(item) for item in (invoice.payments_json or [])]
+    if (
+        len(original_payments) != 1
+        or str(original_payments[0].get("method") or "").upper() != "BANK_TRANSFER"
+        or bool(original_payments[0].get("confirmed"))
+        or Decimal(str(original_payments[0].get("amount") or 0))
+        != Decimal(invoice.total_amount)
+    ):
+        return _reject(
+            "INVOICE_PAYMENT_SHAPE_INVALID",
+            "The invoice does not contain one exact unpaid bank-transfer payment.",
+        )
+
+    method = payload["method"]
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    if method == "BANK_TRANSFER":
+        connection.execute(
+            update(invoices).where(invoices.c.invoice_uuid == invoice_uuid).values(
+                payment_status="PAID", settlement_operation_id=operation_uuid,
+                payment_received_at=now, payment_received_method=method,
+                updated_at=now,
+            )
+        )
+        central_sequence = _publish_change(
+            connection, event_type="LateBankTransferPaymentConfirmed",
+            aggregate_type="INVOICE", aggregate_uuid=invoice_uuid,
+            aggregate_version=2,
+            payload={
+                "invoice_id": str(invoice_uuid),
+                "invoice_number": invoice.invoice_number,
+                "invoice_status": "ISSUED", "payment_status": "PAID",
+                "payment_received_method": method,
+                "payment_received_at": now.isoformat(timespec="seconds"),
+            },
+            occurred_at=now.isoformat(timespec="seconds"),
+        )
+        return "ACCEPTED", {
+            "aggregate_version": 2, "central_sequence": central_sequence,
+            "invoice_id": str(invoice_uuid),
+            "invoice_number": invoice.invoice_number,
+            "invoice_status": "ISSUED", "payment_status": "PAID",
+            "payment_received_method": method,
+        }, central_sequence
+
+    cash_session = _open_cash_session_for_invoice(
+        connection, premise_id=invoice.premise_id,
+        electronic_device_id=invoice.electronic_device_id,
+        payments=[{"method": method, "amount": str(invoice.total_amount)}],
+    )
+    deadline = _ten_working_day_deadline(now.date())
+    fiscal_request = {
+        "message_id": str(uuid4()), "invoice_id": str(invoice_uuid),
+        "invoice_number": invoice.invoice_number,
+        "invoice_snapshot": dict(invoice.snapshot_json),
+        "subsequent_submit": True,
+        "payment_received_at": now.isoformat(timespec="seconds"),
+        "submission_deadline": deadline.isoformat(),
+    }
+    connection.execute(insert(fiscal_outbox).values(
+        message_uuid=UUID(fiscal_request["message_id"]),
+        invoice_uuid=invoice_uuid, status="PENDING",
+        request_sha256=payload_sha256(fiscal_request), request_json=fiscal_request,
+    ))
+    connection.execute(
+        update(invoices).where(invoices.c.invoice_uuid == invoice_uuid).values(
+            status="PENDING_FISCALIZATION", payment_status="PAID",
+            settlement_operation_id=operation_uuid, payment_received_at=now,
+            payment_received_method=method,
+            fiscal_submission_deadline=deadline,
+            cash_session_uuid=(cash_session.session_uuid if cash_session else None),
+            updated_at=now,
+        )
+    )
+    if cash_session is not None:
+        _record_central_cash_entry(
+            connection, session=cash_session, entry_uuid=uuid4(),
+            entry_type="CASH_SALE", amount=Decimal(invoice.total_amount),
+            reference_type="INVOICE_LATE_PAYMENT", reference_uuid=invoice_uuid,
+            reference_no=invoice.invoice_number,
+            description=f"Poznejše gotovinsko plačilo TRR računa {invoice.invoice_number}",
+            actor_id=envelope.actor_id, actor_user_uuid=actor_user_uuid,
+            workstation_uuid=workstation_uuid, occurred_at=now,
+        )
+    central_sequence = _publish_change(
+        connection, event_type="LateInvoicePaymentFiscalizationQueued",
+        aggregate_type="INVOICE", aggregate_uuid=invoice_uuid,
+        aggregate_version=2,
+        payload={
+            "invoice_id": str(invoice_uuid), "invoice_number": invoice.invoice_number,
+            "invoice_status": "PENDING_FISCALIZATION", "payment_status": "PAID",
+            "payment_received_method": method,
+            "payment_received_at": now.isoformat(timespec="seconds"),
+            "fiscal_submission_deadline": deadline.isoformat(),
+            "cash_session_id": str(cash_session.session_uuid) if cash_session else "",
+        },
+        occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 2, "central_sequence": central_sequence,
+        "invoice_id": str(invoice_uuid), "invoice_number": invoice.invoice_number,
+        "invoice_status": "PENDING_FISCALIZATION", "payment_status": "PAID",
+        "payment_received_method": method,
+        "fiscal_submission_deadline": deadline.isoformat(),
+    }, central_sequence
+
 
 _CENT = Decimal("0.01")
 _FOUR = Decimal("0.0001")
@@ -2276,6 +2425,13 @@ def process_operation(
     elif envelope.operation_type == "RecordManualCashEntry":
         result_code, response, central_sequence = _record_manual_cash_entry(
             connection, envelope, aggregate_uuid,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "SettleUnpaidBankInvoice":
+        result_code, response, central_sequence = _settle_unpaid_bank_invoice(
+            connection, envelope, aggregate_uuid, operation_uuid,
+            operator_tax_number=operator_tax_number,
             actor_user_uuid=transmitted_by_user_uuid,
             workstation_uuid=transmitted_by_workstation_uuid,
         )

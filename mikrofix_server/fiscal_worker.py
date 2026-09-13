@@ -29,9 +29,9 @@ class FiscalProvider(Protocol):
     def submit_prepared(self, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
-def _provider_input(invoice) -> dict[str, Any]:
+def _provider_input(invoice, outbox) -> dict[str, Any]:
     customer = dict(invoice.billing_customer_json or {})
-    return {
+    result = {
         "issue_datetime": invoice.issued_at,
         "sequence": invoice.fiscal_sequence,
         "premise_id": invoice.premise_id,
@@ -42,6 +42,9 @@ def _provider_input(invoice) -> dict[str, Any]:
         "customer_vat_number": str(customer.get("tax_number") or ""),
         "numbering_structure": "B",
     }
+    if bool(dict(outbox.request_json or {}).get("subsequent_submit")):
+        result["subsequent_submit"] = True
+    return result
 
 
 def process_fiscal_invoice(
@@ -70,7 +73,7 @@ def process_fiscal_invoice(
         prepared = dict(outbox.prepared_request_json or {})
         if not prepared:
             prepared = provider.prepare_request(
-                _provider_input(invoice), message_id=str(outbox.message_uuid)
+                _provider_input(invoice, outbox), message_id=str(outbox.message_uuid)
             )
             prepare_fiscal_submission(
                 connection, invoice_uuid, prepared_request=prepared

@@ -244,6 +244,21 @@ class CentralApiIntegrationTests(unittest.TestCase):
             "contract_version": 1,
         }
 
+    def settle_bank_invoice_operation(self, invoice_id, *, sequence, method):
+        return {
+            "operation_id": str(uuid4()),
+            "operation_type": "SettleUnpaidBankInvoice",
+            "aggregate_type": "INVOICE", "aggregate_id": str(invoice_id),
+            "expected_version": 1, "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-13T12:00:00+02:00",
+            "payload": {
+                "invoice_id": str(invoice_id), "expected_version": 1,
+                "method": method,
+            },
+            "contract_version": 1,
+        }
+
     def direct_sale_operation(
         self, sale_id, *, sequence, barcode="SUP-BARCODE-1", quantity="1",
         discount="0", amount="15.00", method="BANK_TRANSFER", confirmed=False,
@@ -1173,6 +1188,115 @@ class CentralApiIntegrationTests(unittest.TestCase):
             self.assertEqual(connection.execute(select(
                 invoice_drafts.c.status
             )).scalar_one(), "READY")
+
+    def test_late_trr_confirmation_marks_same_invoice_paid_without_cash_or_furs(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import cash_journal_entries, fiscal_outbox, invoices
+
+        _, draft_id = self.prepared_draft(sequence=270, barcode="LATE-TRR")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(draft_id, sequence=271),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        settlement = self.settle_bank_invoice_operation(
+            invoice_id, sequence=272, method="BANK_TRANSFER"
+        )
+        first = self.client.post(
+            "/v1/sync/operations", json=settlement, headers=self.headers
+        ).json()
+        repeated = self.client.post(
+            "/v1/sync/operations", json=settlement, headers=self.headers
+        ).json()
+        self.assertEqual(first, repeated)
+        self.assertEqual(first["result"]["invoice_id"], invoice_id)
+        self.assertEqual(first["result"]["invoice_status"], "ISSUED")
+        self.assertEqual(first["result"]["payment_received_method"], "BANK_TRANSFER")
+        with self.engine.connect() as connection:
+            invoice = connection.execute(select(invoices)).one()
+            self.assertEqual(invoice.payment_status, "PAID")
+            self.assertEqual(invoice.payment_received_method, "BANK_TRANSFER")
+            self.assertIsNotNone(invoice.payment_received_at)
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(cash_journal_entries)
+            ).scalar_one(), 0)
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(fiscal_outbox)
+            ).scalar_one(), 0)
+
+    def test_late_cash_payment_books_once_and_queues_subsequent_furs(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.fiscal_worker import process_fiscal_invoice
+        from mikrofix_server.models import cash_journal_entries, fiscal_outbox, invoices
+
+        class ConfirmingProvider:
+            def __init__(self):
+                self.requests = []
+                self.submissions = 0
+
+            def prepare_request(self, request, *, message_id):
+                self.requests.append(dict(request))
+                return {"InvoiceRequest": {
+                    "Header": {"MessageID": message_id},
+                    "Invoice": {"ProtectedID": "c" * 32},
+                }}
+
+            def submit_prepared(self, _payload):
+                self.submissions += 1
+                return {
+                    "status": "CONFIRMED", "zoi": "c" * 32,
+                    "eor": "EOR-LATE-CASH-1", "response": {"ok": True},
+                }
+
+        _, draft_id = self.prepared_draft(sequence=273, barcode="LATE-CASH")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(draft_id, sequence=274),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        opened = self.client.post(
+            "/v1/sync/operations", json=self.open_cash_operation(sequence=275),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(opened["result_code"], "ACCEPTED")
+        settled = self.client.post(
+            "/v1/sync/operations",
+            json=self.settle_bank_invoice_operation(
+                invoice_id, sequence=276, method="CASH"
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(settled["result_code"], "ACCEPTED", settled)
+        self.assertEqual(settled["result"]["invoice_status"], "PENDING_FISCALIZATION")
+        second = self.client.post(
+            "/v1/sync/operations",
+            json=self.settle_bank_invoice_operation(
+                invoice_id, sequence=277, method="CASH"
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(second["result_code"], "REJECTED")
+        self.assertEqual(second["error_code"], "INVOICE_NOT_UNPAID")
+
+        provider = ConfirmingProvider()
+        confirmed = process_fiscal_invoice(self.engine, invoice_id, provider)
+        repeated = process_fiscal_invoice(self.engine, invoice_id, provider)
+        self.assertEqual(confirmed, repeated)
+        self.assertTrue(provider.requests[0]["subsequent_submit"])
+        self.assertEqual(provider.submissions, 1)
+        with self.engine.connect() as connection:
+            invoice = connection.execute(select(invoices)).one()
+            entry = connection.execute(select(cash_journal_entries)).one()
+            outbox = connection.execute(select(fiscal_outbox)).one()
+            self.assertEqual(invoice.furs_eor, "EOR-LATE-CASH-1")
+            self.assertEqual(invoice.payment_received_method, "CASH")
+            self.assertIsNotNone(invoice.fiscal_submission_deadline)
+            self.assertEqual(entry.reference_type, "INVOICE_LATE_PAYMENT")
+            self.assertEqual(str(entry.amount), "55.00")
+            self.assertEqual(outbox.status, "CONFIRMED")
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(cash_journal_entries)
+            ).scalar_one(), 1)
 
     def test_central_cash_session_manual_entries_and_close_are_idempotent(self):
         session_id = str(uuid4())

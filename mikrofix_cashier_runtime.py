@@ -78,10 +78,12 @@ class CentralCashierWorkflow:
 
     def invoices(
         self, query: str = "", *, invoice_status: str | None = None,
+        payment_status: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         return self.transport.list_invoices(
-            query, invoice_status=invoice_status, limit=limit
+            query, invoice_status=invoice_status,
+            payment_status=payment_status, limit=limit
         )
 
     def current_cash_session(
@@ -195,6 +197,16 @@ class CentralCashierWorkflow:
             "reference_no": reference_no, "description": description,
         }, operation_id=operation_id)
         return self._dispatch_command(identity)
+
+    def settle_unpaid_bank_invoice(
+        self, *, invoice_id: str, method: str,
+        operation_id: str | None = None,
+    ) -> CentralInvoiceResult:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_settle_unpaid_bank_invoice({
+            "invoice_id": invoice_id, "expected_version": 1, "method": method,
+        }, operation_id=operation_id)
+        return self._dispatch_invoice(identity)
 
     def unresolved_commands(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return list_dispatchable_operations(

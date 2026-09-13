@@ -21,6 +21,7 @@ from mikrofix_sync_contracts import (
     validated_issue_direct_sale_invoice_payload,
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
+    validated_settle_unpaid_bank_invoice_payload,
 )
 from mikrofix_sync_store import (
     acknowledge_operation,
@@ -86,11 +87,14 @@ class RequestsCashierTransport(RequestsSyncTransport):
 
     def list_invoices(
         self, query: str = "", *, invoice_status: str | None = None,
+        payment_status: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"q": query, "limit": limit}
         if invoice_status:
             params["invoice_status"] = invoice_status
+        if payment_status:
+            params["payment_status"] = payment_status
         response = self._get("/v1/cashier/invoices", **params)
         rows = response.get("invoices")
         if not isinstance(rows, list):
@@ -221,6 +225,17 @@ class CashierCommandJournal:
         return self._prepare(
             operation_type="RecordManualCashEntry", aggregate_type="CASH_ENTRY",
             aggregate_id=normalized["entry_id"], expected_version=0,
+            payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_settle_unpaid_bank_invoice(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_settle_unpaid_bank_invoice_payload(payload)
+        return self._prepare(
+            operation_type="SettleUnpaidBankInvoice", aggregate_type="INVOICE",
+            aggregate_id=normalized["invoice_id"],
+            expected_version=normalized["expected_version"],
             payload=normalized, operation_id=operation_id,
         )
 

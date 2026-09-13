@@ -12,6 +12,7 @@ from mikrofix_sync_contracts import (
     CloseCashSessionContract,
     ManualCashEntryContract,
     OpenCashSessionContract,
+    SettleUnpaidBankInvoiceContract,
     PaymentContract,
     ServicePartContract,
     ServiceTestContract,
@@ -410,6 +411,18 @@ class SyncContractTests(unittest.TestCase):
                 entry_id=str(uuid4()), session_id=session_id,
                 direction="RECEIPT", amount="0", reference_no="BP-1",
                 description="Nič",
+            )
+
+    def test_late_bank_invoice_settlement_has_only_identity_and_actual_method(self):
+        invoice_id = str(uuid4())
+        for method in ("BANK_TRANSFER", "CASH", "CARD"):
+            contract = SettleUnpaidBankInvoiceContract(
+                invoice_id=invoice_id, expected_version=1, method=method.lower()
+            )
+            self.assertEqual(contract.method, method)
+        with self.assertRaisesRegex(ContractError, "must be BANK_TRANSFER"):
+            SettleUnpaidBankInvoiceContract(
+                invoice_id=invoice_id, expected_version=1, method="CHEQUE"
             )
 
 

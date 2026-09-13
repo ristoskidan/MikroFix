@@ -1086,6 +1086,52 @@ def validated_manual_cash_entry_payload(value: Mapping[str, Any]) -> dict[str, A
 
 
 @dataclass(frozen=True, slots=True)
+class SettleUnpaidBankInvoiceContract:
+    invoice_id: str
+    expected_version: int
+    method: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "invoice_id", normalized_uuid(self.invoice_id, field="invoice_id")
+        )
+        if int(self.expected_version) != 1:
+            raise ContractError("an unpaid bank invoice requires expected_version 1.")
+        object.__setattr__(self, "expected_version", 1)
+        method = str(self.method or "").strip().upper()
+        if method not in {
+            PaymentMethod.BANK_TRANSFER.value,
+            PaymentMethod.CASH.value,
+            PaymentMethod.CARD.value,
+        }:
+            raise ContractError(
+                "late bank-invoice payment must be BANK_TRANSFER, CASH or CARD."
+            )
+        object.__setattr__(self, "method", method)
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_settle_unpaid_bank_invoice_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = dict(value)
+    unexpected = sorted(set(raw) - {"invoice_id", "expected_version", "method"})
+    if unexpected:
+        raise ContractError(
+            "late bank-invoice payment contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    try:
+        return SettleUnpaidBankInvoiceContract(**raw).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("late bank-invoice payment payload is invalid.") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class SyncOperationEnvelope:
     operation_id: str
     operation_type: str

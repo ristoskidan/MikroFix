@@ -111,6 +111,17 @@ class CashierCommandJournalTests(unittest.TestCase):
                 changed, operation_id=operation_id
             )
 
+    def test_late_bank_payment_is_prepared_before_dispatch(self):
+        invoice_id = str(uuid4())
+        operation_id = self.journal.prepare_settle_unpaid_bank_invoice({
+            "invoice_id": invoice_id, "expected_version": 1,
+            "method": "BANK_TRANSFER",
+        })
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "SettleUnpaidBankInvoice")
+        self.assertEqual(row["aggregate_type"], "INVOICE")
+        self.assertEqual(row["aggregate_uuid"], invoice_id)
+
     def test_direct_sale_is_durably_prepared_before_dispatch(self):
         sale_id = str(uuid4())
         operation_id = self.journal.prepare_issue_direct_sale_invoice(

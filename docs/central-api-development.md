@@ -6,12 +6,19 @@ To je prvi, namenoma ozek sinhronizacijski rez. Sprejema `CreateServiceOrder`,
 in testni bazi imata centralni model uporabnikov, dovoljenj, registriranih
 delovnih postaj, sej in revizijske sledi; produkcijski preklop ni izveden.
 
-Centralna Blagajna podpira tudi `OpenCashSession`, `RecordManualCashEntry` in
-`CloseCashSession`. Za posamezen poslovni prostor in elektronsko napravo je
+Centralna Blagajna podpira tudi `OpenCashSession`, `RecordManualCashEntry`,
+`CloseCashSession` in `SettleUnpaidBankInvoice`. Za posamezen poslovni prostor in elektronsko napravo je
 dovoljena samo ena odprta seja. Gotovinska izdaja računa in pripadajoča knjižba
 sta ena transakcija; kartično ali TRR plačilo fizičnega blagajniškega salda ne
 spreminja. Zaporedje knjižb, tekoči saldo in končni PDF se vedno sestavijo iz
 avtoritativnega centralnega posnetka.
+
+Neplačan račun, prvotno izdan za TRR, se pozneje potrdi na istem računu. Dejansko
+nakazilo na TRR samo označi plačilo in ne ustvari FURS ali gotovinske knjižbe.
+Poznejša gotovina oziroma kartica isti račun prestavi v naknadno davčno
+potrditev; gotovina se hkrati natanko enkrat vpiše v odprto blagajno. Strežnik
+shrani čas prejema in varni rok desetih delovnih dni, prvotni posnetek postavk in
+zneskov pa ostane nespremenjen.
 
 ## Enkratna priprava
 
@@ -52,7 +59,7 @@ natanko enkrat, servisna poraba pa se FIFO poveže s konkretnim LOT-om.
 Integracijski paket preverja še sočasno odpiranje iste blagajne, sočasno
 knjiženje dveh dogodkov, nespremenljivo zaporedje salda, idempotentno ponovitev
 odprtja, ročne knjižbe in zaprtja ter zavrnitev gotovinskega računa brez odprte
-seje. Trenutna migracijska glava je `20260913_17`.
+seje. Trenutna migracijska glava je `20260913_18`.
 
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do

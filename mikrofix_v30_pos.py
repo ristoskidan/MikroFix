@@ -2285,9 +2285,13 @@ def settle_unpaid_bank_invoice(
     """Evidentira poznejše gotovinsko/kartično plačilo istega TRR računa."""
     actor = _actor_username(authenticated_username)
     method = str(method or "").upper()
-    if method not in {"CASH", "CARD"}:
-        raise PosError("Poznejše plačilo TRR računa je lahko gotovina ali kartica.")
-    if fiscalization_required and fiscalizer is None:
+    if method not in {"BANK_TRANSFER", "CASH", "CARD"}:
+        raise PosError(
+            "Poznejše plačilo TRR računa je lahko TRR, gotovina ali kartica."
+        )
+    if method == "BANK_TRANSFER" and fiscalization_required:
+        raise PosError("Prejem neposredno na TRR ne sme sprožiti davčnega potrjevanja.")
+    if method in {"CASH", "CARD"} and fiscalization_required and fiscalizer is None:
         raise PosError("Naknadna davčna potrditev je obvezna, FURS povezava pa ni pripravljena.")
     ensure_pos_schema(office_db)
     paid_at = datetime.now()
@@ -2398,17 +2402,28 @@ def settle_unpaid_bank_invoice(
                 ),
             )
         else:
-            fiscal_status = "TEST_DISABLED" if test_mode else "NOT_REQUIRED"
+            fiscal_status = (
+                str(doc["fiscal_status"] or "NOT_REQUIRED")
+                if method == "BANK_TRANSFER"
+                else "TEST_DISABLED" if test_mode else "NOT_REQUIRED"
+            )
 
-        c.execute(
-            "UPDATE pos_payments_v30 SET status='REPLACED_UNPAID',reversed_at=? WHERE id=?",
-            (now, int(bank[0]["id"])),
-        )
-        c.execute(
-            "INSERT INTO pos_payments_v30(document_id,method,amount,status,created_at) "
-            "VALUES(?,?,?,'PAID',?)",
-            (int(document_id), method, float(total), now),
-        )
+        if method == "BANK_TRANSFER":
+            c.execute(
+                "UPDATE pos_payments_v30 SET status='PAID' WHERE id=?",
+                (int(bank[0]["id"]),),
+            )
+        else:
+            c.execute(
+                "UPDATE pos_payments_v30 SET status='REPLACED_UNPAID',reversed_at=? "
+                "WHERE id=?",
+                (now, int(bank[0]["id"])),
+            )
+            c.execute(
+                "INSERT INTO pos_payments_v30(document_id,method,amount,status,created_at) "
+                "VALUES(?,?,?,'PAID',?)",
+                (int(document_id), method, float(total), now),
+            )
         c.execute(
             """
             UPDATE documents SET payment_method=?,payment_status='PAID',
