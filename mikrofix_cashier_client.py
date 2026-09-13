@@ -74,6 +74,42 @@ class RequestsCashierTransport(RequestsSyncTransport):
             raise SyncTransportError("Central API returned an invalid inventory list.")
         return inventory
 
+    def get_invoice(self, invoice_id: str) -> dict[str, Any]:
+        response = self._get(f"/v1/cashier/invoices/{invoice_id}")
+        snapshot = response.get("snapshot")
+        if not isinstance(snapshot, dict) or not response.get("invoice_number"):
+            raise SyncTransportError("Central API returned an invalid invoice.")
+        return response
+
+    def list_invoices(
+        self, query: str = "", *, invoice_status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if invoice_status:
+            params["invoice_status"] = invoice_status
+        response = self._get("/v1/cashier/invoices", **params)
+        rows = response.get("invoices")
+        if not isinstance(rows, list):
+            raise SyncTransportError("Central API returned an invalid invoice list.")
+        return rows
+
+    def quote_direct_sale(self, lines: list[dict[str, Any]]) -> dict[str, Any]:
+        import requests
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/cashier/direct-sale-quote",
+                json={"lines": lines}, headers=self.headers,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise SyncTransportError(str(exc)) from exc
+        quote = self._json_response(response)
+        if not isinstance(quote.get("lines"), list) or not quote.get("total_amount"):
+            raise SyncTransportError("Central API returned an invalid direct-sale quote.")
+        return quote
+
     def suggest_partner_from_ajpes(self, tax_number: str) -> dict[str, Any]:
         response = self._get(f"/v1/cashier/partners/ajpes/{tax_number}")
         suggestion = response.get("suggestion")

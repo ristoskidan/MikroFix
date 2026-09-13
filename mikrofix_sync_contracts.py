@@ -781,20 +781,33 @@ class DirectSaleLineContract:
     line_id: str
     barcode: str
     quantity: str
+    line_kind: str = "ARTICLE"
     requested_discount_percent: str = "0"
     lot_serial: str = ""
+    service_tier: str = ""
+    elapsed_minutes: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "line_id", normalized_uuid(self.line_id, field="line.line_id")
         )
+        line_kind = str(self.line_kind or "").strip().upper()
+        if line_kind not in {"ARTICLE", "SERVICE"}:
+            raise ContractError("line.line_kind must be ARTICLE or SERVICE.")
+        object.__setattr__(self, "line_kind", line_kind)
         barcode = str(self.barcode or "").strip()
-        if not barcode or len(barcode) > 200:
-            raise ContractError("line.barcode is required and must be at most 200 characters.")
+        if len(barcode) > 200 or (line_kind == "ARTICLE" and not barcode):
+            raise ContractError(
+                "line.barcode is required for ARTICLE and must be at most 200 characters."
+            )
+        if line_kind == "SERVICE" and barcode:
+            raise ContractError("a SERVICE line cannot select an inventory barcode.")
         object.__setattr__(self, "barcode", barcode)
         quantity = Decimal(decimal_text(self.quantity, field="line.quantity"))
         if quantity <= 0 or quantity != quantity.to_integral_value() or quantity > 10000:
             raise ContractError("line.quantity must be a whole number from 1 to 10000.")
+        if line_kind == "SERVICE" and quantity != 1:
+            raise ContractError("a SERVICE line has quantity 1; elapsed_minutes carries time.")
         object.__setattr__(self, "quantity", format(quantity, "f"))
         discount = Decimal(decimal_text(
             self.requested_discount_percent,
@@ -809,7 +822,20 @@ class DirectSaleLineContract:
         lot_serial = str(self.lot_serial or "").strip()
         if len(lot_serial) > 300:
             raise ContractError("line.lot_serial must be at most 300 characters.")
+        if line_kind == "SERVICE" and lot_serial:
+            raise ContractError("a SERVICE line cannot select an inventory LOT.")
         object.__setattr__(self, "lot_serial", lot_serial)
+        tier = str(self.service_tier or "").strip().upper()
+        elapsed = int(self.elapsed_minutes or 0)
+        if line_kind == "SERVICE":
+            if tier not in {"T1", "T2"}:
+                raise ContractError("a SERVICE line requires service_tier T1 or T2.")
+            if elapsed < 1 or elapsed > 1440:
+                raise ContractError("service elapsed_minutes must be from 1 to 1440.")
+        elif tier or elapsed:
+            raise ContractError("an ARTICLE line cannot contain Service tariff fields.")
+        object.__setattr__(self, "service_tier", tier)
+        object.__setattr__(self, "elapsed_minutes", elapsed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -842,7 +868,10 @@ class IssueDirectSaleInvoiceContract:
             raise ContractError("lines requires at least one direct-sale line.")
         if len({line.line_id for line in self.lines}) != len(self.lines):
             raise ContractError("direct-sale line_id values must be unique.")
-        if len({line.barcode for line in self.lines}) != len(self.lines):
+        article_barcodes = [
+            line.barcode for line in self.lines if line.line_kind == "ARTICLE"
+        ]
+        if len(set(article_barcodes)) != len(article_barcodes):
             raise ContractError("a barcode may appear only once; use line.quantity.")
         if not self.payments:
             raise ContractError("payments requires at least one payment.")
@@ -897,6 +926,37 @@ def validated_issue_direct_sale_invoice_payload(
         if isinstance(exc, ContractError):
             raise
         raise ContractError("direct-sale issuance payload is invalid.") from exc
+
+
+def validated_direct_sale_quote_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate quoteable lines without accepting client-owned prices."""
+    raw = dict(value)
+    unexpected = sorted(set(raw) - {"lines"})
+    if unexpected:
+        raise ContractError(
+            "direct-sale quote contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    try:
+        lines = tuple(
+            item if isinstance(item, DirectSaleLineContract)
+            else DirectSaleLineContract(**dict(item))
+            for item in raw.get("lines", ())
+        )
+        if not lines:
+            raise ContractError("lines requires at least one direct-sale line.")
+        if len({line.line_id for line in lines}) != len(lines):
+            raise ContractError("direct-sale line_id values must be unique.")
+        article_barcodes = [
+            line.barcode for line in lines if line.line_kind == "ARTICLE"
+        ]
+        if len(set(article_barcodes)) != len(article_barcodes):
+            raise ContractError("a barcode may appear only once; use line.quantity.")
+        return {"lines": [asdict(line) for line in lines]}
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("direct-sale quote payload is invalid.") from exc
 
 
 @dataclass(frozen=True, slots=True)

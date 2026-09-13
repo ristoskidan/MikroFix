@@ -11,6 +11,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import asdict
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -1022,6 +1023,23 @@ class CentralApiIntegrationTests(unittest.TestCase):
             )).one()
             self.assertEqual(service.row_version, 3)
             self.assertEqual(service.payload_json["technical_status"], "BILLING_COMPLETED")
+        invoice_id = first.json()["result"]["invoice_id"]
+        recovered = self.client.get(
+            f"/v1/cashier/invoices/{invoice_id}", headers=self.headers
+        ).json()
+        self.assertEqual(recovered["snapshot"]["source_type"], "SERVICE")
+        self.assertEqual(len(recovered["snapshot"]["lines"]), 2)
+        self.assertEqual(
+            sum(Decimal(line["line_total"]) for line in recovered["snapshot"]["lines"]),
+            Decimal("55.00"),
+        )
+        history = self.client.get(
+            "/v1/cashier/invoices?q=PIS-1&invoice_status=ISSUED",
+            headers=self.headers,
+        )
+        self.assertEqual(history.status_code, 200, history.text)
+        self.assertEqual(len(history.json()["invoices"]), 1)
+        self.assertEqual(history.json()["invoices"][0]["invoice_id"], invoice_id)
 
     def test_cash_invoice_is_queued_once_and_does_not_close_before_furs(self):
         from sqlalchemy import func, select
@@ -1118,6 +1136,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
         from mikrofix_server.fiscalization import (
             confirm_fiscal_submission,
             mark_fiscal_submission_uncertain,
+            prepare_fiscal_submission,
             start_fiscal_submission,
         )
         from mikrofix_server.models import fiscal_outbox, invoices, service_orders
@@ -1132,6 +1151,16 @@ class CentralApiIntegrationTests(unittest.TestCase):
         invoice_id = issued["result"]["invoice_id"]
 
         with self.engine.begin() as connection:
+            queued = connection.execute(select(fiscal_outbox)).one()
+            prepared_request = {
+                "InvoiceRequest": {
+                    "Header": {"MessageID": str(queued.message_uuid)},
+                    "Invoice": {"ProtectedID": "a" * 32},
+                }
+            }
+            prepare_fiscal_submission(
+                connection, invoice_id, prepared_request=prepared_request
+            )
             first_send = start_fiscal_submission(connection, invoice_id)
         with self.engine.begin() as connection:
             uncertain = mark_fiscal_submission_uncertain(
@@ -1526,6 +1555,19 @@ class CentralApiIntegrationTests(unittest.TestCase):
             sale_id, sequence=226, quantity="3", discount="100",
             amount="73.08",
         )
+        quote_response = self.client.post(
+            "/v1/cashier/direct-sale-quote",
+            json={"lines": issue["payload"]["lines"]}, headers=self.headers,
+        )
+        self.assertEqual(quote_response.status_code, 200, quote_response.text)
+        quote = quote_response.json()
+        self.assertEqual(quote["total_amount"], "73.08")
+        self.assertEqual(quote["lines"][0]["unit_price"], "24.36")
+        self.assertNotIn("requested_discount_percent", quote["lines"][0])
+        with self.engine.connect() as connection:
+            self.assertEqual(connection.execute(
+                select(func.count()).select_from(invoices)
+            ).scalar_one(), 0)
         accepted = self.client.post(
             "/v1/sync/operations", json=issue, headers=self.headers
         ).json()
@@ -1572,7 +1614,18 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(str(allocated), "3.0000")
         self.assertEqual(str(discount_audit.requested_discount_percent), "100.0000")
         self.assertEqual(str(discount_audit.applied_discount_percent), "51.2800")
-        self.assertEqual(discount_audit.decision, "CLAMPED_TO_COST_FLOOR")
+        self.assertEqual(discount_audit.decision, "CLAMPED_TO_MINIMUM")
+
+        invoice_response = self.client.get(
+            f"/v1/cashier/invoices/{invoice.invoice_uuid}", headers=self.headers
+        )
+        self.assertEqual(invoice_response.status_code, 200)
+        recovered = invoice_response.json()
+        self.assertEqual(recovered["invoice_number"], invoice.invoice_number)
+        self.assertEqual(recovered["source_type"], "DIRECT_SALE")
+        self.assertNotIn(
+            "requested_discount_percent", recovered["snapshot"]["lines"][0]
+        )
 
         inventory_response = self.client.get(
             "/v1/cashier/inventory", params={"q": "SUP-BARCODE-1"},
@@ -1581,6 +1634,8 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(inventory_response.status_code, 200)
         cashier_item = inventory_response.json()["inventory"][0]
         self.assertEqual(cashier_item["article_quantity_available"], "1.0000")
+        self.assertEqual(cashier_item["track_mode"], "QUANTITY")
+        self.assertEqual(cashier_item["available_lot_serials"], [])
         self.assertNotIn("landed_unit_cost", cashier_item)
 
     def test_service_and_cashier_cannot_consume_the_same_last_central_unit(self):
@@ -1706,6 +1761,13 @@ class CentralApiIntegrationTests(unittest.TestCase):
             "/v1/sync/operations", json=receipt, headers=self.headers
         ).json()["result_code"], "ACCEPTED")
 
+        inventory = self.client.get(
+            "/v1/cashier/inventory", params={"q": "SUP-BARCODE-1"},
+            headers=self.headers,
+        ).json()["inventory"][0]
+        self.assertEqual(inventory["track_mode"], "SERIAL")
+        self.assertEqual(inventory["available_lot_serials"], ["SERIAL-0001"])
+
         missing = self.direct_sale_operation(uuid4(), sequence=238)
         missing_result = self.client.post(
             "/v1/sync/operations", json=missing, headers=self.headers
@@ -1730,12 +1792,71 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(str(lot.available_quantity), "0.0000")
         self.assertEqual(lot.status, "CONSUMED")
 
+    def test_direct_t1_labor_uses_the_versioned_central_tariff_and_floor(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import (
+            direct_sale_discount_audit, invoices, service_tariffs,
+        )
+
+        issue = self.direct_sale_operation(
+            uuid4(), sequence=241, amount="22.00", discount="100",
+        )
+        issue["payload"]["lines"][0] = {
+            "line_id": str(uuid4()), "line_kind": "SERVICE",
+            "barcode": "", "quantity": "1", "service_tier": "T1",
+            "elapsed_minutes": 75, "requested_discount_percent": "100",
+            "lot_serial": "",
+        }
+        accepted = self.client.post(
+            "/v1/sync/operations", json=issue, headers=self.headers
+        ).json()
+        self.assertEqual(accepted["result_code"], "ACCEPTED", accepted)
+        self.assertEqual(accepted["result"]["total_amount"], "22.00")
+        line = accepted["result"]["lines"][0]
+        self.assertEqual(line["line_kind"], "SERVICE")
+        self.assertEqual(line["service_tier"], "T1")
+        self.assertEqual(line["elapsed_minutes"], 75)
+        self.assertEqual(line["billable_minutes"], 90)
+        self.assertEqual(line["base_unit_price"], "45.00")
+        self.assertEqual(line["unit_price"], "22.00")
+        self.assertEqual(line["tariff_version"], "T1T2-v1-2026-09-04")
+        self.assertNotIn("requested_discount_percent", line)
+        with self.engine.connect() as connection:
+            invoice_count = connection.execute(
+                select(func.count()).select_from(invoices)
+            ).scalar_one()
+            active_t1 = connection.execute(select(service_tariffs).where(
+                service_tariffs.c.tier == "T1",
+                service_tariffs.c.active.is_(True),
+            )).one()
+            audit = connection.execute(select(direct_sale_discount_audit)).one()
+        self.assertEqual(invoice_count, 1)
+        self.assertEqual(str(active_t1.first_hour_rate), "30.00")
+        self.assertEqual(audit.decision, "CLAMPED_TO_MINIMUM")
+
     def test_direct_cash_sale_fiscalizes_without_a_service_order(self):
         from sqlalchemy import select
-        from mikrofix_server.fiscalization import (
-            confirm_fiscal_submission, start_fiscal_submission,
-        )
+        from mikrofix_server.fiscal_worker import process_fiscal_invoice
         from mikrofix_server.models import invoices
+
+        class ConfirmingProvider:
+            def __init__(self):
+                self.submissions = []
+
+            def prepare_request(self, request, *, message_id):
+                self.zoi = "b" * 32
+                return {"InvoiceRequest": {
+                    "Header": {"MessageID": message_id},
+                    "Invoice": {"ProtectedID": self.zoi},
+                }}
+
+            def submit_prepared(self, payload):
+                self.submissions.append(payload)
+                return {
+                    "status": "CONFIRMED", "zoi": self.zoi,
+                    "eor": "EOR-DIRECT-1",
+                    "response": {"InvoiceResponse": {"EOR": "EOR-DIRECT-1"}},
+                }
 
         supplier_id, article_id = self.seed_supplier_and_article()
         receipt = self.purchase_receipt_operation(
@@ -1755,14 +1876,12 @@ class CentralApiIntegrationTests(unittest.TestCase):
             issued["result"]["invoice_status"], "PENDING_FISCALIZATION"
         )
         invoice_id = issued["result"]["invoice_id"]
-        with self.engine.begin() as connection:
-            start_fiscal_submission(connection, invoice_id)
-        with self.engine.begin() as connection:
-            confirmed = confirm_fiscal_submission(
-                connection, invoice_id, zoi="b" * 32, eor="EOR-DIRECT-1",
-                response={"InvoiceResponse": {"EOR": "EOR-DIRECT-1"}},
-            )
+        provider = ConfirmingProvider()
+        confirmed = process_fiscal_invoice(self.engine, invoice_id, provider)
+        repeated = process_fiscal_invoice(self.engine, invoice_id, provider)
         self.assertEqual(confirmed["status"], "ISSUED")
+        self.assertEqual(repeated, confirmed)
+        self.assertEqual(len(provider.submissions), 1)
         with self.engine.connect() as connection:
             invoice = connection.execute(select(invoices)).one()
         self.assertEqual(invoice.source_type, "DIRECT_SALE")

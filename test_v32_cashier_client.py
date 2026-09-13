@@ -158,6 +158,76 @@ class CashierCommandJournalTests(unittest.TestCase):
             timeout=15.0,
         )
 
+    @patch("requests.get")
+    def test_invoice_read_requires_a_server_snapshot(self, get):
+        invoice_id = str(uuid4())
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "invoice_id": invoice_id,
+            "invoice_number": "MFD-PIS-1",
+            "snapshot": {"lines": [], "total_amount": "0.00"},
+        }
+        get.return_value = response
+        transport = RequestsCashierTransport("https://central.example", "token")
+
+        invoice = transport.get_invoice(invoice_id)
+
+        self.assertEqual(invoice["invoice_number"], "MFD-PIS-1")
+        get.assert_called_once_with(
+            f"https://central.example/v1/cashier/invoices/{invoice_id}",
+            params={}, headers={"Authorization": "Bearer token"},
+            timeout=15.0,
+        )
+
+    @patch("requests.get")
+    def test_invoice_history_can_filter_central_fiscal_state(self, get):
+        response = Mock(status_code=200)
+        response.json.return_value = {"invoices": [{
+            "invoice_id": str(uuid4()), "invoice_number": "MFD-PIS-7",
+            "status": "FISCAL_RECONCILIATION", "snapshot": {},
+        }]}
+        get.return_value = response
+        transport = RequestsCashierTransport("https://central.example", "token")
+
+        rows = transport.list_invoices(
+            "PIS-7", invoice_status="FISCAL_RECONCILIATION", limit=20
+        )
+
+        self.assertEqual(rows[0]["status"], "FISCAL_RECONCILIATION")
+        get.assert_called_once_with(
+            "https://central.example/v1/cashier/invoices",
+            params={
+                "q": "PIS-7", "invoice_status": "FISCAL_RECONCILIATION",
+                "limit": 20,
+            },
+            headers={"Authorization": "Bearer token"}, timeout=15.0,
+        )
+
+    @patch("requests.post")
+    def test_direct_sale_quote_is_read_only_transport_data(self, post):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "lines": [{"line_id": str(uuid4()), "unit_price": "24.36"}],
+            "total_amount": "24.36", "currency": "EUR",
+            "revalidated_at_issue": True,
+        }
+        post.return_value = response
+        transport = RequestsCashierTransport("https://central.example", "token")
+        lines = [{
+            "line_id": str(uuid4()), "line_kind": "ARTICLE",
+            "barcode": "SUP-1", "quantity": "1",
+            "requested_discount_percent": "100", "lot_serial": "",
+        }]
+
+        quote = transport.quote_direct_sale(lines)
+
+        self.assertEqual(quote["total_amount"], "24.36")
+        post.assert_called_once_with(
+            "https://central.example/v1/cashier/direct-sale-quote",
+            json={"lines": lines}, headers={"Authorization": "Bearer token"},
+            timeout=15.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -311,6 +311,30 @@ class SyncContractTests(unittest.TestCase):
                 "lines": [{**payload["lines"][0], "unit_price": "0.01"}],
             })
 
+    def test_direct_service_line_carries_time_but_not_a_client_price(self):
+        payload = validated_issue_direct_sale_invoice_payload({
+            "sale_id": str(uuid4()), "expected_version": 0,
+            "premise_id": "MFD", "electronic_device_id": "B1",
+            "billing_customer": {"source": "WALK_IN", "confirmed": True},
+            "payments": [{
+                "method": "BANK_TRANSFER", "amount": "45", "confirmed": False,
+            }],
+            "lines": [{
+                "line_id": str(uuid4()), "line_kind": "SERVICE",
+                "barcode": "", "quantity": "1", "service_tier": "t1",
+                "elapsed_minutes": 75, "requested_discount_percent": "0",
+            }],
+        })
+        line = payload["lines"][0]
+        self.assertEqual(line["line_kind"], "SERVICE")
+        self.assertEqual(line["service_tier"], "T1")
+        self.assertEqual(line["elapsed_minutes"], 75)
+        self.assertNotIn("unit_price", line)
+        with self.assertRaisesRegex(ContractError, "cannot select an inventory barcode"):
+            validated_issue_direct_sale_invoice_payload({
+                **payload, "lines": [{**line, "barcode": "PART-1"}],
+            })
+
     def test_split_bank_share_must_already_be_confirmed(self):
         with self.assertRaisesRegex(ContractError, "split payment"):
             IssueServiceInvoiceContract(

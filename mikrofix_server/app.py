@@ -7,11 +7,13 @@ import binascii
 import secrets
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, status
 from sqlalchemy import Engine, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 
-from mikrofix_sync_contracts import ContractError, SyncOperationEnvelope
+from mikrofix_sync_contracts import (
+    ContractError, SyncOperationEnvelope, validated_direct_sale_quote_payload,
+)
 from mikrofix_ajpes import AjpesError, find_partner_by_tax_number
 from mikrofix_device_signing import verify_operation_signature
 
@@ -41,6 +43,7 @@ from .models import (
     inventory_items,
     inventory_lots,
     invoice_drafts,
+    invoices,
     partners,
     purchase_receipt_lines,
     purchase_receipts,
@@ -48,7 +51,8 @@ from .models import (
     workstations,
 )
 from .operations import (
-    ProtocolConflict, _inventory_updates_for_articles, process_operation,
+    DirectSalePreparationError, ProtocolConflict,
+    _inventory_updates_for_articles, prepare_direct_sale_quote, process_operation,
 )
 from .schemas import (
     ChangePage,
@@ -542,6 +546,100 @@ def create_app(
             ]
         }
 
+    def public_cashier_invoice(row) -> dict:
+        return {
+            "invoice_id": row.invoice_uuid,
+            "invoice_number": row.invoice_number,
+            "source_type": row.source_type,
+            "direct_sale_id": row.direct_sale_uuid,
+            "draft_id": row.draft_uuid,
+            "service_order_id": row.service_order_uuid,
+            "status": row.status,
+            "payment_status": row.payment_status,
+            "total_amount": format(row.total_amount, ".2f"),
+            "currency": row.currency,
+            "furs_zoi": row.furs_zoi,
+            "furs_eor": row.furs_eor,
+            "snapshot": row.snapshot_json,
+            "issued_at": row.issued_at,
+            "finalized_at": row.finalized_at,
+        }
+
+    @app.get(
+        "/v1/cashier/invoices",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def list_cashier_invoices(
+        q: str = Query(default="", max_length=130),
+        invoice_status: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict:
+        """List central invoices for history and interrupted-issue recovery."""
+        statement = select(invoices)
+        cleaned_status = str(invoice_status or "").strip().upper()
+        if cleaned_status:
+            if cleaned_status not in {
+                "PENDING_FISCALIZATION", "FISCAL_RECONCILIATION", "ISSUED"
+            }:
+                raise HTTPException(status_code=422, detail="Unsupported invoice status.")
+            statement = statement.where(invoices.c.status == cleaned_status)
+        cleaned_query = str(q or "").strip()
+        if cleaned_query:
+            statement = statement.where(
+                invoices.c.invoice_number.ilike(f"%{cleaned_query}%")
+            )
+        with database_engine.connect() as connection:
+            rows = connection.execute(
+                statement.order_by(
+                    invoices.c.issued_at.desc(), invoices.c.invoice_uuid.desc()
+                ).limit(limit)
+            ).all()
+        return {"invoices": [public_cashier_invoice(row) for row in rows]}
+
+    @app.get(
+        "/v1/cashier/invoices/{invoice_id}",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def get_cashier_invoice(invoice_id: UUID) -> dict:
+        """Return the server-owned immutable invoice used for print/recovery."""
+        with database_engine.connect() as connection:
+            row = connection.execute(
+                select(invoices).where(invoices.c.invoice_uuid == invoice_id)
+            ).one_or_none()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Invoice does not exist.")
+        return public_cashier_invoice(row)
+
+    @app.post(
+        "/v1/cashier/direct-sale-quote",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def quote_direct_sale(payload: dict = Body(...)) -> dict:
+        try:
+            normalized = validated_direct_sale_quote_payload(payload)
+        except ContractError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            with database_engine.connect() as connection:
+                prepared, _article_requested, total = prepare_direct_sale_quote(
+                    connection, normalized["lines"], lock_rows=False
+                )
+        except DirectSalePreparationError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error_code": exc.code, "error_message": str(exc)},
+            ) from exc
+        public_lines = [{
+            key: value for key, value in line.items()
+            if key not in {"allocations", "requested_discount_percent"}
+        } for line in prepared]
+        return {
+            "lines": public_lines,
+            "total_amount": format(total, ".2f"),
+            "currency": "EUR",
+            "revalidated_at_issue": True,
+        }
+
     @app.get(
         "/v1/cashier/partners",
         dependencies=[Depends(cashier_identity)],
@@ -689,6 +787,7 @@ def create_app(
             inventory_items.c.description,
             inventory_items.c.quantity_on_hand,
             inventory_items.c.current_sale_price,
+            inventory_items.c.track_mode,
             inventory_items.c.row_version,
             inventory_items.c.blocked,
             inventory_items.c.blocked_reason,
@@ -710,6 +809,27 @@ def create_app(
                 inventory_items.c.article_uuid,
                 inventory_identities.c.supplier_barcode,
             ).limit(limit)).all()
+            article_ids = {row.article_uuid for row in rows}
+            available_lots = connection.execute(select(
+                inventory_lots.c.article_uuid,
+                inventory_lots.c.identity_uuid,
+                inventory_lots.c.lot_serial,
+            ).where(
+                inventory_lots.c.article_uuid.in_(article_ids),
+                inventory_lots.c.status == "AVAILABLE",
+                inventory_lots.c.available_quantity > 0,
+            ).order_by(
+                inventory_lots.c.received_date,
+                inventory_lots.c.created_at,
+                inventory_lots.c.lot_uuid,
+            )).all() if article_ids else []
+        serials_by_identity: dict[tuple, list[str]] = {}
+        for lot in available_lots:
+            serial = str(lot.lot_serial or "").strip()
+            if serial:
+                serials_by_identity.setdefault(
+                    (lot.article_uuid, lot.identity_uuid), []
+                ).append(serial)
         return {"inventory": [{
             "article_id": row.article_uuid, "row_version": row.row_version,
             "description": row.description, "main_barcode": row.main_barcode,
@@ -720,6 +840,11 @@ def create_app(
                 row.identity_quantity_available, "f"
             ),
             "current_sale_price": format(row.current_sale_price, "f"),
+            "track_mode": row.track_mode,
+            "available_lot_serials": (
+                serials_by_identity.get((row.article_uuid, row.identity_uuid), [])
+                if row.track_mode == "SERIAL" else []
+            ),
             "blocked": row.blocked, "blocked_reason": row.blocked_reason or "",
         } for row in rows]}
 

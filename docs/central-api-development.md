@@ -72,6 +72,24 @@ različica partnerja še enkrat preveri. UI-neodvisni blagajniški odjemalec uka
 pred pošiljanjem zapiše v lokalni varnostni dnevnik; ta dnevnik ni offline
 poslovni način Blagajne, ampak zaščita pred izgubljenim HTTP-odgovorom.
 
+Neposredna prodaja uporablja `IssueDirectSaleInvoice`. Ukaz vsebuje prodajno
+identiteto, barkode, količine, zahtevani rabat, kupca in plačilo, ne vsebuje pa
+zaupanja vrednih cen, nabavnih vrednosti ali FIFO razporeditve. Strežnik vse to
+izračuna in knjiži v eni transakciji. Javni posnetek hrani samo uporabljeni
+rabat; zahtevani rabat ter odločitev cenovne varovalke sta v
+`direct_sale_discount_audit_v32`, porabljeni LOT-i pa v
+`direct_sale_stock_allocations_v32`. Blagajna išče prodajno zalogo prek
+`GET /v1/cashier/inventory`, ki ne vrača nabavnih cen.
+
+Blagajna lahko isti račun po prekinitvi vedno znova prebere prek centralne
+identitete računa in pregleda centralno zgodovino po stanju. Starejši lokalno
+nedokončan ukaz blokira pripravo novega ukaza, dokler ni usklajen v prvotnem
+vrstnem redu. Pri FURS se pred omrežnim klicem v PostgreSQL nespremenljivo
+shranijo podpisani zahtevek, njegov kontrolni odtis, `MessageID` in ZOI;
+ponovitev zato ne more sestaviti nove davčne identitete. Izvajalnik obstaja kot
+ločena strežniška meja, vendar sam ne vključi produkcijskega okolja in ne nalaga
+certifikata brez izrecne konfiguracije.
+
 ## Lokalni zagon
 
 Žeton je trenutno samo razvojna zaščita transporta in ni končna prijava:

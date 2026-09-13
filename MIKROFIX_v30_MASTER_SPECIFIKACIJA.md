@@ -35,6 +35,18 @@ formulacijami v tem dokumentu:
   rabatov ni mogoče spreminjati, neposredna prodaja pa vedno nastane na ločenem
   računu. Odpiranje osnutka ne ustvarja stanja `CLAIMED`; enkratnost zagotovi
   atomski centralni ukaz izdaje.
+- Neposredna prodaja ima lahko anonimnega kupca na prodajnem mestu ali potrjenega
+  centralnega partnerja. Blagajna poda barkodo, količino in želeni rabat,
+  centralni strežnik pa sam izbere FIFO LOT-e, ceno in dejansko dovoljeni rabat.
+  Če ena vrstica porabi več LOT-ov, ostane za kupca ena vrstica; notranja sled
+  ohrani LOT-e, cenovna meja pa uporabi najvišjo dejansko porabljeno nabavno
+  vrednost + 5 %. Račun pokaže samo dejansko uporabljeni rabat, prvotna zahteva
+  ostane v notranji revizijski sledi.
+- Centralna davčna potrditev mora pred prvim omrežnim klicem trajno shraniti
+  natančni podpisani zahtevek, `MessageID`, ZOI in kontrolni odtis. Nejasen
+  rezultat se usklajuje samo s tem istim zahtevkom; nova davčna identiteta ali
+  nov račun nista dovoljena. Produkcijsko FURS okolje ostane ločeno varnostno
+  zaklenjeno do namenske aktivacije in preverjanja.
 - Kanonična razlaga je v
   `/home/mikrofix/MikroFIX-kanonicni-poslovni-tokovi.md`.
 

@@ -10,7 +10,7 @@ from mikrofix_v30_pos import (
     PosError, PosLine, abandon_pos_draft, calculate_line, default_service_description,
     customer_partner_by_id, list_customer_partners, save_customer_partner,
     eligible_storned_invoices, ensure_pos_schema, invoice_snapshot, issue_invoice,
-    generate_pos_pdfs, generate_pos_preview_pdfs,
+    generate_central_invoice_pdfs, generate_pos_pdfs, generate_pos_preview_pdfs,
     latest_pending_print, load_active_pos_draft, mark_pdf_ready, mark_printed,
     register_copy, save_pos_draft, search_inventory,
     pending_furs_documents, reconcile_pending_furs_document,
@@ -746,6 +746,44 @@ class V30PosTests(unittest.TestCase):
         result = calculate_line(self.line(requested_discount_pct=Decimal("100")), 22)
         self.assertEqual(result.final_unit_price, Decimal("52.50"))
         self.assertEqual(result.applied_discount_pct, Decimal("47.50"))
+
+    def test_central_invoice_pdf_uses_only_the_authoritative_snapshot(self):
+        invoice = {
+            "invoice_id": "11111111-1111-1111-1111-111111111111",
+            "invoice_number": "MFD-PIS-7", "total_amount": "24.36",
+            "furs_eor": "", "snapshot": {
+                "issued_at": "2026-09-13T10:00:00+02:00",
+                "premise_id": "MFD", "electronic_device_id": "PIS",
+                "billing_customer": {"source": "WALK_IN", "name": ""},
+                "payments": [{
+                    "method": "BANK_TRANSFER", "amount": "24.36",
+                    "confirmed": False,
+                }],
+                "tax_note": "Oproščeno po prvem odstavku 94. člena ZDDV-1.",
+                "lines": [{
+                    "line_id": "22222222-2222-2222-2222-222222222222",
+                    "line_kind": "ARTICLE", "description": "Testni del čšž",
+                    "quantity": "1", "base_unit_price": "50.00",
+                    "applied_discount_percent": "51.2800",
+                    "unit_price": "24.36", "line_total": "24.36",
+                }],
+            },
+        }
+        a4, receipt = generate_central_invoice_pdfs(
+            invoice=invoice, output_dir=Path(self.tmp.name) / "central-pdf",
+            company={
+                "legal_name": "MikroFix", "street": "Paradiž 73",
+                "city": "2282 Cirkulane", "tax_number": "84514841",
+            }, test_mode=True,
+        )
+        from pypdf import PdfReader
+        self.assertTrue(a4.is_file())
+        self.assertTrue(receipt.is_file())
+        text = "\n".join(page.extract_text() or "" for page in PdfReader(str(a4)).pages)
+        self.assertIn("MFD-PIS-7", text)
+        self.assertIn("Testni del čšž", text)
+        self.assertIn("24.36 EUR", text)
+        self.assertNotIn("requested_discount", text)
 
     def test_service_discount_is_clamped_to_l0(self):
         line = PosLine(line_kind="SERVICE", name="Delo", service_tier="T1",

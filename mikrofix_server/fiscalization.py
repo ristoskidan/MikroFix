@@ -44,6 +44,63 @@ def _publish(
     ).scalar_one())
 
 
+def prepare_fiscal_submission(
+    connection: Connection, invoice_id: str | UUID, *, prepared_request: dict,
+) -> dict:
+    """Persist the exact signed FURS body before any external network call."""
+    invoice_uuid = UUID(str(invoice_id))
+    invoice = connection.execute(
+        select(invoices).where(invoices.c.invoice_uuid == invoice_uuid).with_for_update()
+    ).one_or_none()
+    if invoice is None:
+        raise FiscalStateError("Invoice does not exist.")
+    outbox = connection.execute(
+        select(fiscal_outbox)
+        .where(fiscal_outbox.c.invoice_uuid == invoice_uuid)
+        .with_for_update()
+    ).one_or_none()
+    if outbox is None:
+        raise FiscalStateError("Invoice has no fiscal request.")
+    try:
+        request = dict(prepared_request)
+        invoice_request = request["InvoiceRequest"]
+        message_id = str(invoice_request["Header"]["MessageID"])
+        zoi = str(invoice_request["Invoice"]["ProtectedID"]).strip()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise FiscalStateError("Prepared FURS request is incomplete.") from exc
+    if message_id != str(outbox.message_uuid):
+        raise FiscalStateError("Prepared FURS request has a different message identity.")
+    if not zoi:
+        raise FiscalStateError("Prepared FURS request has no ZOI.")
+    request_hash = payload_sha256(request)
+    existing = dict(outbox.prepared_request_json or {})
+    if existing:
+        if (
+            outbox.prepared_request_sha256 != request_hash
+            or existing != request or outbox.prepared_zoi != zoi
+        ):
+            raise FiscalStateError("Prepared FURS request cannot be changed.")
+        return {
+            "status": outbox.status, "invoice_id": str(invoice_uuid),
+            "request": existing, "request_sha256": request_hash, "zoi": zoi,
+        }
+    if outbox.status != "PENDING":
+        raise FiscalStateError("Fiscal request can no longer be prepared.")
+    connection.execute(
+        update(fiscal_outbox)
+        .where(fiscal_outbox.c.invoice_uuid == invoice_uuid)
+        .values(
+            prepared_request_json=request,
+            prepared_request_sha256=request_hash,
+            prepared_zoi=zoi,
+        )
+    )
+    return {
+        "status": "PENDING", "invoice_id": str(invoice_uuid),
+        "request": request, "request_sha256": request_hash, "zoi": zoi,
+    }
+
+
 def start_fiscal_submission(connection: Connection, invoice_id: str | UUID) -> dict:
     """Mark one saved request as sending and return that exact saved request."""
     invoice_uuid = UUID(str(invoice_id))
@@ -59,15 +116,23 @@ def start_fiscal_submission(connection: Connection, invoice_id: str | UUID) -> d
     ).one_or_none()
     if outbox is None:
         raise FiscalStateError("Invoice has no fiscal request.")
-    request = dict(outbox.request_json)
-    if payload_sha256(request) != outbox.request_sha256:
-        raise FiscalStateError("Saved fiscal request hash does not match its content.")
-    if str(request.get("message_id") or "") != str(outbox.message_uuid):
-        raise FiscalStateError("Saved fiscal request has a different message identity.")
+    request = dict(outbox.prepared_request_json or {})
+    if not request or not outbox.prepared_zoi:
+        raise FiscalStateError("Fiscal request has not been prepared and persisted.")
+    if payload_sha256(request) != outbox.prepared_request_sha256:
+        raise FiscalStateError("Prepared fiscal request hash does not match its content.")
+    try:
+        message_id = str(request["InvoiceRequest"]["Header"]["MessageID"])
+        zoi = str(request["InvoiceRequest"]["Invoice"]["ProtectedID"])
+    except (KeyError, TypeError) as exc:
+        raise FiscalStateError("Prepared fiscal request is incomplete.") from exc
+    if message_id != str(outbox.message_uuid) or zoi != outbox.prepared_zoi:
+        raise FiscalStateError("Prepared fiscal identity does not match its outbox row.")
     if outbox.status == "CONFIRMED":
         return {
             "status": "CONFIRMED", "invoice_id": str(invoice_uuid),
             "request": request,
+            "zoi": outbox.prepared_zoi,
         }
     if outbox.status not in {"PENDING", "UNCERTAIN"}:
         raise FiscalStateError("Fiscal request is already being sent.")
@@ -84,7 +149,8 @@ def start_fiscal_submission(connection: Connection, invoice_id: str | UUID) -> d
     return {
         "status": "SENDING", "invoice_id": str(invoice_uuid),
         "request": request,
-        "request_sha256": outbox.request_sha256,
+        "request_sha256": outbox.prepared_request_sha256,
+        "zoi": outbox.prepared_zoi,
     }
 
 
@@ -175,6 +241,8 @@ def confirm_fiscal_submission(
         }
     if outbox.status not in {"SENDING", "UNCERTAIN"}:
         raise FiscalStateError("Fiscal request has not been started.")
+    if outbox.prepared_zoi != clean_zoi:
+        raise FiscalStateError("Confirmed ZOI does not match the prepared request.")
 
     now = datetime.now(ZoneInfo("Europe/Ljubljana"))
     connection.execute(

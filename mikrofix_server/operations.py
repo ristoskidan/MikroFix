@@ -47,12 +47,21 @@ from .models import (
     service_orders,
     service_part_consumptions,
     service_stock_allocations,
+    service_tariffs,
     technical_completions,
 )
 
 
 class ProtocolConflict(RuntimeError):
     """An operation identity was reused for different request content."""
+
+
+class DirectSalePreparationError(RuntimeError):
+    """A direct-sale quote or issue failed before any business write."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _receipt(row) -> dict:
@@ -245,6 +254,48 @@ def _invoice_total(draft_payload: dict) -> Decimal:
         for line in draft_payload.get(collection, ()):  # immutable server snapshot
             total += Decimal(str(line["quantity"])) * Decimal(str(line["unit_price"]))
     return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _service_invoice_public_lines(draft_payload: dict) -> list[dict]:
+    """Normalize the immutable Service draft for printing without repricing."""
+    result = []
+    for line in draft_payload.get("billing_lines", ()):
+        quantity = Decimal(str(line["quantity"]))
+        unit_price = Decimal(str(line["unit_price"]))
+        result.append({
+            "line_id": line["line_id"], "line_kind": "SERVICE",
+            "article_id": None, "barcode": "", "lot_serial": "",
+            "description": line["description"],
+            "quantity": format(quantity, "f"),
+            "billable_minutes": int(line.get("billable_minutes") or 0),
+            "service_tier": str(line.get("line_kind") or ""),
+            "tariff_version": str(line.get("tariff_version") or ""),
+            "base_unit_price": format(unit_price, ".2f"),
+            "applied_discount_percent": "0.0000",
+            "unit_price": format(unit_price, ".2f"),
+            "line_total": format(
+                (quantity * unit_price).quantize(_CENT, rounding=ROUND_HALF_UP),
+                ".2f",
+            ),
+        })
+    for line in draft_payload.get("parts", ()):
+        quantity = Decimal(str(line["quantity"]))
+        unit_price = Decimal(str(line["unit_price"]))
+        result.append({
+            "line_id": line["line_id"], "line_kind": "ARTICLE",
+            "article_id": line["article_id"], "barcode": line["barcode"],
+            "lot_serial": str(line.get("lot_serial") or ""),
+            "description": line["description"],
+            "quantity": format(quantity, "f"),
+            "base_unit_price": format(unit_price, ".2f"),
+            "applied_discount_percent": "0.0000",
+            "unit_price": format(unit_price, ".2f"),
+            "line_total": format(
+                (quantity * unit_price).quantize(_CENT, rounding=ROUND_HALF_UP),
+                ".2f",
+            ),
+        })
+    return result
 
 
 def _billing_customer_snapshot(
@@ -447,6 +498,8 @@ def _issue_service_invoice(
         "invoice_id": str(invoice_uuid),
         "invoice_number": invoice_number,
         "draft": draft_payload,
+        "source_type": "SERVICE",
+        "lines": _service_invoice_public_lines(draft_payload),
         "billing_customer": billing_customer,
         "payments": payments,
         "total_amount": f"{total:.2f}",
@@ -572,6 +625,186 @@ def _issue_service_invoice(
     )
 
 
+def prepare_direct_sale_quote(
+    connection: Connection, lines: list[dict], *, lock_rows: bool = False,
+) -> tuple[list[dict], dict[UUID, Decimal], Decimal]:
+    """Resolve server prices and LOTs once for both quote and atomic issuance."""
+    prepared_lines: list[dict] = []
+    input_positions = {
+        line["line_id"]: position for position, line in enumerate(lines)
+    }
+    article_requested: dict[UUID, Decimal] = {}
+    article_rows: dict[UUID, object] = {}
+
+    def locked(query):
+        return query.with_for_update() if lock_rows else query
+
+    article_lines = [line for line in lines if line["line_kind"] == "ARTICLE"]
+    for line in sorted(article_lines, key=lambda value: value["barcode"]):
+        barcode = str(line["barcode"])
+        identity = connection.execute(locked(select(inventory_identities).where(
+            inventory_identities.c.supplier_barcode == barcode
+        ))).one_or_none()
+        if identity is None:
+            article = connection.execute(locked(select(inventory_items).where(
+                inventory_items.c.barcode == barcode
+            ))).one_or_none()
+        else:
+            article = connection.execute(locked(select(inventory_items).where(
+                inventory_items.c.article_uuid == identity.article_uuid
+            ))).one_or_none()
+        if article is None:
+            raise DirectSalePreparationError(
+                "STOCK_ITEM_NOT_FOUND",
+                f"Barcode {barcode} does not exist in confirmed central stock.",
+            )
+        if article.blocked:
+            raise DirectSalePreparationError(
+                "STOCK_ITEM_BLOCKED",
+                f"Barcode {barcode} is blocked: "
+                f"{article.blocked_reason or 'review required'}.",
+            )
+        if article.article_uuid in article_rows:
+            raise DirectSalePreparationError(
+                "DUPLICATE_ARTICLE_LINE",
+                "One article may appear only once on a direct-sale invoice; "
+                "use one combined quantity.",
+            )
+        quantity = Decimal(str(line["quantity"]))
+        requested_lot = str(line.get("lot_serial") or "").strip()
+        if article.track_mode == "SERIAL" and (quantity != 1 or not requested_lot):
+            raise DirectSalePreparationError(
+                "SERIAL_IDENTITY_REQUIRED",
+                f"Serial-tracked barcode {barcode} requires one exact serial.",
+            )
+        article_requested[article.article_uuid] = quantity
+        article_rows[article.article_uuid] = article
+        lots_query = select(inventory_lots).where(
+            inventory_lots.c.article_uuid == article.article_uuid,
+            inventory_lots.c.status == "AVAILABLE",
+            inventory_lots.c.available_quantity > 0,
+        )
+        if requested_lot:
+            lots_query = lots_query.where(inventory_lots.c.lot_serial == requested_lot)
+        lots = connection.execute(locked(lots_query.order_by(
+            inventory_lots.c.received_date,
+            inventory_lots.c.created_at,
+            inventory_lots.c.lot_uuid,
+        ))).all()
+        if not lots:
+            raise DirectSalePreparationError(
+                "MISSING_LOT_COST",
+                f"Barcode {barcode} has no available LOT with a verified acquisition cost.",
+            )
+        remaining = quantity
+        allocations = []
+        for lot in lots:
+            if remaining <= 0:
+                break
+            used = min(Decimal(lot.available_quantity), remaining)
+            if used > 0:
+                allocations.append((lot, used))
+                remaining -= used
+        if remaining > 0:
+            raise DirectSalePreparationError(
+                "INSUFFICIENT_STOCK",
+                f"Barcode {barcode} does not have {quantity} available pieces.",
+            )
+        highest_cost = max(Decimal(lot.landed_unit_cost) for lot, _ in allocations)
+        floor_price = (highest_cost * _PART_FLOOR).quantize(
+            _CENT, rounding=ROUND_CEILING
+        )
+        base_price = Decimal(article.current_sale_price).quantize(_CENT)
+        if base_price < floor_price:
+            raise DirectSalePreparationError(
+                "INVALID_SALE_PRICE",
+                f"Barcode {barcode} has a sale price below its LOT cost guard.",
+            )
+        requested_discount = Decimal(line["requested_discount_percent"])
+        requested_price = (
+            base_price * (Decimal("1") - requested_discount / Decimal("100"))
+        ).quantize(_CENT, rounding=ROUND_HALF_UP)
+        applied_price = max(requested_price, floor_price)
+        applied_discount = (
+            (Decimal("1") - applied_price / base_price) * Decimal("100")
+        ).quantize(_FOUR, rounding=ROUND_HALF_UP)
+        prepared_lines.append({
+            "line_id": line["line_id"], "line_kind": "ARTICLE",
+            "article_id": str(article.article_uuid), "barcode": barcode,
+            "lot_serial": requested_lot, "description": article.description,
+            "quantity": format(quantity, "f"),
+            "base_unit_price": format(base_price, ".2f"),
+            "requested_discount_percent": format(requested_discount, ".4f"),
+            "applied_discount_percent": format(applied_discount, ".4f"),
+            "unit_price": format(applied_price, ".2f"),
+            "line_total": format(
+                (quantity * applied_price).quantize(_CENT, rounding=ROUND_HALF_UP),
+                ".2f",
+            ),
+            "allocations": allocations,
+        })
+
+    for line in lines:
+        if line["line_kind"] != "SERVICE":
+            continue
+        tariff = connection.execute(locked(select(service_tariffs).where(
+            service_tariffs.c.tier == line["service_tier"],
+            service_tariffs.c.active.is_(True),
+        ))).one_or_none()
+        if tariff is None:
+            raise DirectSalePreparationError(
+                "SERVICE_TARIFF_NOT_CONFIGURED",
+                f"No active central tariff exists for {line['service_tier']}.",
+            )
+        elapsed_minutes = int(line["elapsed_minutes"])
+        extra_half_hours = max(0, (elapsed_minutes - 60 + 29) // 30)
+        billable_minutes = 60 + 30 * extra_half_hours
+        base_price = (
+            Decimal(tariff.first_hour_rate)
+            + Decimal(tariff.extra_half_hour_rate) * extra_half_hours
+        ).quantize(_CENT, rounding=ROUND_HALF_UP)
+        requested_discount = Decimal(line["requested_discount_percent"])
+        requested_price = (
+            base_price * (Decimal("1") - requested_discount / Decimal("100"))
+        ).quantize(_CENT, rounding=ROUND_HALF_UP)
+        applied_price = max(
+            requested_price, Decimal(tariff.minimum_line_price).quantize(_CENT)
+        )
+        applied_discount = (
+            (Decimal("1") - applied_price / base_price) * Decimal("100")
+        ).quantize(_FOUR, rounding=ROUND_HALF_UP)
+        tier = str(tariff.tier)
+        prepared_lines.append({
+            "line_id": line["line_id"], "line_kind": "SERVICE",
+            "article_id": None, "barcode": "", "lot_serial": "",
+            "description": "Delo na terenu" if tier == "T2" else "Delo v delavnici",
+            "quantity": "1", "elapsed_minutes": elapsed_minutes,
+            "billable_minutes": billable_minutes, "service_tier": tier,
+            "tariff_version": tariff.tariff_version,
+            "first_hour_rate": format(Decimal(tariff.first_hour_rate), ".2f"),
+            "extra_half_hour_rate": format(
+                Decimal(tariff.extra_half_hour_rate), ".2f"
+            ),
+            "base_unit_price": format(base_price, ".2f"),
+            "requested_discount_percent": format(requested_discount, ".4f"),
+            "applied_discount_percent": format(applied_discount, ".4f"),
+            "unit_price": format(applied_price, ".2f"),
+            "line_total": format(applied_price, ".2f"), "allocations": [],
+        })
+
+    prepared_lines.sort(key=lambda line: input_positions[line["line_id"]])
+    for article_uuid, requested in article_requested.items():
+        if Decimal(article_rows[article_uuid].quantity_on_hand) < requested:
+            raise DirectSalePreparationError(
+                "INSUFFICIENT_STOCK",
+                "The combined direct-sale quantity exceeds article stock.",
+            )
+    total = sum(
+        (Decimal(line["line_total"]) for line in prepared_lines), Decimal("0")
+    ).quantize(_CENT, rounding=ROUND_HALF_UP)
+    return prepared_lines, article_requested, total
+
+
 def _issue_direct_sale_invoice(
     connection: Connection,
     envelope: SyncOperationEnvelope,
@@ -616,133 +849,12 @@ def _issue_direct_sale_invoice(
             None,
         )
 
-    prepared_lines: list[dict] = []
-    article_requested: dict[UUID, Decimal] = {}
-    article_rows: dict[UUID, object] = {}
-    # Resolve and lock in barcode order so concurrent Cashier/Service commands
-    # cannot deadlock merely because scanners produced a different line order.
-    for line in sorted(payload["lines"], key=lambda value: value["barcode"]):
-        barcode = str(line["barcode"])
-        identity = connection.execute(select(inventory_identities).where(
-            inventory_identities.c.supplier_barcode == barcode
-        ).with_for_update()).one_or_none()
-        if identity is None:
-            article = connection.execute(select(inventory_items).where(
-                inventory_items.c.barcode == barcode
-            ).with_for_update()).one_or_none()
-        else:
-            article = connection.execute(select(inventory_items).where(
-                inventory_items.c.article_uuid == identity.article_uuid
-            ).with_for_update()).one_or_none()
-        if article is None:
-            return _reject(
-                "STOCK_ITEM_NOT_FOUND",
-                f"Barcode {barcode} does not exist in confirmed central stock.",
-            )
-        if article.blocked:
-            return _reject(
-                "STOCK_ITEM_BLOCKED",
-                f"Barcode {barcode} is blocked: {article.blocked_reason or 'review required'}.",
-            )
-        if article.article_uuid in article_rows:
-            return _reject(
-                "DUPLICATE_ARTICLE_LINE",
-                "One article may appear only once on a direct-sale invoice; "
-                "use one combined quantity.",
-            )
-        quantity = Decimal(str(line["quantity"]))
-        requested_lot = str(line.get("lot_serial") or "").strip()
-        if article.track_mode == "SERIAL" and (
-            quantity != 1 or not requested_lot
-        ):
-            return _reject(
-                "SERIAL_IDENTITY_REQUIRED",
-                f"Serial-tracked barcode {barcode} requires one exact serial.",
-            )
-        article_requested[article.article_uuid] = (
-            article_requested.get(article.article_uuid, Decimal("0")) + quantity
+    try:
+        prepared_lines, article_requested, total = prepare_direct_sale_quote(
+            connection, list(payload["lines"]), lock_rows=True
         )
-        article_rows[article.article_uuid] = article
-        lots_query = select(inventory_lots).where(
-            inventory_lots.c.article_uuid == article.article_uuid,
-            inventory_lots.c.status == "AVAILABLE",
-            inventory_lots.c.available_quantity > 0,
-        )
-        if requested_lot:
-            lots_query = lots_query.where(
-                inventory_lots.c.lot_serial == requested_lot
-            )
-        lots = connection.execute(lots_query.order_by(
-            inventory_lots.c.received_date,
-            inventory_lots.c.created_at,
-            inventory_lots.c.lot_uuid,
-        ).with_for_update()).all()
-        if not lots:
-            return _reject(
-                "MISSING_LOT_COST",
-                f"Barcode {barcode} has no available LOT with a verified acquisition cost.",
-            )
-        remaining = quantity
-        allocations = []
-        for lot in lots:
-            if remaining <= 0:
-                break
-            available = Decimal(lot.available_quantity)
-            used = min(available, remaining)
-            if used > 0:
-                allocations.append((lot, used))
-                remaining -= used
-        if remaining > 0:
-            return _reject(
-                "INSUFFICIENT_STOCK",
-                f"Barcode {barcode} does not have {quantity} available pieces.",
-            )
-        highest_cost = max(Decimal(lot.landed_unit_cost) for lot, _ in allocations)
-        floor_price = (highest_cost * _PART_FLOOR).quantize(
-            _CENT, rounding=ROUND_CEILING
-        )
-        base_price = Decimal(article.current_sale_price).quantize(_CENT)
-        if base_price < floor_price:
-            return _reject(
-                "INVALID_SALE_PRICE",
-                f"Barcode {barcode} has a sale price below its LOT cost guard.",
-            )
-        requested_discount = Decimal(line["requested_discount_percent"])
-        requested_price = (
-            base_price * (Decimal("1") - requested_discount / Decimal("100"))
-        ).quantize(_CENT, rounding=ROUND_HALF_UP)
-        applied_price = max(requested_price, floor_price)
-        applied_discount = (
-            (Decimal("1") - applied_price / base_price) * Decimal("100")
-        ).quantize(_FOUR, rounding=ROUND_HALF_UP)
-        prepared_lines.append({
-            "line_id": line["line_id"],
-            "article_id": str(article.article_uuid),
-            "barcode": barcode,
-            "lot_serial": requested_lot,
-            "description": article.description,
-            "quantity": format(quantity, "f"),
-            "base_unit_price": format(base_price, ".2f"),
-            "requested_discount_percent": format(requested_discount, ".4f"),
-            "applied_discount_percent": format(applied_discount, ".4f"),
-            "unit_price": format(applied_price, ".2f"),
-            "line_total": format(
-                (quantity * applied_price).quantize(_CENT, rounding=ROUND_HALF_UP),
-                ".2f",
-            ),
-            "allocations": allocations,
-        })
-
-    for article_uuid, requested in article_requested.items():
-        if Decimal(article_rows[article_uuid].quantity_on_hand) < requested:
-            return _reject(
-                "INSUFFICIENT_STOCK",
-                "The combined direct-sale quantity exceeds article stock.",
-            )
-
-    total = sum(
-        (Decimal(line["line_total"]) for line in prepared_lines), Decimal("0")
-    ).quantize(_CENT, rounding=ROUND_HALF_UP)
+    except DirectSalePreparationError as exc:
+        return _reject(exc.code, str(exc))
     payments = list(payload["payments"])
     payment_total = sum(
         (Decimal(str(payment["amount"])) for payment in payments), Decimal("0")
@@ -820,7 +932,7 @@ def _issue_direct_sale_invoice(
             applied_discount_percent=applied,
             decision=(
                 "AS_REQUESTED" if requested == applied
-                else "CLAMPED_TO_COST_FLOOR"
+                else "CLAMPED_TO_MINIMUM"
             ),
         ))
     for article_uuid, requested in article_requested.items():
@@ -1696,6 +1808,12 @@ def _complete_service_technically(
             "address": dict(order.payload_json).get("customer_address", ""),
             "phone": dict(order.payload_json).get("customer_phone", ""),
             "email": dict(order.payload_json).get("customer_email", ""),
+        },
+        "service": {
+            "device_model": dict(order.payload_json).get("device_model", ""),
+            "device_serial": dict(order.payload_json).get("device_serial", ""),
+            "customer_request": dict(order.payload_json).get("customer_request", ""),
+            "contract_context": dict(order.payload_json).get("contract_context", ""),
         },
         "work_summary": payload["work_summary"],
         "findings": payload["findings"],

@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Index,
     Integer,
     LargeBinary,
     MetaData,
@@ -647,9 +648,35 @@ direct_sale_discount_audit = Table(
         name="direct_sale_discount_applied_range",
     ),
     CheckConstraint(
-        "decision IN ('AS_REQUESTED','CLAMPED_TO_COST_FLOOR')",
+        "decision IN ('AS_REQUESTED','CLAMPED_TO_MINIMUM')",
         name="direct_sale_discount_decision",
     ),
+)
+
+
+service_tariffs = Table(
+    "service_tariffs_v32",
+    metadata,
+    Column("tariff_uuid", UUID(as_uuid=True), primary_key=True),
+    Column("tier", String(2), nullable=False),
+    Column("tariff_version", String(80), nullable=False),
+    Column("first_hour_rate", Numeric(18, 2), nullable=False),
+    Column("extra_half_hour_rate", Numeric(18, 2), nullable=False),
+    Column("minimum_line_price", Numeric(18, 2), nullable=False),
+    Column("effective_from", Date, nullable=False),
+    Column("active", Boolean, nullable=False, server_default="true"),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("tier", "tariff_version", name="uq_service_tariff_version"),
+    CheckConstraint("tier IN ('T1','T2')", name="service_tariff_tier"),
+    CheckConstraint("first_hour_rate > 0", name="service_tariff_first_rate"),
+    CheckConstraint("extra_half_hour_rate >= 0", name="service_tariff_extra_rate"),
+    CheckConstraint("minimum_line_price > 0", name="service_tariff_minimum"),
+)
+Index(
+    "uq_active_service_tariff_tier",
+    service_tariffs.c.tier,
+    unique=True,
+    postgresql_where=service_tariffs.c.active.is_(True),
 )
 
 
@@ -664,6 +691,9 @@ fiscal_outbox = Table(
     Column("status", String(30), nullable=False),
     Column("request_sha256", String(64), nullable=False),
     Column("request_json", JSONB, nullable=False),
+    Column("prepared_request_sha256", String(64), nullable=False, server_default=""),
+    Column("prepared_request_json", JSONB, nullable=False, server_default="{}"),
+    Column("prepared_zoi", String(64), nullable=False, server_default=""),
     Column("response_json", JSONB, nullable=False, server_default="{}"),
     Column("attempt_count", Integer, nullable=False, server_default="0"),
     Column("last_error", String(1000)),

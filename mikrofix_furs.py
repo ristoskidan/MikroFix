@@ -299,7 +299,7 @@ def build_invoice_request(
     invoice_amount: Decimal | float | str, payment_amount: Decimal | float | str,
     operator_tax_number: int | str, numbering_structure: str = "B",
     customer_vat_number: str = "", subsequent_submit: bool = False,
-    reference_invoice: dict[str, Any] | None = None,
+    reference_invoice: dict[str, Any] | None = None, message_id: str | None = None,
 ) -> dict[str, Any]:
     """Sestavi produkcijsko/testno sporočilo za zavezanca, ki ni v sistemu DDV."""
     premise = _validate_identifier(business_premise_id, "Oznaka poslovnega prostora")
@@ -334,9 +334,13 @@ def build_invoice_request(
         invoice["SubsequentSubmit"] = True
     if reference_invoice:
         invoice["ReferenceInvoice"] = [reference_invoice]
+    try:
+        request_message_id = str(uuid.UUID(str(message_id))) if message_id else str(uuid.uuid4())
+    except (ValueError, AttributeError) as exc:
+        raise FursTestError("MESSAGE_ID_INVALID", "MessageID mora biti veljaven UUID.") from exc
     return {
         "InvoiceRequest": {
-            "Header": {"MessageID": str(uuid.uuid4()), "DateTime": issued_text},
+            "Header": {"MessageID": request_message_id, "DateTime": issued_text},
             "Invoice": invoice,
         }
     }
@@ -886,6 +890,30 @@ class ProductionFiscalizer:
     def __init__(self, bundle: CertificateBundle, client: FursProductionClient):
         self.bundle = bundle
         self.client = client
+
+    def prepare_request(
+        self, request: dict[str, Any], *, message_id: str
+    ) -> dict[str, Any]:
+        """Build and sign the exact body that must be persisted before sending."""
+        return build_invoice_request(
+            self.bundle,
+            issue_datetime=request["issue_datetime"],
+            invoice_number=str(request["sequence"]),
+            business_premise_id=request["premise_id"],
+            electronic_device_id=request["device_id"],
+            invoice_amount=request["invoice_amount"],
+            payment_amount=request["payment_amount"],
+            operator_tax_number=request["operator_tax_number"],
+            numbering_structure=request.get("numbering_structure", "B"),
+            customer_vat_number=request.get("customer_vat_number", ""),
+            subsequent_submit=bool(request.get("subsequent_submit", False)),
+            reference_invoice=request.get("reference_invoice"),
+            message_id=message_id,
+        )
+
+    def submit_prepared(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Submit an already persisted body without changing MessageID or ZOI."""
+        return self.retry_existing_payload(payload)
 
     def __call__(self, request: dict[str, Any]) -> dict[str, Any]:
         payload = build_invoice_request(

@@ -7,7 +7,7 @@ import uuid
 import re
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -98,6 +98,8 @@ class PosLine:
     origin_id: int | None = None
     source_locked: bool = False
     requested_lot_serial: str = ""
+    service_elapsed_minutes: int = 0
+    central_line_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 @dataclass(frozen=True)
@@ -2958,6 +2960,141 @@ def _register_pos_pdf_fonts() -> tuple[str, str]:
         except Exception:
             continue
     return "Helvetica", "Helvetica-Bold"
+
+
+def generate_central_invoice_pdfs(
+    *, invoice: dict[str, Any], output_dir: Path | str, company: dict[str, Any],
+    paper_width_mm: int = 80, test_mode: bool = True,
+) -> tuple[Path, Path]:
+    """Render an authoritative central invoice without a local accounting copy."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+    snapshot = dict(invoice.get("snapshot") or {})
+    invoice_no = str(invoice.get("invoice_number") or "").strip()
+    invoice_id = str(invoice.get("invoice_id") or "").strip()
+    lines = list(snapshot.get("lines") or [])
+    total = dec(invoice.get("total_amount") or snapshot.get("total_amount"))
+    if not invoice_no or not invoice_id or not lines:
+        raise PosError("Centralni račun nima popolnega nespremenljivega posnetka.")
+    line_total = sum((dec(line.get("line_total")) for line in lines), Decimal("0"))
+    if line_total != total:
+        raise PosError("Vrstice centralnega računa se ne ujemajo s skupnim zneskom.")
+
+    output = Path(output_dir)
+    output.mkdir(parents=True, exist_ok=True)
+    safe_no = re.sub(r"[^0-9A-Za-z_.-]", "_", invoice_no)
+    a4_path = output / f"{safe_no}.pdf"
+    receipt_path = output / f"{safe_no}_{int(paper_width_mm)}mm.pdf"
+    regular_font, bold_font = _register_pos_pdf_fonts()
+    styles = getSampleStyleSheet()
+    body = ParagraphStyle(
+        "CentralInvoiceBody", parent=styles["BodyText"], fontName=regular_font,
+        fontSize=9, leading=12,
+    )
+    small = ParagraphStyle(
+        "CentralInvoiceSmall", parent=body, fontSize=7.5, leading=9,
+    )
+    title = ParagraphStyle(
+        "CentralInvoiceTitle", parent=styles["Title"], fontName=bold_font,
+        fontSize=18, leading=21,
+    )
+    customer = dict(snapshot.get("billing_customer") or {})
+    payments = list(snapshot.get("payments") or [])
+    payment_text = ", ".join(
+        f"{payment_method_label(payment.get('method'))}: "
+        f"{dec(payment.get('amount')):.2f} EUR"
+        for payment in payments
+    ) or "–"
+    issued_at = str(snapshot.get("issued_at") or invoice.get("issued_at") or "-").replace(
+        "T", " ", 1
+    )
+    heading = "TEST – RAČUN" if test_mode else "RAČUN"
+    rows = [["Postavka", "Kol.", "Cena", "Rabat", "Znesek"]]
+    for line in lines:
+        description = str(line.get("description") or "Postavka")
+        if line.get("line_kind") == "SERVICE" and line.get("billable_minutes"):
+            description += f" ({line['billable_minutes']} min)"
+        rows.append([
+            Paragraph(escape(description), small),
+            str(line.get("quantity") or "1"),
+            f"{dec(line.get('base_unit_price')):.2f}",
+            f"{dec(line.get('applied_discount_percent')):.2f} %",
+            f"{dec(line.get('line_total')):.2f}",
+        ])
+    info = (
+        f"<b>{escape(str(company.get('legal_name') or 'MikroFix'))}</b><br/>"
+        f"{escape(str(company.get('street') or ''))}, "
+        f"{escape(str(company.get('city') or ''))}<br/>"
+        f"Davčna: {escape(str(company.get('tax_number') or '-'))}<br/><br/>"
+        f"Številka: <b>{escape(invoice_no)}</b><br/>"
+        f"Izdano: {escape(issued_at)}<br/>"
+        f"Prostor/naprava: {escape(str(snapshot.get('premise_id') or '-'))}/"
+        f"{escape(str(snapshot.get('electronic_device_id') or '-'))}<br/>"
+        f"Kupec: {escape(str(customer.get('name') or 'Končni kupec'))}<br/>"
+        f"Naslov: {escape(str(customer.get('address') or '-'))}"
+    )
+    table = Table(rows, colWidths=[90*mm, 18*mm, 24*mm, 24*mm, 28*mm], repeatRows=1)
+    table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), regular_font),
+        ("FONTNAME", (0, 0), (-1, 0), bold_font),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EDF1")),
+        ("GRID", (0, 0), (-1, -1), .25, colors.HexColor("#CDD4DA")),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+    ]))
+    story = [Paragraph(heading, title), Paragraph(info, body), Spacer(1, 5*mm), table]
+    story.extend([
+        Spacer(1, 4*mm),
+        Paragraph(f"<b>SKUPAJ: {total:.2f} EUR</b>", body),
+        Paragraph(f"Plačilo: {escape(payment_text)}", body),
+        Paragraph(escape(str(snapshot.get("tax_note") or "")), small),
+    ])
+    if invoice.get("furs_eor"):
+        story.append(Paragraph(f"EOR: {escape(str(invoice['furs_eor']))}", small))
+    SimpleDocTemplate(
+        str(a4_path), pagesize=A4, leftMargin=15*mm, rightMargin=15*mm,
+        topMargin=15*mm, bottomMargin=15*mm,
+    ).build(story)
+
+    width = int(paper_width_mm) * mm
+    receipt_rows = [["Postavka", "Kol.", "Znesek"]] + [
+        [Paragraph(escape(str(line.get("description") or "Postavka")), small),
+         str(line.get("quantity") or "1"), f"{dec(line.get('line_total')):.2f}"]
+        for line in lines
+    ]
+    receipt_table = Table(receipt_rows, colWidths=[48*mm, 10*mm, 14*mm])
+    receipt_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), regular_font),
+        ("FONTNAME", (0, 0), (-1, 0), bold_font),
+        ("LINEBELOW", (0, 0), (-1, 0), .4, colors.black),
+        ("ALIGN", (1, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 1),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 1),
+    ]))
+    receipt_story = [
+        Paragraph(heading, ParagraphStyle(
+            "CentralReceiptTitle", parent=title, fontSize=13, leading=15,
+            alignment=1,
+        )),
+        Paragraph(f"<b>{escape(invoice_no)}</b><br/>{escape(issued_at)}", small),
+        Spacer(1, 2*mm), receipt_table, Spacer(1, 2*mm),
+        Paragraph(f"<b>SKUPAJ: {total:.2f} EUR</b>", body),
+        Paragraph(f"Plačilo: {escape(payment_text)}", small),
+        Paragraph(escape(str(snapshot.get("tax_note") or "")), small),
+    ]
+    height = max(150, 92 + 14 * len(lines)) * mm
+    SimpleDocTemplate(
+        str(receipt_path), pagesize=(width, height), leftMargin=4*mm,
+        rightMargin=4*mm, topMargin=4*mm, bottomMargin=4*mm,
+    ).build(receipt_story)
+    return a4_path, receipt_path
 
 
 def generate_pos_pdfs(
