@@ -116,6 +116,10 @@ from mikrofix_v30_pos import (
     service_labor_from_minutes, service_tariff_snapshot,
 )
 from mikrofix_v30_pos_ui import open_pos
+from mikrofix_central_cashier_bootstrap import (
+    CentralCashierBootstrapError,
+    build_central_cashier,
+)
 from mikrofix_transactions import complete_buyback_atomic
 from mikrofix_operations import (
     list_recovery_operations,
@@ -6968,7 +6972,16 @@ def launch_pos(service_id=None):
     if main_menu_frame is not None and main_menu_frame.winfo_exists():
         main_menu_frame.pack_forget()
 
+    central_handle = None
+
+    def close_central_handle():
+        nonlocal central_handle
+        if central_handle is not None:
+            central_handle.close()
+            central_handle = None
+
     def return_to_menu():
+        close_central_handle()
         root.deiconify()
         try:
             root.state("zoomed")
@@ -6977,6 +6990,12 @@ def launch_pos(service_id=None):
         root.after(50, show_start_menu)
 
     try:
+        central_handle = build_central_cashier(
+            settings=RUNTIME.settings,
+            office_db=OFFICE_DB,
+            actor_id=AUTH_SESSION.username,
+            device_id=f"CASHIER-{RUNTIME.active_premise}-{RUNTIME.electronic_device}",
+        )
         open_pos(
             root,
             runtime=RUNTIME,
@@ -6992,8 +7011,17 @@ def launch_pos(service_id=None):
             service_loader=load_service_invoice_seed,
             service_finalizer=generate_pdf,
             on_close=return_to_menu,
+            central_cashier=(central_handle.workflow if central_handle else None),
         )
+    except CentralCashierBootstrapError as exc:
+        close_central_handle()
+        messagebox.showerror(
+            "MikroFIX – centralna Blagajna", str(exc), parent=root
+        )
+        return_to_menu()
+        return False
     except Exception as exc:
+        close_central_handle()
         messagebox.showerror(
             "MikroFIX", f"Blagajne ni bilo mogoče odpreti:\n{exc}", parent=root
         )

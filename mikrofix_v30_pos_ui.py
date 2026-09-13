@@ -34,6 +34,7 @@ from mikrofix_v30_pos import (
     generate_central_invoice_pdfs, generate_pos_pdfs,
     generate_pos_preview_pdfs, issue_invoice,
     eligible_storned_invoices, latest_pending_print, load_active_pos_draft,
+    pos_draft_data_authority,
     mark_pdf_ready, mark_printed, register_copy, save_pos_draft,
     prepare_used_goods_agreement, set_used_goods_agreement_signed,
     customer_partner_by_id, list_customer_partners, save_customer_partner,
@@ -140,6 +141,7 @@ class PosWindow:
         self.premise_var = tk.StringVar(value=str(self.runtime.active_premise))
 
         ensure_pos_schema(self.office_db)
+        self._assert_recovery_mode_compatible()
         parent.withdraw()
         self.win = tk.Toplevel(parent)
         self.win.title("MikroFIX – Blagajna")
@@ -162,7 +164,7 @@ class PosWindow:
         self._build()
         self._restoring_draft = False
         self.refresh_stock()
-        pending = latest_pending_print(self.office_db)
+        pending = None if self.central_mode else latest_pending_print(self.office_db)
         if pending:
             self._resume_pending_print(pending)
         elif service_id and service_loader:
@@ -532,6 +534,7 @@ class PosWindow:
     def _draft_data(self):
         return {
             "schema_version": 1,
+            "data_authority": "CENTRAL" if self.central_mode else "LOCAL",
             "lines": [
                 {
                     "line_kind": line.line_kind,
@@ -577,6 +580,32 @@ class PosWindow:
             "replacement_of_invoice_id": self.replacement_of_invoice_id,
             "replacement_of_invoice_no": self.replacement_of_invoice_no,
         }
+
+    def _assert_recovery_mode_compatible(self):
+        """Fail closed before showing a window that could mix accounting modes."""
+        expected = "CENTRAL" if self.central_mode else "LOCAL"
+        if self.central_mode and latest_pending_print(self.office_db):
+            raise PosError(
+                "V lokalni Blagajni obstaja izdan račun, ki še čaka na prvotni "
+                "izpis. Pred prehodom na centralno Blagajno ga je treba varno "
+                "razrešiti v lokalnem načinu; zapis je ostal nedotaknjen."
+            )
+        stored = load_active_pos_draft(
+            self.office_db,
+            actor_username=self.authenticated_username,
+            device_id=self.runtime.electronic_device,
+        )
+        if not stored:
+            return
+        actual = pos_draft_data_authority(stored.get("payload") or {})
+        if actual != expected:
+            actual_label = "centralnega" if actual == "CENTRAL" else "lokalnega"
+            expected_label = "centralnega" if expected == "CENTRAL" else "lokalnega"
+            raise PosError(
+                f"Na tej postaji je odprt osnutek iz {actual_label} načina. "
+                f"Ni ga dovoljeno odpreti v načinu {expected_label} knjiženja. "
+                "Osnutek je ostal nedotaknjen."
+            )
 
     def _schedule_draft_save(self):
         if self._restoring_draft or self.issued_id or not hasattr(self, "win"):
@@ -644,6 +673,15 @@ class PosWindow:
         if not stored:
             return
         stored_payload = stored.get("payload") or {}
+        expected = "CENTRAL" if self.central_mode else "LOCAL"
+        if pos_draft_data_authority(stored_payload) != expected:
+            messagebox.showerror(
+                "Obnovitev osnutka",
+                "Izvor shranjenega osnutka se ne ujema z načinom Blagajne. "
+                "Osnutek je ostal nedotaknjen.",
+                parent=self.win,
+            )
+            return
         if not (
             stored_payload.get("lines") or stored_payload.get("service_id")
             or stored_payload.get("replacement_of_invoice_id")
@@ -3559,7 +3597,7 @@ class PosWindow:
             "TEST – FURS izklopljen"
         )
         self.state_var.set("Dodaj postavke in odpri končni pregled.")
-        pending = latest_pending_print(self.office_db)
+        pending = None if self.central_mode else latest_pending_print(self.office_db)
         if pending:
             self._resume_pending_print(pending)
             return

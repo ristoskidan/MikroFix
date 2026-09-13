@@ -166,3 +166,21 @@ V aktivni datoteki nastavitev mora biti `database.server_url` na primer
 brez okoljske skrivnosti pomeni `SYNC: MANJKA SKRIVNOST`. Sinhronizacija teče v
 ozadju ob zagonu, po novem lokalnem dogodku in periodično. Ne blokira zaključka
 servisa in nima produkcijskega obvoda.
+
+## Razvojni priklop Blagajne
+
+Glavni namizni program odpre centralni tok Blagajne, kadar je nastavljen
+`database.server_url`. Uporabi isto razvojno okoljsko skrivnost
+`MIKROFIX_SYNC_TOKEN`; skrivnost se ne zapisuje v nastavitve ali lokalno bazo.
+
+Prazen URL ohrani izrecni stari lokalni način. Nastavljen URL brez skrivnosti,
+nedosegljiv centralni strežnik ali napaka centralnega ukaza ne smejo povzročiti
+samodejnega lokalnega knjiženja. Produkcijski način razvojno skrivnost zavrne,
+dokler ni priklopljena centralna uporabniška seja in identiteta blagajniške
+postaje.
+
+Lokalni in centralni obnovitveni osnutki imajo oznako izvora. Stari osnutki brez
+oznake veljajo za lokalne. Če način osnutka ne ustreza trenutno izbranemu načinu
+Blagajne, se zagon ustavi brez spremembe osnutka. Enako centralnega toka ni
+dovoljeno odpreti, dokler lokalno izdani račun še čaka na varno dokončanje
+prvotnega izpisa.

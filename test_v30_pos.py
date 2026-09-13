@@ -12,6 +12,7 @@ from mikrofix_v30_pos import (
     eligible_storned_invoices, ensure_pos_schema, invoice_snapshot, issue_invoice,
     generate_central_invoice_pdfs, generate_pos_pdfs, generate_pos_preview_pdfs,
     latest_pending_print, load_active_pos_draft, mark_pdf_ready, mark_printed,
+    pos_draft_data_authority,
     register_copy, save_pos_draft, search_inventory,
     pending_furs_documents, reconcile_pending_furs_document,
     open_sales_claim, search_issued_invoices,
@@ -712,6 +713,14 @@ class V30PosTests(unittest.TestCase):
             load_active_pos_draft(
                 self.office, actor_username="daniel", device_id="PIS"
             )
+
+    def test_legacy_draft_is_local_and_unknown_authority_is_rejected(self):
+        self.assertEqual(pos_draft_data_authority({}), "LOCAL")
+        self.assertEqual(
+            pos_draft_data_authority({"data_authority": "central"}), "CENTRAL"
+        )
+        with self.assertRaisesRegex(PosError, "neznan izvor"):
+            pos_draft_data_authority({"data_authority": "UNTRUSTED"})
 
     def test_pos_drafts_are_isolated_by_authenticated_user_and_device(self):
         save_pos_draft(

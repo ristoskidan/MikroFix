@@ -714,6 +714,21 @@ def _draft_payload(payload: dict) -> tuple[str, str]:
     return raw, hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def pos_draft_data_authority(payload: dict) -> str:
+    """Return the accounting authority of a recoverable POS draft.
+
+    Drafts written before central Cashier existed have no marker and are
+    deliberately classified as LOCAL.  Unknown markers are rejected instead
+    of guessing which stock and invoice authority owns the draft.
+    """
+    authority = str(payload.get("data_authority") or "LOCAL").strip().upper()
+    if authority not in {"LOCAL", "CENTRAL"}:
+        raise PosError(
+            "Osnutek računa ima neznan izvor podatkov in ga ni varno obnoviti."
+        )
+    return authority
+
+
 def save_pos_draft(
     office_db: Path | str,
     *,
@@ -729,6 +744,7 @@ def save_pos_draft(
     token = str(issue_token or "").strip()
     if not token:
         raise PosError("Osnutek računa nima enolične oznake.")
+    pos_draft_data_authority(payload)
     actor = _actor_username(actor_username)
     payload_json, digest = _draft_payload(payload)
     now = datetime.now().isoformat(timespec="seconds")
