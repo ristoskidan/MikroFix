@@ -44,6 +44,7 @@ from .models import (
     inventory_identities,
     inventory_items,
     inventory_lots,
+    inventory_price_history,
     invoice_drafts,
     invoices,
     partners,
@@ -1019,6 +1020,60 @@ def create_app(
             ),
             "blocked": row.blocked, "blocked_reason": row.blocked_reason or "",
         } for row in rows]}
+
+    @app.get(
+        "/v1/office/inventory/{article_id}/price-history",
+        dependencies=[Depends(office_identity)],
+    )
+    def inventory_price_decisions(article_id: UUID) -> dict:
+        query = select(
+            inventory_price_history,
+            purchase_receipts.c.receipt_number,
+            central_users.c.display_name.label("actor_display_name"),
+            central_users.c.username.label("actor_username"),
+        ).select_from(
+            inventory_price_history
+            .outerjoin(
+                purchase_receipts,
+                purchase_receipts.c.receipt_uuid
+                == inventory_price_history.c.receipt_uuid,
+            )
+            .outerjoin(
+                central_users,
+                central_users.c.user_uuid == inventory_price_history.c.actor_uuid,
+            )
+        ).where(
+            inventory_price_history.c.article_uuid == article_id
+        ).order_by(
+            inventory_price_history.c.effective_at.desc(),
+            inventory_price_history.c.price_history_uuid.desc(),
+        )
+        with database_engine.connect() as connection:
+            article = connection.execute(select(
+                inventory_items.c.description, inventory_items.c.barcode,
+            ).where(
+                inventory_items.c.article_uuid == article_id
+            )).one_or_none()
+            if article is None:
+                raise HTTPException(status_code=404, detail="Inventory item not found.")
+            rows = connection.execute(query).all()
+        return {
+            "article_id": article_id, "description": article.description,
+            "main_barcode": article.barcode,
+            "price_history": [{
+                "price_history_id": row.price_history_uuid,
+                "source": "RECEIPT" if row.receipt_uuid else "OFFICE_DECISION",
+                "receipt_id": row.receipt_uuid,
+                "receipt_number": row.receipt_number or "",
+                "operation_id": row.price_change_operation_id,
+                "previous_price": format(row.previous_price, ".2f"),
+                "confirmed_price": format(row.confirmed_price, ".2f"),
+                "highest_available_cost": format(row.highest_available_cost, ".4f"),
+                "reason": row.change_reason or "Cena potrjena na prejemu",
+                "effective_at": row.effective_at.isoformat(timespec="seconds"),
+                "actor": row.actor_display_name or row.actor_username or "Razvojni način",
+            } for row in rows],
+        }
 
     @app.get(
         "/v1/office/purchase-receipts",

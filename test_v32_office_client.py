@@ -180,6 +180,26 @@ class OfficeCommandJournalTests(unittest.TestCase):
         self.assertEqual(invoice["invoice_number"], "MFD-PIS-1")
         self.assertEqual(get.call_count, 2)
 
+    @patch("requests.get")
+    def test_office_reads_central_inventory_price_history(self, get):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "article_id": "article-1", "description": "Artikel",
+            "main_barcode": "ART-1", "price_history": [{
+                "previous_price": "10.00", "confirmed_price": "12.00",
+            }],
+        }
+        get.return_value = response
+        transport = RequestsOfficeTransport("https://central.example", "token")
+
+        result = transport.inventory_price_history("article-1")
+
+        self.assertEqual(result["price_history"][0]["confirmed_price"], "12.00")
+        get.assert_called_once_with(
+            "https://central.example/v1/office/inventory/article-1/price-history",
+            params={}, headers={"Authorization": "Bearer token"}, timeout=15.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

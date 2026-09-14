@@ -269,6 +269,10 @@ class CentralOfficeWindow:
                 self.context_actions, text="SPREMENI PRODAJNO CENO",
                 command=self.change_inventory_price,
             ).pack(side="left", padx=6)
+            ttk.Button(
+                self.context_actions, text="ZGODOVINA CEN",
+                command=self.open_inventory_price_history,
+            ).pack(side="left")
 
     def refresh(self) -> None:
         query = self.search_var.get().strip()
@@ -374,6 +378,43 @@ class CentralOfficeWindow:
             self.refresh()
             return
         self.refresh()
+
+    def open_inventory_price_history(self) -> None:
+        article = self.selected_record()
+        if not article:
+            messagebox.showwarning("Zaloga", "Izberi artikel.", parent=self.win)
+            return
+        try:
+            result = self.workflow.inventory_price_history(str(article["article_id"]))
+        except Exception as exc:
+            messagebox.showerror("Zgodovina cen", str(exc), parent=self.win)
+            return
+        dialog = tk.Toplevel(self.win)
+        dialog.title("Zgodovina cen")
+        maximize_work_window(dialog, "980x620")
+        tk.Label(
+            dialog,
+            text=f"{result.get('description') or 'Artikel'}  •  {result.get('main_barcode') or '—'}",
+            font=("Segoe UI", 15, "bold"), anchor="w",
+        ).pack(fill="x", padx=14, pady=(12, 8))
+        columns = ("time", "old", "new", "cost", "source", "actor", "reason")
+        labels = ("Čas", "Stara", "Nova", "Najv. strošek", "Vir", "Uporabnik", "Razlog")
+        tree = ttk.Treeview(dialog, columns=columns, show="headings")
+        for key, label in zip(columns, labels):
+            tree.heading(key, text=label)
+            tree.column(key, width=170 if key in {"time", "reason"} else 100,
+                        stretch=key == "reason")
+        for row in result.get("price_history") or []:
+            tree.insert("", "end", values=(
+                str(row.get("effective_at") or "").replace("T", " ")[:19],
+                f"{row.get('previous_price') or '0.00'} €",
+                f"{row.get('confirmed_price') or '0.00'} €",
+                f"{row.get('highest_available_cost') or '0.0000'} €",
+                row.get("receipt_number") or "Ročna odločitev",
+                row.get("actor") or "—", row.get("reason") or "—",
+            ))
+        tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        ttk.Button(dialog, text="ZAPRI", command=dialog.destroy).pack(pady=(0, 12))
 
     def new_receipt(self) -> None:
         try:

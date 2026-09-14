@@ -73,6 +73,9 @@ class FakeOfficeTransport:
     def search_inventory(self, query, *, limit=100):
         return [{"description": query, "limit": limit}]
 
+    def inventory_price_history(self, article_id):
+        return {"article_id": article_id, "price_history": []}
+
     def list_purchase_receipts(self, *, status="", limit=100):
         return [{"status": status, "limit": limit}]
 
@@ -101,6 +104,10 @@ class CentralOfficeWorkflowTests(unittest.TestCase):
     def test_reads_are_delegated_without_creating_commands(self):
         self.assertEqual(self.workflow.partners("dob", limit=3)[0]["name"], "dob")
         self.assertEqual(self.workflow.inventory("zaslon", limit=4)[0]["limit"], 4)
+        self.assertEqual(
+            self.workflow.inventory_price_history("article-1")["article_id"],
+            "article-1",
+        )
         self.assertEqual(
             self.workflow.purchase_receipts(status="RELEASED")[0]["status"],
             "RELEASED",

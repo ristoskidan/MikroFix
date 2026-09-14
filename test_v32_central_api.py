@@ -2690,6 +2690,18 @@ class CentralApiIntegrationTests(unittest.TestCase):
         ).json()
         self.assertEqual(stale["result_code"], "REJECTED")
         self.assertEqual(stale["error_code"], "VERSION_CONFLICT")
+        history_response = self.client.get(
+            f"/v1/office/inventory/{article_id}/price-history", headers=headers,
+        )
+        self.assertEqual(history_response.status_code, 200, history_response.text)
+        history_read_model = history_response.json()["price_history"]
+        self.assertEqual(len(history_read_model), 2)
+        self.assertEqual(history_read_model[0]["source"], "OFFICE_DECISION")
+        self.assertEqual(history_read_model[0]["actor"], "Office Auth")
+        self.assertEqual(
+            history_read_model[0]["reason"], "Nova prodajna odločitev"
+        )
+        self.assertTrue(history_read_model[1]["receipt_number"].startswith("DRA-"))
         with self.engine.connect() as connection:
             article = connection.execute(select(inventory_items)).one()
             history = connection.execute(select(inventory_price_history).order_by(

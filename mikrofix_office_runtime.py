@@ -72,6 +72,9 @@ class CentralOfficeWorkflow:
     def inventory(self, query: str = "", *, limit: int = 100) -> list[dict[str, Any]]:
         return self.transport.search_inventory(query, limit=limit)
 
+    def inventory_price_history(self, article_id: str) -> dict[str, Any]:
+        return self.transport.inventory_price_history(article_id)
+
     def purchase_receipts(
         self, *, status: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]:

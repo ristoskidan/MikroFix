@@ -61,6 +61,16 @@ class RequestsOfficeTransport(RequestsSyncTransport):
         payload = self._get("/v1/office/inventory", q=query, limit=limit)
         return self._list(payload, "inventory")
 
+    def inventory_price_history(self, article_id: str) -> dict[str, Any]:
+        payload = self._get(
+            f"/v1/office/inventory/{str(article_id)}/price-history"
+        )
+        if not payload.get("article_id") or not isinstance(
+            payload.get("price_history"), list
+        ):
+            raise SyncTransportError("Central API returned invalid price history.")
+        return payload
+
     def list_purchase_receipts(
         self, *, status: str = "", limit: int = 100,
     ) -> list[dict[str, Any]]:

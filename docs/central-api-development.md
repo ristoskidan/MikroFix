@@ -100,7 +100,9 @@ pričakovano različico artikla in obveznim razlogom. Strežnik zaklene artikel,
 ponovno izračuna najvišji nabavni strošek še razpoložljivih LOT-ov in zavrne
 ceno pod varovalko strošek + 5 %. Sprejeta odločitev ohrani staro in novo ceno,
 stroškovno osnovo, uporabnika, razlog ter identiteto operacije; sprememba je
-vidna Servisu in Blagajni prek istega inventurnega dogodka.
+vidna Servisu in Blagajni prek istega inventurnega dogodka. Office lahko celotno
+zgodovino cene prebere na artiklu; nabavna stroškovna osnova se s tem ne razkrije
+Blagajni ali Servisu.
 
 Office lahko partnerja tudi ustvari, popravi, deaktivira ali ponovno aktivira.
 Vsaka sprememba zahteva pričakovano različico zapisa; sočasna popravka istega
