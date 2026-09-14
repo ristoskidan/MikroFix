@@ -12,6 +12,8 @@ from mikrofix_sync_contracts import (
     CloseCashSessionContract,
     ManualCashEntryContract,
     OpenCashSessionContract,
+    ReceivePhysicalStockReturnContract,
+    ResolvePhysicalStockReturnContract,
     SettleUnpaidBankInvoiceContract,
     StornoInvoiceContract,
     PaymentContract,
@@ -30,6 +32,8 @@ from mikrofix_sync_contracts import (
     validated_technical_completion_payload,
     validated_set_partner_active_payload,
     validated_storno_invoice_payload,
+    validated_receive_physical_stock_return_payload,
+    validated_resolve_physical_stock_return_payload,
     validated_update_partner_payload,
     validated_update_inventory_price_payload,
 )
@@ -508,6 +512,30 @@ class SyncContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "unsupported fields: return_stock"):
             validated_storno_invoice_payload({
                 **contract.payload(), "return_stock": True,
+            })
+
+    def test_physical_return_and_office_resolution_are_separate_contracts(self):
+        return_id = str(uuid4())
+        receipt = ReceivePhysicalStockReturnContract(
+            return_id=return_id, invoice_id=str(uuid4()),
+            invoice_line_id=str(uuid4()), lot_id=str(uuid4()), quantity="1",
+            condition_note="Vrnjeno na blagajni", confirmed=True,
+        )
+        self.assertEqual(receipt.quantity, "1")
+        self.assertNotIn("decision", receipt.payload())
+        with self.assertRaisesRegex(ContractError, "greater than zero"):
+            validated_receive_physical_stock_return_payload({
+                **receipt.payload(), "quantity": "0",
+            })
+        decision = ResolvePhysicalStockReturnContract(
+            return_id=return_id, expected_version=1,
+            decision="RETURN_TO_STOCK", reason="Pregledano in brezhibno",
+            confirmed=True,
+        )
+        self.assertEqual(decision.decision, "RETURN_TO_STOCK")
+        with self.assertRaisesRegex(ContractError, "not supported"):
+            validated_resolve_physical_stock_return_payload({
+                **decision.payload(), "decision": "CREATE_STOCK_EXCEPTION",
             })
 
 

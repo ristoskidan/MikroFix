@@ -760,6 +760,61 @@ direct_sale_stock_allocations = Table(
 )
 
 
+physical_stock_returns = Table(
+    "physical_stock_returns_v32",
+    metadata,
+    Column("return_uuid", UUID(as_uuid=True), primary_key=True),
+    Column("row_version", Integer, nullable=False, server_default="1"),
+    Column(
+        "invoice_uuid", UUID(as_uuid=True),
+        ForeignKey("invoices_v32.invoice_uuid"), nullable=False,
+    ),
+    Column("invoice_line_uuid", UUID(as_uuid=True), nullable=False),
+    Column(
+        "lot_uuid", UUID(as_uuid=True),
+        ForeignKey("inventory_lots_v32.lot_uuid"), nullable=False,
+    ),
+    Column(
+        "article_uuid", UUID(as_uuid=True),
+        ForeignKey("inventory_items_v32.article_uuid"), nullable=False,
+    ),
+    Column("quantity", Numeric(18, 4), nullable=False),
+    Column("receipt_source", String(30), nullable=False),
+    Column("condition_note", String(500), nullable=False, server_default=""),
+    Column("status", String(30), nullable=False),
+    Column("receipt_operation_id", UUID(as_uuid=True), ForeignKey("accepted_operations_v32.operation_id"), nullable=False, unique=True),
+    Column("received_by_user_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    Column("received_at_workstation_uuid", UUID(as_uuid=True), ForeignKey("workstations_v32.workstation_uuid")),
+    Column("received_device_id", String(200), nullable=False),
+    Column("received_at", DateTime(timezone=True), nullable=False),
+    Column("resolution_operation_id", UUID(as_uuid=True), ForeignKey("accepted_operations_v32.operation_id"), unique=True),
+    Column("resolution_decision", String(30)),
+    Column("resolution_reason", String(500)),
+    Column("resolved_by_user_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    Column("resolved_at_workstation_uuid", UUID(as_uuid=True), ForeignKey("workstations_v32.workstation_uuid")),
+    Column("resolved_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("row_version >= 1", name="physical_return_version_positive"),
+    CheckConstraint("quantity > 0", name="physical_return_quantity_positive"),
+    CheckConstraint(
+        "receipt_source IN ('CASHIER_RETURN','SERVICE_REMOVAL')",
+        name="physical_return_receipt_source",
+    ),
+    CheckConstraint(
+        "status IN ('QUARANTINED','RELEASED_TO_STOCK','DEFECTIVE','CLAIM_REVIEW_REQUIRED')",
+        name="physical_return_status",
+    ),
+    CheckConstraint(
+        "(status='QUARANTINED' AND resolution_operation_id IS NULL "
+        "AND resolution_decision IS NULL AND resolved_at IS NULL) OR "
+        "(status<>'QUARANTINED' AND resolution_operation_id IS NOT NULL "
+        "AND resolution_decision IS NOT NULL AND resolved_at IS NOT NULL)",
+        name="physical_return_resolution_state",
+    ),
+)
+
+
 direct_sale_discount_audit = Table(
     "direct_sale_discount_audit_v32",
     metadata,

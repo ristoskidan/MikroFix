@@ -1309,6 +1309,111 @@ def validated_storno_invoice_payload(value: Mapping[str, Any]) -> dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
+class ReceivePhysicalStockReturnContract:
+    return_id: str
+    invoice_id: str
+    invoice_line_id: str
+    lot_id: str
+    quantity: str
+    condition_note: str
+    confirmed: bool
+
+    def __post_init__(self) -> None:
+        for field_name in ("return_id", "invoice_id", "invoice_line_id", "lot_id"):
+            object.__setattr__(
+                self, field_name,
+                normalized_uuid(getattr(self, field_name), field=field_name),
+            )
+        quantity = decimal_text(self.quantity, field="quantity")
+        if Decimal(quantity) <= 0:
+            raise ContractError("physical return quantity must be greater than zero.")
+        object.__setattr__(self, "quantity", quantity)
+        note = str(self.condition_note or "").strip()
+        if len(note) > 500:
+            raise ContractError("physical return condition_note is too long.")
+        object.__setattr__(self, "condition_note", note)
+        if self.confirmed is not True:
+            raise ContractError("physical stock receipt must be explicitly confirmed.")
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_receive_physical_stock_return_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = dict(value)
+    allowed = {
+        "return_id", "invoice_id", "invoice_line_id", "lot_id", "quantity",
+        "condition_note", "confirmed",
+    }
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "physical stock receipt contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    try:
+        return ReceivePhysicalStockReturnContract(**raw).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("physical stock receipt payload is invalid.") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvePhysicalStockReturnContract:
+    return_id: str
+    expected_version: int
+    decision: str
+    reason: str
+    confirmed: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "return_id", normalized_uuid(self.return_id, field="return_id")
+        )
+        version = int(self.expected_version)
+        if version != 1:
+            raise ContractError("a quarantined physical return requires expected_version 1.")
+        object.__setattr__(self, "expected_version", version)
+        decision = str(self.decision or "").strip().upper()
+        if decision not in {
+            "RETURN_TO_STOCK", "MARK_DEFECTIVE", "REFER_TO_CLAIM",
+        }:
+            raise ContractError("physical return decision is not supported.")
+        object.__setattr__(self, "decision", decision)
+        reason = str(self.reason or "").strip()
+        if len(reason) < 3 or len(reason) > 500:
+            raise ContractError("physical return decision reason must contain 3 to 500 characters.")
+        object.__setattr__(self, "reason", reason)
+        if self.confirmed is not True:
+            raise ContractError("physical return decision must be explicitly confirmed.")
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_resolve_physical_stock_return_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = dict(value)
+    allowed = {"return_id", "expected_version", "decision", "reason", "confirmed"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "physical return decision contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    try:
+        return ResolvePhysicalStockReturnContract(**raw).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("physical return decision payload is invalid.") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class SyncOperationEnvelope:
     operation_id: str
     operation_type: str

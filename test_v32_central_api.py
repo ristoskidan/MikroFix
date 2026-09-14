@@ -77,6 +77,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
             invoice_number_sequences,
             invoices,
             partners,
+            physical_stock_returns,
             purchase_receipt_lines,
             purchase_receipt_revisions,
             purchase_receipts,
@@ -96,6 +97,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             connection.execute(delete(central_audit_events))
             connection.execute(delete(central_sessions))
+            connection.execute(delete(physical_stock_returns))
             connection.execute(delete(service_stock_allocations))
             connection.execute(delete(receipt_attachments))
             connection.execute(delete(direct_sale_discount_audit))
@@ -273,6 +275,43 @@ class CentralApiIntegrationTests(unittest.TestCase):
                 "invoice_id": str(invoice_id),
                 "expected_version": expected_version,
                 "reason": reason, "confirmed": True,
+            },
+            "contract_version": 1,
+        }
+
+    def receive_stock_return_operation(
+        self, return_id, invoice_id, line_id, lot_id, *, sequence,
+        operation_type="ReceiveReturnedSaleItem", quantity="1",
+    ):
+        return {
+            "operation_id": str(uuid4()), "operation_type": operation_type,
+            "aggregate_type": "STOCK_RETURN", "aggregate_id": str(return_id),
+            "expected_version": 0, "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-14T13:00:00+02:00",
+            "payload": {
+                "return_id": str(return_id), "invoice_id": str(invoice_id),
+                "invoice_line_id": str(line_id), "lot_id": str(lot_id),
+                "quantity": quantity, "condition_note": "Fizično prevzeto",
+                "confirmed": True,
+            },
+            "contract_version": 1,
+        }
+
+    def resolve_stock_return_operation(
+        self, return_id, *, sequence, decision="RETURN_TO_STOCK",
+    ):
+        return {
+            "operation_id": str(uuid4()),
+            "operation_type": "ResolvePhysicalStockReturn",
+            "aggregate_type": "STOCK_RETURN", "aggregate_id": str(return_id),
+            "expected_version": 1, "actor_id": "office-a",
+            "device_id": "OFFICE-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-14T14:00:00+02:00",
+            "payload": {
+                "return_id": str(return_id), "expected_version": 1,
+                "decision": decision, "reason": "Pregledano v Office",
+                "confirmed": True,
             },
             "contract_version": 1,
         }
@@ -2609,6 +2648,218 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(original.status, "REVERSED")
         self.assertEqual(reversal.status, "ISSUED")
         self.assertEqual(reversal_count, 1)
+
+    def test_sale_return_enters_quarantine_and_office_release_restores_exact_lot(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import (
+            direct_sale_stock_allocations, inventory_items, inventory_lots,
+            physical_stock_returns,
+        )
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=332,
+            document_type="DRA", external_no="DRA-PHYSICAL-RETURN",
+        )
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(uuid4(), sequence=333),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        with self.engine.connect() as connection:
+            allocation = connection.execute(select(
+                direct_sale_stock_allocations
+            )).one()
+        return_id = uuid4()
+        received_operation = self.receive_stock_return_operation(
+            return_id, invoice_id, allocation.sale_line_uuid,
+            allocation.lot_uuid, sequence=334,
+        )
+        received = self.client.post(
+            "/v1/sync/operations", json=received_operation, headers=self.headers
+        ).json()
+        repeated = self.client.post(
+            "/v1/sync/operations", json=received_operation, headers=self.headers
+        ).json()
+        self.assertEqual(received, repeated)
+        self.assertEqual(received["result_code"], "ACCEPTED", received)
+        self.assertEqual(received["result"]["status"], "QUARANTINED")
+        self.assertEqual(received["result"]["stock_effect"], "NONE")
+        with self.engine.connect() as connection:
+            returned = connection.execute(select(physical_stock_returns)).one()
+            lot_before = connection.execute(select(inventory_lots).where(
+                inventory_lots.c.lot_uuid == allocation.lot_uuid
+            )).one()
+            item_before = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+        self.assertEqual(returned.status, "QUARANTINED")
+        self.assertEqual(str(lot_before.available_quantity), "1.0000")
+        self.assertEqual(str(item_before.quantity_on_hand), "1.0000")
+
+        resolved_operation = self.resolve_stock_return_operation(
+            return_id, sequence=335
+        )
+        resolved = self.client.post(
+            "/v1/sync/operations", json=resolved_operation, headers=self.headers
+        ).json()
+        resolved_repeated = self.client.post(
+            "/v1/sync/operations", json=resolved_operation, headers=self.headers
+        ).json()
+        self.assertEqual(resolved, resolved_repeated)
+        self.assertEqual(resolved["result"]["status"], "RELEASED_TO_STOCK")
+        self.assertEqual(resolved["result"]["stock_effect"], "INCREASED")
+        with self.engine.connect() as connection:
+            returned = connection.execute(select(physical_stock_returns)).one()
+            lot_after = connection.execute(select(inventory_lots).where(
+                inventory_lots.c.lot_uuid == allocation.lot_uuid
+            )).one()
+            item_after = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+        self.assertEqual(returned.row_version, 2)
+        self.assertEqual(returned.status, "RELEASED_TO_STOCK")
+        self.assertEqual(str(lot_after.available_quantity), "2.0000")
+        self.assertEqual(str(item_after.quantity_on_hand), "2.0000")
+
+    def test_concurrent_receipts_cannot_return_more_than_the_sold_lot_quantity(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import (
+            direct_sale_stock_allocations, inventory_items,
+            physical_stock_returns,
+        )
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=336,
+            document_type="DRA", external_no="DRA-PHYSICAL-RETURN-RACE",
+        )
+        self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        )
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(uuid4(), sequence=337),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        with self.engine.connect() as connection:
+            allocation = connection.execute(select(
+                direct_sale_stock_allocations
+            )).one()
+        first = self.receive_stock_return_operation(
+            uuid4(), invoice_id, allocation.sale_line_uuid,
+            allocation.lot_uuid, sequence=338,
+        )
+        second = self.receive_stock_return_operation(
+            uuid4(), invoice_id, allocation.sale_line_uuid,
+            allocation.lot_uuid, sequence=339,
+        )
+        second["actor_id"] = "blagajnik-b"
+        second["device_id"] = "POS-PC-B"
+
+        def submit(payload):
+            return self.client.post(
+                "/v1/sync/operations", json=payload, headers=self.headers
+            ).json()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(submit, (first, second)))
+        self.assertEqual(
+            sorted(result["result_code"] for result in results),
+            ["ACCEPTED", "REJECTED"],
+        )
+        rejected = next(
+            result for result in results if result["result_code"] == "REJECTED"
+        )
+        self.assertEqual(
+            rejected["error_code"], "PHYSICAL_RETURN_EXCEEDS_SOLD_QUANTITY"
+        )
+        with self.engine.connect() as connection:
+            count = connection.execute(
+                select(func.count()).select_from(physical_stock_returns)
+            ).scalar_one()
+            item = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+        self.assertEqual(count, 1)
+        self.assertEqual(str(item.quantity_on_hand), "1.0000")
+
+    def test_removed_service_part_can_be_quarantined_without_reopening_service(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import (
+            inventory_items, physical_stock_returns, service_orders,
+            service_stock_allocations,
+        )
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=340,
+            document_type="DRA", external_no="DRA-SERVICE-REMOVAL",
+        )
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        order = self.operation(sequence=341)
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=order, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        completion = self.completion_operation(
+            order, sequence=342, barcode="SUP-BARCODE-1",
+            article_id=article_id,
+        )
+        completion["payload"]["parts"][0]["lot_serial"] = ""
+        completed = self.client.post(
+            "/v1/sync/operations", json=completion, headers=self.headers
+        ).json()
+        self.assertEqual(completed["result_code"], "ACCEPTED", completed)
+        draft_id = completed["result"]["draft_uuid"]
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(draft_id, sequence=343),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        with self.engine.connect() as connection:
+            allocation = connection.execute(select(
+                service_stock_allocations
+            )).one()
+        return_id = uuid4()
+        operation = self.receive_stock_return_operation(
+            return_id, invoice_id, allocation.service_line_uuid,
+            allocation.lot_uuid, sequence=344,
+            operation_type="ReceiveRemovedServicePart",
+        )
+        operation["actor_id"] = "serviser-test"
+        operation["device_id"] = "SERVICE-PC-TEST"
+        response = self.client.post(
+            "/v1/sync/operations", json=operation, headers=self.headers
+        ).json()
+        self.assertEqual(response["result_code"], "ACCEPTED", response)
+        referred = self.client.post(
+            "/v1/sync/operations",
+            json=self.resolve_stock_return_operation(
+                return_id, sequence=345, decision="REFER_TO_CLAIM",
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(referred["result"]["status"], "CLAIM_REVIEW_REQUIRED")
+        self.assertEqual(referred["result"]["stock_effect"], "NONE")
+        with self.engine.connect() as connection:
+            returned = connection.execute(select(physical_stock_returns)).one()
+            service = connection.execute(select(service_orders).where(
+                service_orders.c.sync_uuid == order["aggregate_id"]
+            )).one()
+            stock = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+        self.assertEqual(returned.receipt_source, "SERVICE_REMOVAL")
+        self.assertEqual(returned.status, "CLAIM_REVIEW_REQUIRED")
+        self.assertEqual(service.payload_json["technical_status"], "BILLING_COMPLETED")
+        self.assertEqual(str(stock.quantity_on_hand), "1.0000")
 
     def test_service_invoice_storno_does_not_reopen_service_or_restore_part(self):
         from sqlalchemy import func, select

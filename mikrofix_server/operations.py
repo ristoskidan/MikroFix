@@ -26,6 +26,8 @@ from mikrofix_sync_contracts import (
     validated_issue_direct_sale_invoice_payload,
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
+    validated_receive_physical_stock_return_payload,
+    validated_resolve_physical_stock_return_payload,
     validated_settle_unpaid_bank_invoice_payload,
     validated_storno_invoice_payload,
     validated_set_partner_active_payload,
@@ -51,6 +53,7 @@ from .models import (
     invoice_drafts,
     invoices,
     partners,
+    physical_stock_returns,
     purchase_receipt_lines,
     purchase_receipt_revisions,
     purchase_receipts,
@@ -1781,6 +1784,247 @@ def _effective_invoice_payments(invoice) -> list[dict]:
     return [dict(item) for item in (invoice.payments_json or [])]
 
 
+def _receive_physical_stock_return(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    return_uuid: UUID, operation_uuid: UUID,
+    *, actor_user_uuid: UUID | None, workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    """Record custody in quarantine without creating saleable stock."""
+    if envelope.aggregate_type != "STOCK_RETURN":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "A physical stock receipt requires STOCK_RETURN.",
+        )
+    if envelope.expected_version != 0:
+        return _reject(
+            "VERSION_CONFLICT", "A new physical stock receipt requires version 0."
+        )
+    try:
+        payload = validated_receive_physical_stock_return_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["return_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.return_id must equal aggregate_id."
+        )
+    invoice_uuid = UUID(payload["invoice_id"])
+    line_uuid = UUID(payload["invoice_line_id"])
+    lot_uuid = UUID(payload["lot_id"])
+    invoice = connection.execute(select(invoices).where(
+        invoices.c.invoice_uuid == invoice_uuid
+    )).one_or_none()
+    if invoice is None or invoice.source_type == "REVERSAL":
+        return _reject(
+            "ORIGINAL_INVOICE_NOT_FOUND",
+            "The physical return requires an original sale or Service invoice.",
+        )
+    if invoice.status not in {"ISSUED", "REVERSAL_PENDING", "REVERSED"}:
+        return _reject(
+            "INVOICE_NOT_FINAL",
+            "Physical return is allowed only after successful invoice issuance.",
+        )
+
+    if envelope.operation_type == "ReceiveReturnedSaleItem":
+        if invoice.source_type != "DIRECT_SALE":
+            return _reject(
+                "RETURN_SOURCE_MISMATCH",
+                "Cashier return requires a direct-sale invoice line.",
+            )
+        allocation = connection.execute(select(
+            direct_sale_stock_allocations
+        ).where(
+            direct_sale_stock_allocations.c.invoice_uuid == invoice_uuid,
+            direct_sale_stock_allocations.c.sale_line_uuid == line_uuid,
+            direct_sale_stock_allocations.c.lot_uuid == lot_uuid,
+        ).with_for_update()).one_or_none()
+        receipt_source = "CASHIER_RETURN"
+    else:
+        if invoice.source_type != "SERVICE":
+            return _reject(
+                "RETURN_SOURCE_MISMATCH",
+                "Service removal requires a Service invoice line.",
+            )
+        allocation = connection.execute(select(
+            service_stock_allocations
+        ).where(
+            service_stock_allocations.c.service_line_uuid == line_uuid,
+            service_stock_allocations.c.lot_uuid == lot_uuid,
+        ).with_for_update()).one_or_none()
+        consumption = connection.execute(select(
+            service_part_consumptions
+        ).where(
+            service_part_consumptions.c.line_uuid == line_uuid,
+            service_part_consumptions.c.service_order_uuid
+            == invoice.service_order_uuid,
+        )).one_or_none()
+        if consumption is None:
+            allocation = None
+        receipt_source = "SERVICE_REMOVAL"
+    if allocation is None:
+        return _reject(
+            "INVOICE_LOT_ALLOCATION_NOT_FOUND",
+            "The selected invoice line was not supplied from the selected LOT.",
+        )
+    lot = connection.execute(select(inventory_lots).where(
+        inventory_lots.c.lot_uuid == lot_uuid
+    )).one()
+    already_received = Decimal(connection.execute(select(
+        func.coalesce(func.sum(physical_stock_returns.c.quantity), 0)
+    ).where(
+        physical_stock_returns.c.invoice_uuid == invoice_uuid,
+        physical_stock_returns.c.invoice_line_uuid == line_uuid,
+        physical_stock_returns.c.lot_uuid == lot_uuid,
+    )).scalar_one())
+    quantity = Decimal(payload["quantity"])
+    allocated = Decimal(allocation.quantity)
+    if already_received + quantity > allocated:
+        return _reject(
+            "PHYSICAL_RETURN_EXCEEDS_SOLD_QUANTITY",
+            "Confirmed physical returns would exceed the quantity supplied "
+            "from this invoice line and LOT.",
+        )
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    original_actor_uuid = (
+        UUID(envelope.actor_user_id) if envelope.actor_user_id else actor_user_uuid
+    )
+    connection.execute(insert(physical_stock_returns).values(
+        return_uuid=return_uuid, row_version=1, invoice_uuid=invoice_uuid,
+        invoice_line_uuid=line_uuid, lot_uuid=lot_uuid,
+        article_uuid=lot.article_uuid, quantity=quantity,
+        receipt_source=receipt_source,
+        condition_note=payload["condition_note"], status="QUARANTINED",
+        receipt_operation_id=operation_uuid,
+        received_by_user_uuid=original_actor_uuid,
+        received_at_workstation_uuid=workstation_uuid,
+        received_device_id=envelope.device_id, received_at=now,
+    ))
+    event_payload = {
+        "return_id": str(return_uuid), "row_version": 1,
+        "invoice_id": str(invoice_uuid),
+        "invoice_number": invoice.invoice_number,
+        "invoice_line_id": str(line_uuid), "lot_id": str(lot_uuid),
+        "article_id": str(lot.article_uuid),
+        "quantity": format(quantity, "f"), "receipt_source": receipt_source,
+        "status": "QUARANTINED", "stock_effect": "NONE",
+    }
+    sequence = _publish_change(
+        connection, event_type="PhysicalStockReturnQuarantined",
+        aggregate_type="STOCK_RETURN", aggregate_uuid=return_uuid,
+        aggregate_version=1, payload=event_payload,
+        occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 1, "central_sequence": sequence, **event_payload,
+    }, sequence
+
+
+def _resolve_physical_stock_return(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    return_uuid: UUID, operation_uuid: UUID,
+    *, actor_user_uuid: UUID | None, workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    """Resolve Office inspection; only one choice can create stock."""
+    if envelope.aggregate_type != "STOCK_RETURN":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "Physical return resolution requires STOCK_RETURN.",
+        )
+    try:
+        payload = validated_resolve_physical_stock_return_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["return_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.return_id must equal aggregate_id."
+        )
+    if payload["expected_version"] != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            "payload.expected_version must equal envelope.expected_version.",
+        )
+    returned = connection.execute(select(physical_stock_returns).where(
+        physical_stock_returns.c.return_uuid == return_uuid
+    ).with_for_update()).one_or_none()
+    if returned is None:
+        return _reject("PHYSICAL_RETURN_NOT_FOUND", "Physical return does not exist.")
+    if int(returned.row_version) != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT", "Physical return was already inspected or changed."
+        )
+    if returned.status != "QUARANTINED":
+        return _reject(
+            "PHYSICAL_RETURN_ALREADY_RESOLVED",
+            "Physical return has already left quarantine.",
+        )
+
+    decision = payload["decision"]
+    status_by_decision = {
+        "RETURN_TO_STOCK": "RELEASED_TO_STOCK",
+        "MARK_DEFECTIVE": "DEFECTIVE",
+        "REFER_TO_CLAIM": "CLAIM_REVIEW_REQUIRED",
+    }
+    new_status = status_by_decision[decision]
+    inventory_updates = []
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    if decision == "RETURN_TO_STOCK":
+        lot = connection.execute(select(inventory_lots).where(
+            inventory_lots.c.lot_uuid == returned.lot_uuid
+        ).with_for_update()).one()
+        article = connection.execute(select(inventory_items).where(
+            inventory_items.c.article_uuid == returned.article_uuid
+        ).with_for_update()).one()
+        new_lot_quantity = Decimal(lot.available_quantity) + Decimal(returned.quantity)
+        if new_lot_quantity > Decimal(lot.received_quantity):
+            return _reject(
+                "LOT_CAPACITY_CONFLICT",
+                "The returned quantity would exceed the LOT's original received quantity.",
+            )
+        connection.execute(update(inventory_lots).where(
+            inventory_lots.c.lot_uuid == returned.lot_uuid
+        ).values(available_quantity=new_lot_quantity, status="AVAILABLE"))
+        connection.execute(update(inventory_items).where(
+            inventory_items.c.article_uuid == returned.article_uuid
+        ).values(
+            quantity_on_hand=inventory_items.c.quantity_on_hand + returned.quantity,
+            row_version=inventory_items.c.row_version + 1, updated_at=now,
+        ))
+        inventory_updates = _inventory_updates_for_articles(
+            connection, [returned.article_uuid]
+        )
+    connection.execute(update(physical_stock_returns).where(
+        physical_stock_returns.c.return_uuid == return_uuid
+    ).values(
+        row_version=2, status=new_status,
+        resolution_operation_id=operation_uuid,
+        resolution_decision=decision, resolution_reason=payload["reason"],
+        resolved_by_user_uuid=actor_user_uuid,
+        resolved_at_workstation_uuid=workstation_uuid,
+        resolved_at=now, updated_at=now,
+    ))
+    event_payload = {
+        "return_id": str(return_uuid), "row_version": 2,
+        "invoice_id": str(returned.invoice_uuid),
+        "invoice_line_id": str(returned.invoice_line_uuid),
+        "lot_id": str(returned.lot_uuid),
+        "article_id": str(returned.article_uuid),
+        "quantity": format(Decimal(returned.quantity), "f"),
+        "decision": decision, "status": new_status,
+        "stock_effect": (
+            "INCREASED" if decision == "RETURN_TO_STOCK" else "NONE"
+        ),
+        "inventory_updates": inventory_updates,
+    }
+    sequence = _publish_change(
+        connection, event_type="PhysicalStockReturnResolved",
+        aggregate_type="STOCK_RETURN", aggregate_uuid=return_uuid,
+        aggregate_version=2, payload=event_payload,
+        occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 2, "central_sequence": sequence, **event_payload,
+    }, sequence
+
+
 def _storno_invoice(
     connection: Connection, envelope: SyncOperationEnvelope,
     invoice_uuid: UUID, operation_uuid: UUID, *, operator_tax_number: str,
@@ -3020,6 +3264,20 @@ def process_operation(
         result_code, response, central_sequence = _storno_invoice(
             connection, envelope, aggregate_uuid, operation_uuid,
             operator_tax_number=operator_tax_number,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type in {
+        "ReceiveReturnedSaleItem", "ReceiveRemovedServicePart",
+    }:
+        result_code, response, central_sequence = _receive_physical_stock_return(
+            connection, envelope, aggregate_uuid, operation_uuid,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "ResolvePhysicalStockReturn":
+        result_code, response, central_sequence = _resolve_physical_stock_return(
+            connection, envelope, aggregate_uuid, operation_uuid,
             actor_user_uuid=transmitted_by_user_uuid,
             workstation_uuid=transmitted_by_workstation_uuid,
         )

@@ -372,6 +372,9 @@ def create_app(
             "RecordManualCashEntry": ("MODULE_CASHIER", "CASHIER"),
             "SettleUnpaidBankInvoice": ("MODULE_CASHIER", "CASHIER"),
             "StornoInvoice": ("MODULE_CASHIER", "CASHIER"),
+            "ReceiveReturnedSaleItem": ("MODULE_CASHIER", "CASHIER"),
+            "ReceiveRemovedServicePart": ("MODULE_SERVICE", "SERVICE"),
+            "ResolvePhysicalStockReturn": ("MODULE_OFFICE", "OFFICE"),
             "ConfirmPurchaseReceipt": ("MODULE_OFFICE", "OFFICE"),
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
         }
@@ -381,6 +384,7 @@ def create_app(
             "ConfirmPurchaseReceipt": ("CONFIRM_DOCUMENT",),
             "AttachPurchaseInvoice": ("CONFIRM_DOCUMENT",),
             "StornoInvoice": ("STORNO_DOCUMENT",),
+            "ResolvePhysicalStockReturn": ("MANAGE_INVENTORY",),
         }
         required = requirements.get(request.operation_type)
         if identity.must_change_pin and not identity.legacy_development:

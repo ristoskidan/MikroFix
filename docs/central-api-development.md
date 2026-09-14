@@ -86,7 +86,17 @@ LOT-razporeditve ter varno ponovitev istega ukaza. Sočasna storna dveh
 blagajnikov ustvarita največ en negativni dokument in porabita največ eno novo
 številko. Po nejasnem rezultatu FURS ponovitev pošlje isti trajno shranjeni
 zahtevek z isto identiteto; izvirnik do potrditve ostane v stanju
-`REVERSAL_PENDING`. Trenutna migracijska glava je `20260914_20`.
+`REVERSAL_PENDING`.
+
+Fizični prejem vrnjenega prodajnega artikla oziroma odstranjenega servisnega
+dela je ločen od storna. Centralni zapis se vedno poveže z izvirnim računom,
+vrstico in LOT-om ter najprej dobi stanje `QUARANTINED`; razpoložljive zaloge
+ne poveča. Strežnik pod zaklepom zavrne skupno vrnjeno količino, večjo od
+dejansko porabljene količine iste vrstice in LOT-a. Office nato z dovoljenjem
+`MANAGE_INVENTORY` enkrat izbere sprostitev v isti LOT, označitev okvare ali
+usmeritev v reklamacijski pregled. Samo sprostitev poveča zalogo, pri čemer LOT
+ne sme preseči prvotno prejete količine. Trenutna migracijska glava je
+`20260914_21`.
 
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do
