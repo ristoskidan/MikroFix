@@ -992,7 +992,7 @@ class V30PosTests(unittest.TestCase):
         )
         c.close()
 
-    def test_reserved_service_part_is_consumed_on_invoice_and_same_lot_is_reserved_on_storno(self):
+    def test_storno_does_not_restore_or_rereserve_a_service_part(self):
         c = sqlite3.connect(self.service)
         cursor = c.execute(
             "INSERT INTO service_parts(service_id,article_id,barcode,part_name,part_id,unit_price) "
@@ -1043,21 +1043,21 @@ class V30PosTests(unittest.TestCase):
         c = sqlite3.connect(self.inventory)
         self.assertEqual(
             c.execute("SELECT stock_qty,reserved_qty FROM inventory_items WHERE id=1").fetchone(),
-            (3.0, 1.0),
+            (2.0, 0.0),
         )
         self.assertEqual(
             c.execute(
-                "SELECT allocation_type,source_id,source_line_id,lot_serial "
+                "SELECT allocation_type,lot_serial,reversed_at "
                 "FROM inventory_lot_allocations_v30"
             ).fetchone(),
-            ("SERVICE_RESERVATION", 7, service_part_id, "LOT-1"),
+            ("POS_INVOICE", "LOT-1", None),
         )
         c.close()
 
         c = sqlite3.connect(self.service)
         self.assertEqual(
             c.execute("SELECT status FROM service_orders WHERE id=70").fetchone()[0],
-            "OPEN",
+            "COMPLETED",
         )
         c.close()
 
@@ -1135,7 +1135,7 @@ class V30PosTests(unittest.TestCase):
         self.assertEqual(status, "PDF_READY")
         self.assertEqual(register_copy(self.office, first_id, "DR"), 1)
 
-    def test_full_storno_keeps_both_documents_and_restores_exact_lot(self):
+    def test_full_storno_keeps_documents_without_restoring_stock(self):
         invoice_id, _invoice_no, _ = issue_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             lines=[self.line()], payments={"CASH":100}, customer={"name":"Kupec"},
@@ -1164,9 +1164,9 @@ class V30PosTests(unittest.TestCase):
         c = sqlite3.connect(self.inventory)
         self.assertEqual(
             Decimal(str(c.execute("SELECT stock_qty FROM inventory_items WHERE id=1").fetchone()[0])),
-            Decimal("3.0"),
+            Decimal("2.0"),
         )
-        self.assertIsNotNone(
+        self.assertIsNone(
             c.execute(
                 "SELECT reversed_at FROM inventory_lot_allocations_v30 WHERE source_id=?",
                 (invoice_id,),
@@ -1174,7 +1174,7 @@ class V30PosTests(unittest.TestCase):
         )
         c.close()
 
-    def test_linked_service_invoice_storno_fails_closed_without_service_database(self):
+    def test_linked_service_invoice_storno_does_not_need_or_change_service_database(self):
         invoice_id, _invoice_no, _ = issue_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
@@ -1185,28 +1185,27 @@ class V30PosTests(unittest.TestCase):
         unavailable = self.service.with_suffix(".offline")
         self.service.rename(unavailable)
         try:
-            with self.assertRaisesRegex(PosError, "ni dosegljiva"):
-                storno_invoice(
-                    office_db=self.office, inventory_db=self.inventory,
-                    service_db=self.service, document_id=invoice_id,
-                    reason="Preizkus manjkajoče baze", operator_code="DR",
-                    authenticated_username="daniel",
-                    action_permissions={"STORNO_DOCUMENT"},
-                )
+            storno_invoice(
+                office_db=self.office, inventory_db=self.inventory,
+                service_db=self.service, document_id=invoice_id,
+                reason="Preizkus manjkajoče baze", operator_code="DR",
+                authenticated_username="daniel",
+                action_permissions={"STORNO_DOCUMENT"},
+            )
         finally:
             unavailable.rename(self.service)
         c = sqlite3.connect(self.office)
         self.assertEqual(
             c.execute("SELECT status FROM documents WHERE id=?", (invoice_id,)).fetchone()[0],
-            "KNJIŽENO",
+            "STORNIRANO",
         )
-        self.assertEqual(c.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 1)
+        self.assertEqual(c.execute("SELECT COUNT(*) FROM documents").fetchone()[0], 2)
         c.close()
         c = sqlite3.connect(self.inventory)
         self.assertEqual(c.execute("SELECT stock_qty FROM inventory_items WHERE id=1").fetchone()[0], 2)
         c.close()
 
-    def test_linked_service_invoice_storno_reopens_service_atomically(self):
+    def test_linked_service_invoice_storno_keeps_service_closed(self):
         invoice_id, _invoice_no, _ = issue_invoice(
             office_db=self.office, inventory_db=self.inventory, service_db=self.service,
             lines=[self.line()], payments={"CASH": 100}, customer={"name": "Kupec"},
@@ -1223,12 +1222,13 @@ class V30PosTests(unittest.TestCase):
         c = sqlite3.connect(self.service)
         self.assertEqual(
             c.execute("SELECT invoice_no,office_invoice_id FROM service WHERE id=7").fetchone(),
-            (None, None),
+            (_invoice_no, invoice_id),
         )
-        self.assertEqual(
-            c.execute("SELECT status,completed_at FROM service_orders WHERE id=70").fetchone(),
-            ("OPEN", None),
-        )
+        status, completed_at = c.execute(
+            "SELECT status,completed_at FROM service_orders WHERE id=70"
+        ).fetchone()
+        self.assertEqual(status, "COMPLETED")
+        self.assertIsNotNone(completed_at)
         c.close()
 
     def test_split_payment_storno_reverses_every_payment_line(self):

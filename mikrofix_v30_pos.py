@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable
 from xml.sax.saxutils import escape
 
 from mikrofix_v30_lots import (
-    allocate_fifo, ensure_lot_schema, maximum_available_cost, restore_allocations,
+    allocate_fifo, ensure_lot_schema, maximum_available_cost,
 )
 from mikrofix_v30_cash import (
     CashJournalError, ensure_cash_schema_connection, record_cash_entry,
@@ -2531,7 +2531,7 @@ def storno_invoice(
     numbering_structure: str = "B",
     test_mode: bool = True,
 ) -> tuple[int, str]:
-    """V celoti stornira račun, povrne njegove LOT-e in ohrani obe listini."""
+    """Finančno stornira račun brez navideznega vračila zaloge ali servisa."""
     actor = _actor_username(authenticated_username)
     _require_action_permission(action_permissions, STORNO_DOCUMENT_PERMISSION)
     ensure_pos_schema(office_db)
@@ -2543,11 +2543,7 @@ def storno_invoice(
     c.row_factory = sqlite3.Row
     try:
         c.execute("ATTACH DATABASE ? AS inv", (str(inventory_db),))
-        service_attached = Path(service_db).is_file()
-        if service_attached:
-            c.execute("ATTACH DATABASE ? AS servicedb", (str(service_db),))
         c.execute("BEGIN IMMEDIATE")
-        ensure_lot_schema(c, "inv")
         doc = c.execute(
             "SELECT * FROM documents WHERE id=?", (int(document_id),)
         ).fetchone()
@@ -2565,53 +2561,6 @@ def storno_invoice(
             raise PosError("Račun je že storniran.")
         if str(doc["status"]) != "KNJIŽENO":
             raise PosError("Stornirati je mogoče samo knjižen račun.")
-
-        linked_service_order_id = None
-        if doc["linked_service_id"]:
-            if not service_attached:
-                raise PosError(
-                    "Servisna baza ni dosegljiva; povezanega računa ni dovoljeno stornirati."
-                )
-            if not _table_exists(c, "servicedb", "service"):
-                raise PosError("Servisna baza nima tabele povezanih servisov.")
-            service_columns = {
-                row[1] for row in c.execute("PRAGMA servicedb.table_info(service)")
-            }
-            if not {"id", "invoice_no", "office_invoice_id"}.issubset(service_columns):
-                raise PosError("Servisna baza nima vseh polj za varen storno.")
-            select_order = ",service_order_id" if "service_order_id" in service_columns else ",NULL"
-            linked_service = c.execute(
-                "SELECT invoice_no,office_invoice_id" + select_order
-                + " FROM servicedb.service WHERE id=?",
-                (int(doc["linked_service_id"]),),
-            ).fetchone()
-            if (
-                not linked_service
-                or int(linked_service[1] or 0) != int(document_id)
-                or str(linked_service[0] or "").strip()
-                != str(doc["fiscal_invoice_no"] or doc["doc_no"]).strip()
-            ):
-                raise PosError(
-                    "Povezava računa s servisom ni skladna; storno je ustavljen brez sprememb."
-                )
-            linked_service_order_id = (
-                int(linked_service[2]) if linked_service[2] is not None else None
-            )
-            if linked_service_order_id is not None:
-                if not _table_exists(c, "servicedb", "service_orders"):
-                    raise PosError("Servisna baza nima povezanega servisnega naročila.")
-                linked_order = c.execute(
-                    "SELECT status,service_id FROM servicedb.service_orders WHERE id=?",
-                    (linked_service_order_id,),
-                ).fetchone()
-                if (
-                    not linked_order
-                    or str(linked_order[0]) != "COMPLETED"
-                    or int(linked_order[1] or 0) != int(doc["linked_service_id"])
-                ):
-                    raise PosError(
-                        "Povezano servisno naročilo ni skladno; storno je ustavljen brez sprememb."
-                    )
 
         original_cash = dec(c.execute(
             "SELECT COALESCE(SUM(amount),0) FROM pos_payments_v30 "
@@ -2717,84 +2666,6 @@ def storno_invoice(
                     item["origin_id"],item["source_locked"],
                 ),
             )
-            if not item["article_id"]:
-                continue
-            allocations = c.execute(
-                """
-                SELECT COALESCE(SUM(quantity),0) FROM inv.inventory_lot_allocations_v30
-                WHERE allocation_type='POS_INVOICE' AND source_id=? AND source_line_id=?
-                  AND reversed_at IS NULL
-                """,
-                (int(document_id), int(item["id"])),
-            ).fetchone()
-            restored_qty = dec(allocations[0] if allocations else 0)
-            if restored_qty <= 0:
-                continue
-            service_part_reopened = (
-                doc["linked_service_id"]
-                and str(item["origin_kind"] or "") == "SERVICE_PART"
-                and item["origin_id"] is not None
-            )
-            if service_part_reopened:
-                # Storno ponovno odpre servis: isti fizični LOT zato ostane
-                # rezerviran za isti servisni del, ne postane prosta zaloga.
-                c.execute(
-                    """
-                    UPDATE inv.inventory_lot_allocations_v30
-                    SET allocation_type='SERVICE_RESERVATION',source_id=?,source_line_id=?
-                    WHERE allocation_type='POS_INVOICE' AND source_id=?
-                      AND source_line_id=? AND reversed_at IS NULL
-                    """,
-                    (
-                        int(doc["linked_service_id"]), int(item["origin_id"]),
-                        int(document_id), int(item["id"]),
-                    ),
-                )
-            else:
-                restore_allocations(
-                    c, schema="inv", allocation_type="POS_INVOICE",
-                    source_id=int(document_id), source_line_id=int(item["id"]),
-                    reversed_at=now,
-                )
-            stock = c.execute(
-                "SELECT stock_qty,location,COALESCE(reserved_qty,0) "
-                "FROM inv.inventory_items WHERE id=?",
-                (int(item["article_id"]),),
-            ).fetchone()
-            if not stock:
-                raise PosError("Artikel storniranega računa ni več v zalogi.")
-            balance = dec(stock[0]) + restored_qty
-            if service_part_reopened:
-                c.execute(
-                    "UPDATE inv.inventory_items SET stock_qty=?,reserved_qty=?,updated_at=? "
-                    "WHERE id=?",
-                    (
-                        float(balance), float(dec(stock[2]) + restored_qty), now,
-                        int(item["article_id"]),
-                    ),
-                )
-            else:
-                c.execute(
-                    "UPDATE inv.inventory_items SET stock_qty=?,updated_at=? WHERE id=?",
-                    (float(balance),now,int(item["article_id"])),
-                )
-            c.execute(
-                """
-                INSERT INTO inv.stock_movements(
-                    movement_no,created_at,article_id,quantity_delta,balance_after,
-                    movement_type,source_type,source_id,source_line_id,lot_serial,
-                    location_from,location_to,reason,operator_code,reversal_of_id
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
-                """,
-                (
-                    f"PREM-STR-{storno_id:06d}-{int(item['id'])}",now,
-                    int(item["article_id"]),float(restored_qty),float(balance),
-                    "STORNO_SALE_IN","POS_STORNO",storno_id,int(item["id"]),"",
-                    "KUPEC",stock[1] or "",f"Storno računa {doc['fiscal_invoice_no'] or doc['doc_no']}",
-                    operator_code,
-                ),
-            )
-
         payments = c.execute(
             "SELECT id,method,amount FROM pos_payments_v30 WHERE document_id=? "
             "AND reversal_of_id IS NULL",
@@ -2822,38 +2693,6 @@ def storno_invoice(
                 operator_code=operator_code,
             )
 
-        c.execute(
-            "UPDATE inv.used_devices SET status='READY_FOR_SALE',buyer_name=NULL," 
-            "sale_document_id=NULL,warranty_until=NULL,updated_at=? WHERE sale_document_id=?",
-            (now,int(document_id)),
-        )
-        if doc["linked_service_id"]:
-            service_id = int(doc["linked_service_id"])
-            custody_reset = (
-                ",ready_for_pickup_at=NULL,picked_up_at=NULL,final_notice_recorded_at=NULL"
-                if "ready_for_pickup_at" in service_columns else ""
-            )
-            service_update = c.execute(
-                "UPDATE servicedb.service SET invoice_no=NULL,office_invoice_id=NULL"
-                + custody_reset
-                + " WHERE id=? AND office_invoice_id=? "
-                  "AND trim(COALESCE(invoice_no,''))<>''",
-                (service_id, int(document_id)),
-            )
-            if service_update.rowcount != 1:
-                raise PosError("Servisa ni bilo mogoče enolično ponovno odpreti.")
-            if linked_service_order_id is not None:
-                order_update = c.execute(
-                    """
-                    UPDATE servicedb.service_orders SET status='OPEN',completed_at=NULL
-                    WHERE id=? AND service_id=? AND status='COMPLETED'
-                    """,
-                    (linked_service_order_id, service_id),
-                )
-                if order_update.rowcount != 1:
-                    raise PosError(
-                        "Servisnega naročila ni bilo mogoče enolično ponovno odpreti."
-                    )
         fiscal_result = None
         if needs_fiscalization:
             original_issue_text = str(doc["fiscal_issued_at"] or doc["date"] or "")
@@ -2939,7 +2778,8 @@ def storno_invoice(
                 int(document_id),"INVOICE_STORNIRANO",
                 f"storno_document={storno_id}; storno_no={storno_no}; "
                 f"fiscal_no={storno_fiscal_no}; "
-                f"furs={(fiscal_result or {}).get('status','NOT_REQUIRED')}; reason={reason}",
+                f"furs={(fiscal_result or {}).get('status','NOT_REQUIRED')}; "
+                f"stock_effect=NONE; service_effect=NONE; reason={reason}",
                 operator_code,actor,now,
             ),
         )

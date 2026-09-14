@@ -3324,7 +3324,8 @@ class PosWindow:
         if not messagebox.askyesno(
             "Storno računa",
             f"Račun {self.issued_no} bo v celoti storniran. Izvirnik ostane v evidenci, "
-            "ustvari se nov storno dokument in povrne pripadajoča zaloga. Nadaljujem?",
+            "ustvari se nov storno dokument. Zaloga se ne vrne in servis se ne odpre; "
+            "za to sta potrebna ločena potrjena postopka. Nadaljujem?",
             parent=self.win,
         ):
             return
