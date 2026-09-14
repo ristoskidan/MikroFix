@@ -10,6 +10,13 @@ import sqlite3
 from typing import Any, Mapping
 
 from mikrofix_office_client import OfficeCommandJournal, RequestsOfficeTransport
+from mikrofix_office_drafts import (
+    ensure_office_draft_schema,
+    list_active_office_work_drafts,
+    load_office_work_draft,
+    save_office_work_draft,
+    set_office_work_draft_status,
+)
 from mikrofix_sync_store import list_dispatchable_operations, recover_stale_sending
 
 
@@ -57,6 +64,7 @@ class CentralOfficeWorkflow:
         )
         with self.connection:
             recover_stale_sending(self.connection, stale_after_seconds=1)
+            ensure_office_draft_schema(self.connection)
 
     def partners(self, query: str = "", *, limit: int = 50) -> list[dict[str, Any]]:
         return self.transport.search_partners(query, limit=limit)
@@ -81,6 +89,43 @@ class CentralOfficeWorkflow:
 
     def receipt_document_types(self) -> list[dict[str, Any]]:
         return self.transport.list_custom_document_types()
+
+    def save_work_draft(
+        self, draft_kind: str, payload: Mapping[str, Any], *,
+        draft_id: str | None = None, source_id: str = "",
+    ) -> str:
+        with self.connection:
+            return save_office_work_draft(
+                self.connection, actor_id=self.journal.actor_id,
+                device_id=self.journal.device_id, draft_kind=draft_kind,
+                payload=payload, draft_id=draft_id, source_id=source_id,
+            )
+
+    def active_work_drafts(self) -> list[dict[str, Any]]:
+        return list_active_office_work_drafts(
+            self.connection, actor_id=self.journal.actor_id,
+            device_id=self.journal.device_id,
+        )
+
+    def load_work_draft(self, draft_id: str) -> dict[str, Any] | None:
+        return load_office_work_draft(
+            self.connection, draft_id, actor_id=self.journal.actor_id,
+            device_id=self.journal.device_id,
+        )
+
+    def complete_work_draft(self, draft_id: str) -> None:
+        with self.connection:
+            set_office_work_draft_status(
+                self.connection, draft_id, actor_id=self.journal.actor_id,
+                device_id=self.journal.device_id, status="COMPLETED",
+            )
+
+    def abandon_work_draft(self, draft_id: str) -> None:
+        with self.connection:
+            set_office_work_draft_status(
+                self.connection, draft_id, actor_id=self.journal.actor_id,
+                device_id=self.journal.device_id, status="ABANDONED",
+            )
 
     def confirm_purchase_receipt(
         self, payload: Mapping[str, Any], *, operation_id: str | None = None,
