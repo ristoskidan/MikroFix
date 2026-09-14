@@ -295,6 +295,9 @@ dovoljenj. Prva prijava uporabnika zato zahteva povezavo. Izrecno zavrnjena
 prijava, napačen odgovor strežnika ali obvezna še neopravljena menjava PIN-a se
 nikoli ne obravnavajo kot izpad omrežja. Offline servisni dogodki se podpišejo z
 zasebnim ključem postaje in ob sinhronizaciji ponovno preverijo na strežniku.
+Ker PIN ni shranjen za poznejše samodejno prijavljanje, gumb `PRIJAVA / SYNC`
+po povratku omrežja zahteva PIN istega uporabnika, zamenja morebitno pretečeno
+sejo in takoj zahteva sinhronizacijo.
 
 ## Razvojni priklop Blagajne
 

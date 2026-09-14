@@ -696,6 +696,35 @@ def request_service_sync():
         service_sync_worker.request_sync()
 
 
+def reauthenticate_and_sync_service():
+    """Prompt for the same user when an offline/expired central session recovers."""
+    if not _central_user_auth_required:
+        request_service_sync()
+        return
+    required_username = AUTH_SESSION.username
+    if not required_username:
+        return
+    if not stop_service_sync_worker():
+        messagebox.showerror(
+            "MikroFIX – sinhronizacija se še zaključuje",
+            "Ponovna prijava trenutno ni varna. Počakaj in poskusi znova.",
+            parent=root,
+        )
+        return
+    if not run_pin_login(root, username_only=required_username):
+        start_service_sync_worker()
+        return
+    if start_service_sync_worker():
+        request_service_sync()
+        return
+    messagebox.showinfo(
+        "MikroFIX – delo brez povezave",
+        "Uporabnik je lokalno prijavljen, centralni strežnik pa še ni dosegljiv. "
+        "Servisno delo lahko nadaljuješ in ta gumb uporabiš pozneje.",
+        parent=root,
+    )
+
+
 def stop_service_sync_worker():
     global service_sync_worker
     worker = service_sync_worker
@@ -7972,6 +8001,11 @@ service_sync_status_label = tk.Label(
     bg=BG, fg=GRAY, font=("Segoe UI", 9, "bold")
 )
 service_sync_status_label.pack(side="right", padx=(0, 14), pady=(12, 0))
+if _central_user_auth_required:
+    ttk.Button(
+        brand, text="PRIJAVA / SYNC",
+        command=reauthenticate_and_sync_service,
+    ).pack(side="right", padx=(0, 8), pady=(6, 0))
 header_connected_label = tk.Label(
     brand, textvariable=connected_state,
     bg=BG, fg=GRAY, font=("Segoe UI",9,"bold")

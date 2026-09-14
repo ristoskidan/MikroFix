@@ -75,6 +75,13 @@ class ServiceTimerUiPolicyTests(unittest.TestCase):
                     self.calls_in(function_name),
                 )
 
+    def test_explicit_central_reauthentication_stops_old_worker_first(self):
+        calls = self.calls_in("reauthenticate_and_sync_service")
+        self.assertIn("stop_service_sync_worker", calls)
+        self.assertIn("run_pin_login", calls)
+        self.assertIn("start_service_sync_worker", calls)
+        self.assertIn("request_service_sync", calls)
+
     def test_main_close_uses_service_time_gate(self):
         calls = self.calls_in("on_close")
         self.assertIn("service_time_blocks_application_close", calls)

@@ -157,6 +157,18 @@ class ServiceIdentityTests(unittest.TestCase):
         self.assertEqual(identity.user_version, 4)
         self.assertEqual(self.manager.access_token, "new-token")
 
+    def test_reauthentication_revokes_replaced_memory_token(self):
+        self.client.login.side_effect = [
+            central_session(access_token="old-token"),
+            central_session(access_token="new-token"),
+        ]
+        self.manager.login(username="serviser-a", pin="246810")
+
+        self.manager.login(username="serviser-a", pin="246810")
+
+        self.client.logout.assert_called_once_with("old-token")
+        self.assertEqual(self.manager.access_token, "new-token")
+
 
 if __name__ == "__main__":
     unittest.main()

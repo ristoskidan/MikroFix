@@ -150,6 +150,7 @@ class ServiceCentralIdentityManager:
 
     def login(self, *, username: str, pin: str) -> ServiceLoginIdentity:
         normalized = str(username or "").strip().lower()
+        previous_token = self.access_token
         try:
             session = self.auth_client.login(
                 username=normalized,
@@ -177,6 +178,13 @@ class ServiceCentralIdentityManager:
         if session.application_type != "SERVICE" or "MODULE_SERVICE" not in session.permissions:
             raise ServiceIdentityError("Centralna seja nima pravice za program Servis.")
         self._session = session
+        if previous_token and previous_token != session.access_token:
+            try:
+                self.auth_client.logout(previous_token)
+            except Exception:
+                # The replacement session is valid; an old/expired token will
+                # disappear on the server even if explicit revocation fails.
+                pass
         if session.must_change_pin:
             # This identity is not authorized for application operations yet.
             self.cache.forget(normalized)
