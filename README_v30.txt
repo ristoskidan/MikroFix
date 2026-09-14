@@ -69,8 +69,9 @@ FURS TEST:
   mora ujemati do centa; izpis ni racun;
 - obnovljena naprava zahteva v Blagajni pripravljen A4 dogovor/garancijski
   list z IMEI, nespremenljivim kontrolnim odtisom in potrditvijo podpisa;
-- celotni storno ohrani prvotni racun, ustvari nov zaporedni storno dokument,
-  povrne konkretne LOT-e in sprosti povezan servis za pravilno novo izdajo;
+- celotni storno ohrani prvotni racun in ustvari nov zaporedni storno dokument;
+  povezanega servisa ne odpre samodejno, reklamacija pa je vedno nov povezan
+  primer; servis se lahko ponovno odpre samo z locenim izrecnim ukazom;
 - gotovinski in razdeljeni racun zahtevata odprt blagajniski dnevnik za izbrani
   prostor/napravo; cisti TRR ne zahteva odprte gotovinske blagajne;
 - odprtje shrani cas, operaterja in zacetno stanje; gotovinski racuni, storni,
