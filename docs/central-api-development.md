@@ -128,6 +128,13 @@ centralni dogodek jo potrdi v projekciji in jo uvrsti v karanteno. Zavrnitev
 ustvari viden konflikt z računom, vrstico, LOT-om, količino in razlogom; ne
 ustvari `STOCK_EXCEPTION`, ne odpre starega servisa in ne spremeni računa.
 
+Uporabniška seja velja samo za trenutni proces. Vsak zagon zahteva novo prijavo,
+ob ročni odjavi ali nadzorovanem izhodu pa aplikacija zabeleži odjavo, odstrani
+identiteto in dovoljenja iz pomnilnika ter centralno sejo prekliče, če je
+strežnik dosegljiv. Dostopnega žetona ni dovoljeno zapisati v SQLite, nastavitve
+ali dnevnik. Offline dovoljena lokalna prijava zato ni obnovitev stare seje;
+ustvari novo lokalno sejo brez centralnega žetona.
+
 Office ima bralne poti za partnerje, artikle in njihove dobaviteljeve identitete,
 prejeme ter uporabniške vrste dokumentov. `mikrofix_office_client.py` pred vsakim
 poslovnim pošiljanjem trajno shrani nespremenljiv ukaz. Digitalne priloge so

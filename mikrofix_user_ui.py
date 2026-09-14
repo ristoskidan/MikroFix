@@ -85,6 +85,7 @@ class SessionAuthUI:
             "is_active": 1,
             "permissions": set(),
         }
+        self._authenticated = False
         self._caption_vars: list[tk.StringVar] = []
         self._admin_widgets: list[tk.Widget] = []
 
@@ -108,6 +109,10 @@ class SessionAuthUI:
     def permissions(self) -> set[str]:
         return set(self.current.get("permissions") or set())
 
+    @property
+    def is_authenticated(self) -> bool:
+        return bool(self._authenticated)
+
     def has_permission(self, permission: str) -> bool:
         return str(permission or "").strip().upper() in self.permissions
 
@@ -128,6 +133,19 @@ class SessionAuthUI:
             str(current["username"])
         )
         self.current = current
+        self._authenticated = True
+        self._refresh_bound_widgets()
+
+    def end_session(self) -> None:
+        """Forget the in-memory login; no authenticated session is persisted."""
+        self.current = {
+            "username": "",
+            "display_name": "Odjavljen",
+            "role": "",
+            "is_active": 0,
+            "permissions": set(),
+        }
+        self._authenticated = False
         self._refresh_bound_widgets()
 
     def adopt_authenticated_user(self, user: dict) -> None:

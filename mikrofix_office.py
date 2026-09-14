@@ -211,7 +211,6 @@ AUTH_SESSION = SessionAuthUI(
     light_gray=LIGHT_GRAY,
     danger=DANGER,
 )
-OFFICE_LAUNCHED_FROM_MAIN = False
 OFFICE_EXIT_CODE = 0
 OFFICE_START_SERVICE_ORDER_ID = None
 
@@ -254,24 +253,20 @@ def audit_event(event_type, entity_type=None, entity_id=None, details=None):
         return False
 
 
+def end_application_user_session(reason):
+    """Audit and forget the current Office login before process/window exit."""
+    if not AUTH_SESSION.is_authenticated:
+        return False
+    username = AUTH_SESSION.username
+    audit_event(
+        "LOGOUT", "user", username, {"reason": str(reason or "SESSION_END")}
+    )
+    AUTH_SESSION.end_session()
+    return True
+
+
 def run_pin_login(parent):
     return AUTH_SESSION.login(parent)
-
-
-def consume_main_session_handoff():
-    """Prevzame enkratno sejo glavnega programa brez ponovnega vnosa PIN-a."""
-    global OFFICE_LAUNCHED_FROM_MAIN
-    token = os.environ.pop("MIKROFIX_SESSION_HANDOFF", "").strip()
-    if not token:
-        return False, False
-    store = auth_store()
-    store.init()
-    user = store.consume_session_handoff(token, "OFFICE")
-    if not user:
-        return True, False
-    AUTH_SESSION.adopt_authenticated_user(user)
-    OFFICE_LAUNCHED_FROM_MAIN = True
-    return True, True
 
 
 def change_pin_dialog(parent):
@@ -284,8 +279,8 @@ def manage_users_dialog(parent):
 
 def logout_and_lock():
     global OFFICE_EXIT_CODE
-    audit_event("LOGOUT", "user", AUTH_SESSION.username)
-    if OFFICE_LAUNCHED_FROM_MAIN:
+    end_application_user_session("MANUAL_LOGOUT")
+    if EMBEDDED_IN_MAIN:
         # Glavni program prejme posebno izhodno kodo in tam zahteva novo prijavo.
         OFFICE_EXIT_CODE = 20
         root.destroy()
@@ -299,6 +294,12 @@ def logout_and_lock():
             pass
     else:
         root.destroy()
+
+
+def close_office_application():
+    """Every normal Office window close ends its in-memory login."""
+    end_application_user_session("APPLICATION_EXIT")
+    root.destroy()
 
 
 def office_connect():
@@ -4761,6 +4762,7 @@ root.geometry("1280x760")
 root.minsize(900, 620)
 root.configure(bg=BG)
 root.withdraw()
+root.protocol("WM_DELETE_WINDOW", close_office_application)
 
 maximize_work_window(root, "1280x760")
 
@@ -5676,9 +5678,6 @@ protect_file_permissions(OFFICE_DB)
 protect_file_permissions(AUTH_DB)
 protect_file_permissions(INVENTORY_DB)
 
-handoff_provided, handoff_accepted = consume_main_session_handoff()
-
-
 def apply_office_permissions():
     if not AUTH_SESSION.has_permission(PERMISSION_MANAGE_INVENTORY):
         nb.tab(tab_stock_control, state="hidden")
@@ -5697,14 +5696,7 @@ def apply_office_permissions():
 if os.environ.get("MIKROFIX_SMOKE_TEST") == "1":
     root.update_idletasks()
     root.destroy()
-elif handoff_provided and not handoff_accepted:
-    messagebox.showerror(
-        "MikroFIX",
-        "Predaja prijavljene seje ni več veljavna. Vrni se v glavni program in poskusi znova.",
-        parent=root,
-    )
-    root.destroy()
-elif handoff_accepted or run_pin_login(root):
+elif run_pin_login(root):
     service_invoice_request = requested_service_id()
     pos_requested = bool(requested_new_invoice() or service_invoice_request)
     required_permission = required_office_entry_permission(pos_requested=pos_requested)
@@ -5716,6 +5708,7 @@ elif handoff_accepted or run_pin_login(root):
             "Prijavljeni uporabnik nima dovoljenja za izbrani modul.",
             parent=root,
         )
+        end_application_user_session("PERMISSION_DENIED_EXIT")
         root.destroy()
     else:
         apply_office_permissions()

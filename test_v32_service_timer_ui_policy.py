@@ -2,6 +2,8 @@ import ast
 import unittest
 from pathlib import Path
 
+from mikrofix_user_ui import SessionAuthUI
+
 
 SOURCE_PATH = Path(__file__).with_name("mikrofix.py")
 
@@ -46,6 +48,7 @@ class ServiceTimerUiPolicyTests(unittest.TestCase):
         self.assertIn("service_time_blocks_logout", calls)
         self.assertIn("persist_active_service_draft", calls)
         self.assertIn("run_login_or_close_safely", calls)
+        self.assertIn("end_application_user_session", calls)
         self.assertNotIn("destroy", calls)
 
     def test_auto_lock_keeps_same_user_and_does_not_pause_time(self):
@@ -57,6 +60,12 @@ class ServiceTimerUiPolicyTests(unittest.TestCase):
     def test_main_close_uses_service_time_gate(self):
         calls = self.calls_in("on_close")
         self.assertIn("service_time_blocks_application_close", calls)
+        self.assertIn("end_application_user_session", calls)
+
+    def test_cancelled_relogin_forgets_session_before_process_exit(self):
+        calls = self.calls_in("run_login_or_close_safely")
+        self.assertIn("end_application_user_session", calls)
+        self.assertIn("destroy", calls)
 
     def test_only_manual_pause_button_and_completion_end_normal_work_time(self):
         forbidden_reasons = {"MODULE_SWITCH", "LEAVE_WORKSPACE", "MAIN_MENU"}
@@ -87,6 +96,25 @@ class ServiceTimerUiPolicyTests(unittest.TestCase):
             "restore_active_service_draft",
             self.calls_in("open_service_order_for_work"),
         )
+
+
+class EphemeralSessionTests(unittest.TestCase):
+    def test_end_session_forgets_identity_and_permissions(self):
+        session = SessionAuthUI.__new__(SessionAuthUI)
+        session.current = {
+            "username": "serviser", "display_name": "Serviser",
+            "role": "SERVICE", "is_active": 1,
+            "permissions": {"MODULE_SERVICE"},
+        }
+        session._authenticated = True
+        session._caption_vars = []
+        session._admin_widgets = []
+
+        session.end_session()
+
+        self.assertFalse(session.is_authenticated)
+        self.assertEqual(session.username, "")
+        self.assertEqual(session.permissions, set())
 
 
 if __name__ == "__main__":

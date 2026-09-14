@@ -361,6 +361,18 @@ def audit_event(event_type, entity_type=None, entity_id=None, details=None):
         return False
 
 
+def end_application_user_session(reason):
+    """Audit and forget the current login before logout or process exit."""
+    if not AUTH_SESSION.is_authenticated:
+        return False
+    username = AUTH_SESSION.username
+    audit_event(
+        "LOGOUT", "user", username, {"reason": str(reason or "SESSION_END")}
+    )
+    AUTH_SESSION.end_session()
+    return True
+
+
 def run_pin_login(parent, username_only=None):
     return AUTH_SESSION.login(parent, username_only=username_only)
 
@@ -379,7 +391,7 @@ def logout_and_lock():
         return
     if not persist_active_service_draft():
         return
-    audit_event("LOGOUT", "user", AUTH_SESSION.username)
+    end_application_user_session("MANUAL_LOGOUT")
     ACTIVE_SCREEN = "LOGIN"
     root.withdraw()
     if run_login_or_close_safely():
@@ -7069,6 +7081,7 @@ def run_login_or_close_safely(*, username_only=None):
         if run_pin_login(root, username_only=username_only):
             return True
         if not service_time_blocks_application_close():
+            end_application_user_session("LOGIN_CANCELLED_EXIT")
             root.destroy()
             return False
 
@@ -7111,6 +7124,7 @@ def on_close():
                 parent=root,
             )
             return
+    end_application_user_session("APPLICATION_EXIT")
     root.destroy()
 
 
@@ -7200,15 +7214,8 @@ def launch_office(*arguments):
             return False
     return_code = 0
     service_order_id = None
-    previous_handoff = os.environ.get("MIKROFIX_SESSION_HANDOFF")
     previous_argv = list(sys.argv)
     try:
-        token = auth_store().issue_session_handoff(
-            AUTH_SESSION.username,
-            "OFFICE",
-            ttl_seconds=60,
-        )
-        os.environ["MIKROFIX_SESSION_HANDOFF"] = token
         sys.argv = [str(APP_DIR / "mikrofix_office.py"), *arguments]
         root.withdraw()
         namespace = runpy.run_path(
@@ -7235,10 +7242,6 @@ def launch_office(*arguments):
         return False
     finally:
         sys.argv = previous_argv
-        if previous_handoff is None:
-            os.environ.pop("MIKROFIX_SESSION_HANDOFF", None)
-        else:
-            os.environ["MIKROFIX_SESSION_HANDOFF"] = previous_handoff
         _restore_after_office(return_code, service_order_id)
     return True
 
