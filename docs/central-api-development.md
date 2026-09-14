@@ -301,13 +301,29 @@ sejo in takoj zahteva sinhronizacijo.
 
 ## Razvojni priklop Blagajne
 
-Skupno odjemalsko jedro `mikrofix_central_identity.py` že podpira pravo spletno
+Skupno odjemalsko jedro `mikrofix_central_identity.py` podpira pravo spletno
 prijavo za samostojna Office in Blagajno. Vrnjeno sejo sprejme samo, če se
 ujemajo uporabnik, program in registrirana postaja ter seja vsebuje zahtevano
 modulsko dovoljenje. Žeton ostane samo v pomnilniku; zavrnjena neujemajoča seja
-se poskusi takoj preklicati. Produkcijska zagonska mostova lahko uporabljata to
-preverjeno sejo, še ne pa razvojnega skupnega žetona. Manjkata še priklop
-prijavnega zaslona in dosledna obravnava poteka seje v samostojnih ovojih.
+se poskusi takoj preklicati.
+
+Produkcijska zagona uporabljata `mikrofix_central_desktop.py` in se brez
+centralnega URL-ja ali popolne identitete postaje varno ustavita. Tudi kadar oba
+programa tečeta na istem fizičnem računalniku, imata ločeni aplikacijski
+identiteti:
+
+```sh
+export MIKROFIX_OFFICE_WORKSTATION_CODE='MFD-PIS-OFFICE'
+export MIKROFIX_OFFICE_WORKSTATION_SECRET='<skrivnost Office postaje>'
+export MIKROFIX_CASHIER_WORKSTATION_CODE='MFD-PIS-CASHIER'
+export MIKROFIX_CASHIER_WORKSTATION_SECRET='<skrivnost blagajniške postaje>'
+```
+
+Vrednosti morajo ustrezati vnaprej registriranima centralnima postajama in se
+ne zapisujejo v nastavitve ali Git. Vsak zagon pokaže novo prijavo, zahteva
+prisilno menjavo prvega PIN-a, če tako določi strežnik, ob zaprtju pa najprej
+pozabi žeton in centralno sejo poskusi preklicati. Še odprta sta ročni
+end-to-end preizkus in uporabniku jasno obvestilo ob poteku seje med delom.
 
 Glavni namizni program odpre centralni tok Blagajne, kadar je nastavljen
 `database.server_url`. Uporabi isto razvojno okoljsko skrivnost

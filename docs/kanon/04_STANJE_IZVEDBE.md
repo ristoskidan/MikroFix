@@ -50,10 +50,15 @@ Vsaka uspešna offline prijava pokaže opozorilo in natančen čas izteka.
 Za samostojna Office in Blagajno je izdelano ter testirano skupno centralno
 identitetno jedro. Preveri uporabnika, vrsto programa, registrirano delovno
 postajo in zahtevano dovoljenje; dostopni žeton hrani samo v pomnilniku in ga ob
-odjavi pozabi tudi ob izpadu povezave. Produkcijska zagonska mostova sprejmeta
-samo tako preverjeno sejo, skupni razvojni žeton pa v produkciji še naprej
-zavrneta. Prijavni zaslon in priklop samostojnih uporabniških ovojev še nista
-dokončana, zato Office in Blagajna s tem še nista produkcijsko pripravljena.
+odjavi pozabi tudi ob izpadu povezave. Produkcijska zagona zdaj odpreta namenski
+centralni prijavni ovoj ter ne kličeta več starega lokalnega Office programa.
+Vsaka aplikacija zahteva lastno registrirano postajo in po uspešni prijavi
+uporablja samo centralni API. Prisilna menjava prvega PIN-a je vključena.
+
+Ta priklop je preverjen z avtomatiziranimi testi konfiguracije, dovoljenj in
+zagonske usmeritve, še ne pa s celotnim ročnim preizkusom proti dejansko
+registriranima postajama in nameščenemu centralnemu strežniku. Office in
+Blagajna zato še nista razglašena za produkcijsko pripravljena.
 
 ## Naslednja revizija kode
 

@@ -29,11 +29,15 @@ class ApplicationEntrypointTests(unittest.TestCase):
 
     def test_each_entrypoint_executes_a_separate_process_target(self):
         self.assertIn('"service": ("mikrofix.py", "--service-only")', self.launcher_source)
-        self.assertIn('"office": ("mikrofix_office.py",)', self.launcher_source)
         self.assertIn(
-            '"cashier": ("mikrofix_office.py", "--new-invoice")',
+            '"office": ("mikrofix_central_desktop.py", "--application", "OFFICE")',
             self.launcher_source,
         )
+        self.assertIn(
+            '"cashier": ("mikrofix_central_desktop.py", "--application", "CASHIER")',
+            self.launcher_source,
+        )
+        self.assertNotIn('"office": ("mikrofix_office.py",)', self.launcher_source)
         self.assertIn("os.execv", self.launcher_source)
 
     def test_standalone_service_enters_service_workspace_after_login(self):

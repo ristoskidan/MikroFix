@@ -28,9 +28,9 @@ def prepare_production_environment() -> None:
 APPLICATION_TARGETS = {
     "service": ("mikrofix.py", "--service-only"),
     "servis": ("mikrofix.py", "--service-only"),
-    "office": ("mikrofix_office.py",),
-    "cashier": ("mikrofix_office.py", "--new-invoice"),
-    "blagajna": ("mikrofix_office.py", "--new-invoice"),
+    "office": ("mikrofix_central_desktop.py", "--application", "OFFICE"),
+    "cashier": ("mikrofix_central_desktop.py", "--application", "CASHIER"),
+    "blagajna": ("mikrofix_central_desktop.py", "--application", "CASHIER"),
 }
 
 
