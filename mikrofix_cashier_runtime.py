@@ -208,6 +208,24 @@ class CentralCashierWorkflow:
         }, operation_id=operation_id)
         return self._dispatch_invoice(identity)
 
+    def storno_invoice(
+        self, *, invoice_id: str, expected_version: int, reason: str,
+        operation_id: str | None = None,
+    ) -> CentralInvoiceResult:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_storno_invoice({
+            "invoice_id": invoice_id, "expected_version": expected_version,
+            "reason": reason, "confirmed": True,
+        }, operation_id=operation_id)
+        result = self._dispatch_command(identity)
+        reversal_id = str(result.get("reversal_invoice_id") or "")
+        if not reversal_id:
+            raise CashierWorkflowError(
+                "Centralni odgovor nima identitete storno dokumenta."
+            )
+        reversal = self.transport.get_invoice(reversal_id)
+        return CentralInvoiceResult(operation_id=identity, invoice=reversal)
+
     def unresolved_commands(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return list_dispatchable_operations(
             self.connection, self.journal.device_id, limit=limit

@@ -34,6 +34,11 @@ class FakeCashierTransport:
                 "entry_id": operation["aggregate_id"], "entry_no": 1,
                 "balance_after": "110.00",
             }
+        elif operation["operation_type"] == "StornoInvoice":
+            result = {
+                "invoice_id": operation["aggregate_id"],
+                "reversal_invoice_id": invoice_id,
+            }
         else:
             result = {"invoice_id": invoice_id}
         return {
@@ -205,4 +210,21 @@ class CentralCashierWorkflowTests(unittest.TestCase):
             "invoice_id": invoice_id, "expected_version": 1,
             "method": "BANK_TRANSFER",
         })
+        self.assertEqual(result.invoice["invoice_number"], "MFD-PIS-1")
+
+    def test_storno_uses_versioned_durable_command_and_reads_reversal(self):
+        transport = FakeCashierTransport()
+        workflow = self.workflow(transport)
+        invoice_id = str(uuid4())
+
+        result = workflow.storno_invoice(
+            invoice_id=invoice_id, expected_version=4,
+            reason="Napačno izdan račun",
+        )
+
+        operation = transport.submissions[0]
+        self.assertEqual(operation["operation_type"], "StornoInvoice")
+        self.assertEqual(operation["aggregate_id"], invoice_id)
+        self.assertEqual(operation["expected_version"], 4)
+        self.assertNotIn("return_stock", operation["payload"])
         self.assertEqual(result.invoice["invoice_number"], "MFD-PIS-1")

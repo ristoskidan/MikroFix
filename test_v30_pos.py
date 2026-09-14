@@ -829,6 +829,43 @@ class V30PosTests(unittest.TestCase):
         self.assertIn("24.36 EUR", text)
         self.assertNotIn("requested_discount", text)
 
+    def test_central_reversal_pdf_is_clearly_labelled_and_references_original(self):
+        invoice = {
+            "invoice_id": "33333333-3333-3333-3333-333333333333",
+            "invoice_number": "MFD-PIS-8", "source_type": "REVERSAL",
+            "total_amount": "-15.00", "furs_eor": "EOR-STORNO-1",
+            "snapshot": {
+                "issued_at": "2026-09-14T12:00:00+02:00",
+                "premise_id": "MFD", "electronic_device_id": "PIS",
+                "reversal_of_invoice_number": "MFD-PIS-7",
+                "reason": "Napačno izdan račun",
+                "billing_customer": {"source": "WALK_IN", "name": ""},
+                "payments": [{
+                    "method": "CASH", "amount": "-15.00", "confirmed": True,
+                }],
+                "tax_note": "Oproščeno po prvem odstavku 94. člena ZDDV-1.",
+                "lines": [{
+                    "line_id": "44444444-4444-4444-4444-444444444444",
+                    "line_kind": "ARTICLE", "description": "Testni del",
+                    "quantity": "-1", "base_unit_price": "15.00",
+                    "applied_discount_percent": "0", "unit_price": "15.00",
+                    "line_total": "-15.00",
+                }],
+            },
+        }
+        a4, _receipt = generate_central_invoice_pdfs(
+            invoice=invoice, output_dir=Path(self.tmp.name) / "central-storno-pdf",
+            company={"legal_name": "MikroFix"}, test_mode=True,
+        )
+        from pypdf import PdfReader
+        text = "\n".join(
+            page.extract_text() or "" for page in PdfReader(str(a4)).pages
+        )
+        self.assertIn("STORNO RAČUNA", text)
+        self.assertIn("MFD-PIS-7", text)
+        self.assertIn("Napačno izdan račun", text)
+        self.assertIn("-15.00 EUR", text)
+
     def test_service_discount_is_clamped_to_l0(self):
         line = PosLine(line_kind="SERVICE", name="Delo", service_tier="T1",
                        base_unit_price=Decimal("30"), requested_discount_pct=Decimal("100"))

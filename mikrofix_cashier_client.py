@@ -22,6 +22,7 @@ from mikrofix_sync_contracts import (
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
     validated_settle_unpaid_bank_invoice_payload,
+    validated_storno_invoice_payload,
 )
 from mikrofix_sync_store import (
     acknowledge_operation,
@@ -234,6 +235,17 @@ class CashierCommandJournal:
         normalized = validated_settle_unpaid_bank_invoice_payload(payload)
         return self._prepare(
             operation_type="SettleUnpaidBankInvoice", aggregate_type="INVOICE",
+            aggregate_id=normalized["invoice_id"],
+            expected_version=normalized["expected_version"],
+            payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_storno_invoice(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_storno_invoice_payload(payload)
+        return self._prepare(
+            operation_type="StornoInvoice", aggregate_type="INVOICE",
             aggregate_id=normalized["invoice_id"],
             expected_version=normalized["expected_version"],
             payload=normalized, operation_id=operation_id,

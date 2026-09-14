@@ -371,6 +371,7 @@ def create_app(
             "CloseCashSession": ("MODULE_CASHIER", "CASHIER"),
             "RecordManualCashEntry": ("MODULE_CASHIER", "CASHIER"),
             "SettleUnpaidBankInvoice": ("MODULE_CASHIER", "CASHIER"),
+            "StornoInvoice": ("MODULE_CASHIER", "CASHIER"),
             "ConfirmPurchaseReceipt": ("MODULE_OFFICE", "OFFICE"),
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
         }
@@ -379,6 +380,7 @@ def create_app(
             "UpdateInventorySalePrice": ("MANAGE_PRICES",),
             "ConfirmPurchaseReceipt": ("CONFIRM_DOCUMENT",),
             "AttachPurchaseInvoice": ("CONFIRM_DOCUMENT",),
+            "StornoInvoice": ("STORNO_DOCUMENT",),
         }
         required = requirements.get(request.operation_type)
         if identity.must_change_pin and not identity.legacy_development:
@@ -418,9 +420,12 @@ def create_app(
                             in {"CASH", "CARD"}
                             for payment in request.payload.get("payments", [])
                         )
-                        or request.operation_type == "SettleUnpaidBankInvoice"
+                        or request.operation_type in {
+                            "SettleUnpaidBankInvoice",
+                        }
                         and str(request.payload.get("method") or "").upper()
                         in {"CASH", "CARD"}
+                        or request.operation_type == "StornoInvoice"
                     )
                     and not identity.operator_tax_number
                 ):
@@ -691,8 +696,11 @@ def create_app(
     def public_cashier_invoice(row) -> dict:
         return {
             "invoice_id": row.invoice_uuid,
+            "row_version": row.row_version,
             "invoice_number": row.invoice_number,
             "source_type": row.source_type,
+            "reversal_of_invoice_id": row.reversal_of_invoice_uuid,
+            "storno_reason": row.storno_reason,
             "direct_sale_id": row.direct_sale_uuid,
             "draft_id": row.draft_uuid,
             "service_order_id": row.service_order_uuid,
@@ -734,7 +742,8 @@ def create_app(
         cleaned_status = str(invoice_status or "").strip().upper()
         if cleaned_status:
             if cleaned_status not in {
-                "PENDING_FISCALIZATION", "FISCAL_RECONCILIATION", "ISSUED"
+                "PENDING_FISCALIZATION", "FISCAL_RECONCILIATION", "ISSUED",
+                "REVERSAL_PENDING", "REVERSED",
             }:
                 raise HTTPException(status_code=422, detail="Unsupported invoice status.")
             statement = statement.where(invoices.c.status == cleaned_status)

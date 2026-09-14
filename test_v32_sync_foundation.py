@@ -13,6 +13,7 @@ from mikrofix_sync_contracts import (
     ManualCashEntryContract,
     OpenCashSessionContract,
     SettleUnpaidBankInvoiceContract,
+    StornoInvoiceContract,
     PaymentContract,
     ServicePartContract,
     ServiceTestContract,
@@ -28,6 +29,7 @@ from mikrofix_sync_contracts import (
     validated_issue_direct_sale_invoice_payload,
     validated_technical_completion_payload,
     validated_set_partner_active_payload,
+    validated_storno_invoice_payload,
     validated_update_partner_payload,
     validated_update_inventory_price_payload,
 )
@@ -490,6 +492,23 @@ class SyncContractTests(unittest.TestCase):
             SettleUnpaidBankInvoiceContract(
                 invoice_id=invoice_id, expected_version=1, method="CHEQUE"
             )
+
+    def test_invoice_storno_requires_reason_confirmation_and_no_stock_choice(self):
+        invoice_id = str(uuid4())
+        contract = StornoInvoiceContract(
+            invoice_id=invoice_id, expected_version=2,
+            reason="Napačno izbran kupec", confirmed=True,
+        )
+        self.assertEqual(contract.expected_version, 2)
+        with self.assertRaisesRegex(ContractError, "explicitly confirmed"):
+            StornoInvoiceContract(
+                invoice_id=invoice_id, expected_version=2,
+                reason="Napačen račun", confirmed=False,
+            )
+        with self.assertRaisesRegex(ContractError, "unsupported fields: return_stock"):
+            validated_storno_invoice_payload({
+                **contract.payload(), "return_stock": True,
+            })
 
 
 if __name__ == "__main__":

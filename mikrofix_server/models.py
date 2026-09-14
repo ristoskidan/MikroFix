@@ -606,6 +606,7 @@ invoices = Table(
     "invoices_v32",
     metadata,
     Column("invoice_uuid", UUID(as_uuid=True), primary_key=True),
+    Column("row_version", Integer, nullable=False, server_default="1"),
     Column(
         "draft_uuid", UUID(as_uuid=True),
         ForeignKey("invoice_drafts_v32.draft_uuid"), nullable=True, unique=True,
@@ -616,6 +617,11 @@ invoices = Table(
     ),
     Column("source_type", String(20), nullable=False, server_default="SERVICE"),
     Column("direct_sale_uuid", UUID(as_uuid=True), unique=True),
+    Column(
+        "reversal_of_invoice_uuid", UUID(as_uuid=True),
+        ForeignKey("invoices_v32.invoice_uuid"), nullable=True, unique=True,
+    ),
+    Column("storno_reason", String(500)),
     Column(
         "issue_operation_id", UUID(as_uuid=True),
         ForeignKey("accepted_operations_v32.operation_id"), nullable=False, unique=True,
@@ -663,7 +669,8 @@ invoices = Table(
         name="uq_invoice_fiscal_sequence",
     ),
     CheckConstraint(
-        "status IN ('PENDING_FISCALIZATION','FISCAL_RECONCILIATION','ISSUED')",
+        "status IN ('PENDING_FISCALIZATION','FISCAL_RECONCILIATION','ISSUED',"
+        "'REVERSAL_PENDING','REVERSED')",
         name="invoice_status",
     ),
     CheckConstraint("payment_status IN ('UNPAID','PAID')", name="invoice_payment_status"),
@@ -672,7 +679,12 @@ invoices = Table(
         "('BANK_TRANSFER','CASH','CARD')",
         name="invoice_received_method",
     ),
-    CheckConstraint("total_amount >= 0", name="invoice_total_nonnegative"),
+    CheckConstraint(
+        "(source_type IN ('SERVICE','DIRECT_SALE') AND total_amount >= 0) OR "
+        "(source_type='REVERSAL' AND total_amount <= 0)",
+        name="invoice_total_sign",
+    ),
+    CheckConstraint("row_version >= 1", name="invoice_version_positive"),
     CheckConstraint("currency = 'EUR'", name="invoice_currency_eur"),
     CheckConstraint(
         "operator_tax_number IS NULL OR operator_tax_number ~ '^[0-9]{8}$'",
@@ -680,9 +692,14 @@ invoices = Table(
     ),
     CheckConstraint(
         "(source_type='SERVICE' AND draft_uuid IS NOT NULL "
-        "AND service_order_uuid IS NOT NULL AND direct_sale_uuid IS NULL) OR "
+        "AND service_order_uuid IS NOT NULL AND direct_sale_uuid IS NULL "
+        "AND reversal_of_invoice_uuid IS NULL) OR "
         "(source_type='DIRECT_SALE' AND draft_uuid IS NULL "
-        "AND service_order_uuid IS NULL AND direct_sale_uuid IS NOT NULL)",
+        "AND service_order_uuid IS NULL AND direct_sale_uuid IS NOT NULL "
+        "AND reversal_of_invoice_uuid IS NULL) OR "
+        "(source_type='REVERSAL' AND draft_uuid IS NULL "
+        "AND service_order_uuid IS NULL AND direct_sale_uuid IS NULL "
+        "AND reversal_of_invoice_uuid IS NOT NULL)",
         name="invoice_source_identity",
     ),
 )

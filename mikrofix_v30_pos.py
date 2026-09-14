@@ -3043,7 +3043,10 @@ def generate_central_invoice_pdfs(
     issued_at = str(snapshot.get("issued_at") or invoice.get("issued_at") or "-").replace(
         "T", " ", 1
     )
-    heading = "TEST – RAČUN" if test_mode else "RAČUN"
+    is_reversal = str(invoice.get("source_type") or "") == "REVERSAL"
+    heading = (
+        "TEST – STORNO RAČUNA" if test_mode else "STORNO RAČUNA"
+    ) if is_reversal else ("TEST – RAČUN" if test_mode else "RAČUN")
     rows = [["Postavka", "Kol.", "Cena", "Rabat", "Znesek"]]
     for line in lines:
         description = str(line.get("description") or "Postavka")
@@ -3085,6 +3088,13 @@ def generate_central_invoice_pdfs(
         Paragraph(f"Plačilo: {escape(payment_text)}", body),
         Paragraph(escape(str(snapshot.get("tax_note") or "")), small),
     ])
+    if is_reversal:
+        story.append(Paragraph(
+            "Storno računa: "
+            + escape(str(snapshot.get("reversal_of_invoice_number") or "-"))
+            + ". Razlog: " + escape(str(snapshot.get("reason") or "-")),
+            small,
+        ))
     if invoice.get("furs_eor"):
         story.append(Paragraph(f"EOR: {escape(str(invoice['furs_eor']))}", small))
     SimpleDocTemplate(
@@ -3120,6 +3130,12 @@ def generate_central_invoice_pdfs(
         Paragraph(f"Plačilo: {escape(payment_text)}", small),
         Paragraph(escape(str(snapshot.get("tax_note") or "")), small),
     ]
+    if is_reversal:
+        receipt_story.append(Paragraph(
+            "Storno računa: "
+            + escape(str(snapshot.get("reversal_of_invoice_number") or "-")),
+            small,
+        ))
     height = max(150, 92 + 14 * len(lines)) * mm
     SimpleDocTemplate(
         str(receipt_path), pagesize=(width, height), leftMargin=4*mm,

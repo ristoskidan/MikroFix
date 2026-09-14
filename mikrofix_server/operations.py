@@ -27,6 +27,7 @@ from mikrofix_sync_contracts import (
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
     validated_settle_unpaid_bank_invoice_payload,
+    validated_storno_invoice_payload,
     validated_set_partner_active_payload,
     validated_technical_completion_payload,
     validated_update_partner_payload,
@@ -1667,6 +1668,7 @@ def _settle_unpaid_bank_invoice(
             update(invoices).where(invoices.c.invoice_uuid == invoice_uuid).values(
                 payment_status="PAID", settlement_operation_id=operation_uuid,
                 payment_received_at=now, payment_received_method=method,
+                row_version=invoices.c.row_version + 1,
                 updated_at=now,
             )
         )
@@ -1717,6 +1719,7 @@ def _settle_unpaid_bank_invoice(
             payment_received_method=method,
             fiscal_submission_deadline=deadline,
             cash_session_uuid=(cash_session.session_uuid if cash_session else None),
+            row_version=invoices.c.row_version + 1,
             updated_at=now,
         )
     )
@@ -1750,6 +1753,222 @@ def _settle_unpaid_bank_invoice(
         "invoice_status": "PENDING_FISCALIZATION", "payment_status": "PAID",
         "payment_received_method": method,
         "fiscal_submission_deadline": deadline.isoformat(),
+    }, central_sequence
+
+
+def _negative_invoice_lines(snapshot: dict) -> list[dict]:
+    """Build printable reversal lines without changing original line identity."""
+    result: list[dict] = []
+    for raw in snapshot.get("lines", ()):  # immutable invoice snapshot
+        line = dict(raw)
+        for field in ("quantity", "line_total"):
+            if field in line:
+                line[field] = format(-Decimal(str(line[field])), "f")
+        result.append(line)
+    return result
+
+
+def _effective_invoice_payments(invoice) -> list[dict]:
+    """Return what was actually paid, including a late TRR settlement."""
+    if invoice.payment_status != "PAID":
+        return []
+    if invoice.payment_received_method:
+        return [{
+            "method": str(invoice.payment_received_method),
+            "amount": format(Decimal(invoice.total_amount), ".2f"),
+            "confirmed": True,
+        }]
+    return [dict(item) for item in (invoice.payments_json or [])]
+
+
+def _storno_invoice(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    invoice_uuid: UUID, operation_uuid: UUID, *, operator_tax_number: str,
+    actor_user_uuid: UUID | None, workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    """Create one financial reversal without changing stock or Service state."""
+    if envelope.aggregate_type != "INVOICE":
+        return _reject("INVALID_AGGREGATE_TYPE", "StornoInvoice requires INVOICE.")
+    try:
+        payload = validated_storno_invoice_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["invoice_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.invoice_id must equal aggregate_id."
+        )
+    if int(payload["expected_version"]) != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            "payload.expected_version must equal envelope.expected_version.",
+        )
+
+    invoice = connection.execute(
+        select(invoices).where(invoices.c.invoice_uuid == invoice_uuid).with_for_update()
+    ).one_or_none()
+    if invoice is None:
+        return _reject("INVOICE_NOT_FOUND", "The selected invoice does not exist.")
+    if invoice.source_type == "REVERSAL":
+        return _reject("REVERSAL_CANNOT_BE_REVERSED", "A storno document cannot be reversed.")
+    existing = connection.execute(
+        select(invoices).where(invoices.c.reversal_of_invoice_uuid == invoice_uuid)
+    ).one_or_none()
+    if existing is not None:
+        return (
+            "REJECTED",
+            {
+                "error_code": "INVOICE_ALREADY_REVERSED",
+                "error_message": "This invoice already has a storno document.",
+                "reversal_invoice_id": str(existing.invoice_uuid),
+                "reversal_invoice_number": existing.invoice_number,
+                "reversal_status": existing.status,
+            },
+            None,
+        )
+    if int(invoice.row_version) != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            f"Invoice version changed from {envelope.expected_version} "
+            f"to {invoice.row_version}.",
+        )
+    if invoice.status != "ISSUED":
+        return _reject(
+            "INVOICE_NOT_FINAL",
+            "Only a successfully issued invoice can be reversed.",
+        )
+
+    actual_payments = _effective_invoice_payments(invoice)
+    refund_payments = [{
+        "method": str(payment["method"]),
+        "amount": format(-Decimal(str(payment["amount"])), ".2f"),
+        "confirmed": True,
+    } for payment in actual_payments]
+    fiscal_required = any(
+        payment["method"] in {"CASH", "CARD"} for payment in actual_payments
+    )
+    cash_amount = sum(
+        (Decimal(str(payment["amount"])) for payment in actual_payments
+         if payment["method"] == "CASH"),
+        Decimal("0"),
+    ).quantize(_CENT, rounding=ROUND_HALF_UP)
+    cash_session = _open_cash_session_for_invoice(
+        connection, premise_id=invoice.premise_id,
+        electronic_device_id=invoice.electronic_device_id,
+        payments=[{"method": "CASH", "amount": str(cash_amount)}]
+        if cash_amount else [],
+    )
+
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    sequence, reversal_number = _next_invoice_number(
+        connection, fiscal_year=now.year, premise_id=invoice.premise_id,
+        electronic_device_id=invoice.electronic_device_id,
+    )
+    reversal_uuid = uuid4()
+    total = -Decimal(invoice.total_amount)
+    original_snapshot = dict(invoice.snapshot_json or {})
+    reference_invoice = {
+        "ReferenceInvoiceIdentifier": {
+            "BusinessPremiseID": invoice.premise_id,
+            "ElectronicDeviceID": invoice.electronic_device_id,
+            "InvoiceNumber": str(invoice.fiscal_sequence),
+        },
+        "ReferenceInvoiceIssueDateTime": invoice.issued_at.strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        ),
+    }
+    snapshot = {
+        "invoice_id": str(reversal_uuid), "invoice_number": reversal_number,
+        "source_type": "REVERSAL", "reversal_of_invoice_id": str(invoice_uuid),
+        "reversal_of_invoice_number": invoice.invoice_number,
+        "reason": payload["reason"],
+        "lines": _negative_invoice_lines(original_snapshot),
+        "billing_customer": dict(invoice.billing_customer_json or {}),
+        "payments": refund_payments, "total_amount": format(total, ".2f"),
+        "currency": invoice.currency, "tax_mode": invoice.tax_mode,
+        "tax_rate": format(Decimal(invoice.tax_rate), "f"),
+        "tax_note": invoice.tax_note, "cashier_id": envelope.actor_id,
+        "operator_tax_number": str(operator_tax_number or ""),
+        "premise_id": invoice.premise_id,
+        "electronic_device_id": invoice.electronic_device_id,
+        "cash_session_id": str(cash_session.session_uuid) if cash_session else "",
+        "issued_at": now.isoformat(timespec="seconds"),
+        "reference_invoice": reference_invoice,
+        "stock_effect": "NONE", "service_effect": "NONE",
+    }
+    reversal_status = "PENDING_FISCALIZATION" if fiscal_required else "ISSUED"
+    original_status = "REVERSAL_PENDING" if fiscal_required else "REVERSED"
+    connection.execute(insert(invoices).values(
+        invoice_uuid=reversal_uuid, row_version=1, draft_uuid=None,
+        service_order_uuid=None, source_type="REVERSAL", direct_sale_uuid=None,
+        reversal_of_invoice_uuid=invoice_uuid, storno_reason=payload["reason"],
+        issue_operation_id=operation_uuid, invoice_number=reversal_number,
+        fiscal_year=now.year, fiscal_sequence=sequence,
+        premise_id=invoice.premise_id,
+        electronic_device_id=invoice.electronic_device_id,
+        cash_session_uuid=cash_session.session_uuid if cash_session else None,
+        cashier_id=envelope.actor_id,
+        operator_tax_number=str(operator_tax_number or "") or None,
+        billing_partner_uuid=invoice.billing_partner_uuid,
+        billing_customer_json=dict(invoice.billing_customer_json or {}),
+        status=reversal_status, payment_status="PAID",
+        payments_json=refund_payments, total_amount=total,
+        currency=invoice.currency, tax_mode=invoice.tax_mode,
+        tax_rate=invoice.tax_rate, tax_note=invoice.tax_note,
+        snapshot_json=snapshot, issued_at=now,
+        finalized_at=None if fiscal_required else now,
+    ))
+    connection.execute(
+        update(invoices).where(invoices.c.invoice_uuid == invoice_uuid).values(
+            status=original_status, row_version=invoices.c.row_version + 1,
+            updated_at=now,
+        )
+    )
+    if cash_session is not None and cash_amount:
+        _record_central_cash_entry(
+            connection, session=cash_session, entry_uuid=uuid4(),
+            entry_type="CASH_REFUND", amount=-cash_amount,
+            reference_type="INVOICE_REVERSAL", reference_uuid=reversal_uuid,
+            reference_no=reversal_number,
+            description=f"Vračilo po stornu računa {invoice.invoice_number}",
+            actor_id=envelope.actor_id, actor_user_uuid=actor_user_uuid,
+            workstation_uuid=workstation_uuid, occurred_at=now,
+        )
+    if fiscal_required:
+        fiscal_request = {
+            "message_id": str(uuid4()), "invoice_id": str(reversal_uuid),
+            "invoice_number": reversal_number, "invoice_snapshot": snapshot,
+        }
+        connection.execute(insert(fiscal_outbox).values(
+            message_uuid=UUID(fiscal_request["message_id"]),
+            invoice_uuid=reversal_uuid, status="PENDING",
+            request_sha256=payload_sha256(fiscal_request),
+            request_json=fiscal_request,
+        ))
+    central_sequence = _publish_change(
+        connection, event_type=(
+            "InvoiceReversalFiscalizationQueued" if fiscal_required
+            else "InvoiceReversed"
+        ),
+        aggregate_type="INVOICE", aggregate_uuid=invoice_uuid,
+        aggregate_version=int(invoice.row_version) + 1,
+        payload={
+            "invoice_id": str(invoice_uuid), "invoice_number": invoice.invoice_number,
+            "invoice_status": original_status,
+            "reversal_invoice_id": str(reversal_uuid),
+            "reversal_invoice_number": reversal_number,
+            "reversal_status": reversal_status,
+            "stock_effect": "NONE", "service_effect": "NONE",
+        },
+        occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": int(invoice.row_version) + 1,
+        "central_sequence": central_sequence,
+        "invoice_id": str(invoice_uuid), "invoice_status": original_status,
+        "reversal_invoice_id": str(reversal_uuid),
+        "reversal_invoice_number": reversal_number,
+        "reversal_status": reversal_status,
+        "stock_effect": "NONE", "service_effect": "NONE",
     }, central_sequence
 
 
@@ -2792,6 +3011,13 @@ def process_operation(
         )
     elif envelope.operation_type == "SettleUnpaidBankInvoice":
         result_code, response, central_sequence = _settle_unpaid_bank_invoice(
+            connection, envelope, aggregate_uuid, operation_uuid,
+            operator_tax_number=operator_tax_number,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "StornoInvoice":
+        result_code, response, central_sequence = _storno_invoice(
             connection, envelope, aggregate_uuid, operation_uuid,
             operator_tax_number=operator_tax_number,
             actor_user_uuid=transmitted_by_user_uuid,

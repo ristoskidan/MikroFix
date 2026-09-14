@@ -259,6 +259,24 @@ class CentralApiIntegrationTests(unittest.TestCase):
             "contract_version": 1,
         }
 
+    def storno_invoice_operation(
+        self, invoice_id, *, sequence, expected_version=1,
+        reason="Napačno izdan račun",
+    ):
+        return {
+            "operation_id": str(uuid4()), "operation_type": "StornoInvoice",
+            "aggregate_type": "INVOICE", "aggregate_id": str(invoice_id),
+            "expected_version": expected_version, "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A", "device_sequence": sequence,
+            "occurred_at": "2026-09-14T12:00:00+02:00",
+            "payload": {
+                "invoice_id": str(invoice_id),
+                "expected_version": expected_version,
+                "reason": reason, "confirmed": True,
+            },
+            "contract_version": 1,
+        }
+
     def direct_sale_operation(
         self, sale_id, *, sequence, barcode="SUP-BARCODE-1", quantity="1",
         discount="0", amount="15.00", method="BANK_TRANSFER", confirmed=False,
@@ -2260,11 +2278,251 @@ class CentralApiIntegrationTests(unittest.TestCase):
             self.assertEqual(connection.execute(
                 select(invoice_number_sequences.c.last_number)
             ).scalar_one(), 1)
-            self.assertEqual(str(connection.execute(
+            stock_quantity = connection.execute(
                 select(inventory_items.c.quantity_on_hand).where(
                     inventory_items.c.article_uuid == article_id
                 )
-            ).scalar_one()), "1.0000")
+            ).scalar_one()
+        self.assertEqual(str(stock_quantity), "1.0000")
+
+    def test_storno_creates_one_negative_document_without_restoring_stock(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import (
+            direct_sale_stock_allocations, inventory_items,
+            invoice_number_sequences, invoices,
+        )
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=310,
+            document_type="DRA", external_no="DRA-STORNO-NO-STOCK",
+        )
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(uuid4(), sequence=311),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(issued["result_code"], "ACCEPTED", issued)
+        invoice_id = issued["result"]["invoice_id"]
+        storno = self.storno_invoice_operation(invoice_id, sequence=312)
+        first = self.client.post(
+            "/v1/sync/operations", json=storno, headers=self.headers
+        ).json()
+        repeated = self.client.post(
+            "/v1/sync/operations", json=storno, headers=self.headers
+        ).json()
+        duplicate = deepcopy(storno)
+        duplicate["operation_id"] = str(uuid4())
+        duplicate["device_sequence"] = 313
+        rejected = self.client.post(
+            "/v1/sync/operations", json=duplicate, headers=self.headers
+        ).json()
+
+        self.assertEqual(first, repeated)
+        self.assertEqual(first["result_code"], "ACCEPTED", first)
+        self.assertEqual(first["result"]["stock_effect"], "NONE")
+        self.assertEqual(first["result"]["service_effect"], "NONE")
+        self.assertEqual(rejected["error_code"], "INVOICE_ALREADY_REVERSED")
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(invoices).order_by(invoices.c.fiscal_sequence)
+            ).all()
+            stock = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+            allocation_count = connection.execute(
+                select(func.count()).select_from(direct_sale_stock_allocations)
+            ).scalar_one()
+            last_number = connection.execute(
+                select(invoice_number_sequences.c.last_number)
+            ).scalar_one()
+        self.assertEqual(len(rows), 2)
+        original, reversal = rows
+        self.assertEqual(original.status, "REVERSED")
+        self.assertEqual(original.row_version, 2)
+        self.assertEqual(reversal.source_type, "REVERSAL")
+        self.assertEqual(reversal.reversal_of_invoice_uuid, original.invoice_uuid)
+        self.assertEqual(reversal.status, "ISSUED")
+        self.assertEqual(str(reversal.total_amount), "-15.00")
+        self.assertEqual(reversal.snapshot_json["stock_effect"], "NONE")
+        self.assertEqual(str(stock.quantity_on_hand), "1.0000")
+        self.assertEqual(allocation_count, 1)
+        self.assertEqual(last_number, 2)
+
+    def test_cash_storno_waits_for_furs_and_books_one_cash_refund(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.fiscal_worker import process_fiscal_invoice
+        from mikrofix_server.models import (
+            cash_journal_entries, inventory_items, invoices,
+        )
+
+        class ConfirmingProvider:
+            def __init__(self):
+                self.requests = []
+                self.submissions = 0
+
+            def prepare_request(self, request, *, message_id):
+                self.requests.append(dict(request))
+                return {"InvoiceRequest": {
+                    "Header": {"MessageID": message_id},
+                    "Invoice": {"ProtectedID": "d" * 32},
+                }}
+
+            def submit_prepared(self, _payload):
+                self.submissions += 1
+                return {
+                    "status": "CONFIRMED", "zoi": "d" * 32,
+                    "eor": f"EOR-STORNO-{self.submissions}",
+                    "response": {"ok": True},
+                }
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=314,
+            document_type="DRA", external_no="DRA-CASH-STORNO",
+        )
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=self.open_cash_operation(sequence=315),
+            headers=self.headers,
+        ).json()["result_code"], "ACCEPTED")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(
+                uuid4(), sequence=316, method="CASH", confirmed=True,
+            ), headers=self.headers,
+        ).json()
+        original_id = issued["result"]["invoice_id"]
+        original_provider = ConfirmingProvider()
+        process_fiscal_invoice(self.engine, original_id, original_provider)
+
+        storno = self.client.post(
+            "/v1/sync/operations",
+            json=self.storno_invoice_operation(
+                original_id, sequence=317, expected_version=2,
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(storno["result_code"], "ACCEPTED", storno)
+        self.assertEqual(storno["result"]["invoice_status"], "REVERSAL_PENDING")
+        reversal_id = storno["result"]["reversal_invoice_id"]
+        reversal_provider = ConfirmingProvider()
+        confirmed = process_fiscal_invoice(
+            self.engine, reversal_id, reversal_provider
+        )
+        repeated = process_fiscal_invoice(
+            self.engine, reversal_id, reversal_provider
+        )
+        self.assertEqual(confirmed, repeated)
+        self.assertEqual(reversal_provider.submissions, 1)
+        self.assertEqual(
+            reversal_provider.requests[0]["reference_invoice"]
+            ["ReferenceInvoiceIdentifier"]["InvoiceNumber"],
+            "1",
+        )
+        with self.engine.connect() as connection:
+            original = connection.execute(select(invoices).where(
+                invoices.c.invoice_uuid == original_id
+            )).one()
+            reversal = connection.execute(select(invoices).where(
+                invoices.c.invoice_uuid == reversal_id
+            )).one()
+            entries = connection.execute(
+                select(cash_journal_entries).order_by(
+                    cash_journal_entries.c.entry_no
+                )
+            ).all()
+            stock = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+        self.assertEqual(original.status, "REVERSED")
+        self.assertEqual(original.row_version, 4)
+        self.assertEqual(reversal.status, "ISSUED")
+        self.assertEqual([str(row.amount) for row in entries], ["15.00", "-15.00"])
+        self.assertEqual(entries[1].entry_type, "CASH_REFUND")
+        self.assertEqual(str(stock.quantity_on_hand), "1.0000")
+
+    def test_service_invoice_storno_does_not_reopen_service_or_restore_part(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import (
+            inventory_items, invoice_drafts, invoices, service_orders,
+            service_part_consumptions,
+        )
+
+        order, draft_id = self.prepared_draft(
+            sequence=318, barcode="SERVICE-STORNO-PART"
+        )
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(draft_id, sequence=320),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        storno = self.client.post(
+            "/v1/sync/operations",
+            json=self.storno_invoice_operation(invoice_id, sequence=321),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(storno["result_code"], "ACCEPTED", storno)
+        with self.engine.connect() as connection:
+            service = connection.execute(select(service_orders).where(
+                service_orders.c.sync_uuid == order["aggregate_id"]
+            )).one()
+            draft = connection.execute(select(invoice_drafts).where(
+                invoice_drafts.c.draft_uuid == draft_id
+            )).one()
+            original = connection.execute(select(invoices).where(
+                invoices.c.invoice_uuid == invoice_id
+            )).one()
+            stock = connection.execute(select(inventory_items).where(
+                inventory_items.c.barcode == "SERVICE-STORNO-PART"
+            )).one()
+            consumption_count = connection.execute(
+                select(func.count()).select_from(service_part_consumptions)
+            ).scalar_one()
+        self.assertEqual(service.payload_json["technical_status"], "BILLING_COMPLETED")
+        self.assertEqual(draft.status, "INVOICED")
+        self.assertEqual(original.status, "REVERSED")
+        self.assertEqual(str(stock.quantity_on_hand), "0.0000")
+        self.assertEqual(consumption_count, 1)
+
+    def test_cashier_without_storno_permission_is_rejected_before_write(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import invoices
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=322,
+            document_type="DRA", external_no="DRA-STORNO-PERMISSION",
+        )
+        self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        )
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(uuid4(), sequence=323),
+            headers=self.headers,
+        ).json()
+        invoice_id = issued["result"]["invoice_id"]
+        login = self.central_login(role="CASHIER", application="CASHIER")
+        self.assertEqual(login.status_code, 200, login.text)
+        response = self.client.post(
+            "/v1/sync/operations",
+            json=self.storno_invoice_operation(invoice_id, sequence=1),
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        with self.engine.connect() as connection:
+            reversal_count = connection.execute(
+                select(func.count()).select_from(invoices).where(
+                    invoices.c.source_type == "REVERSAL"
+                )
+            ).scalar_one()
+        self.assertEqual(reversal_count, 0)
 
     def test_direct_serial_sale_requires_and_consumes_the_exact_serial(self):
         from sqlalchemy import select

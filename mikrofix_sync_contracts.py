@@ -1266,6 +1266,49 @@ def validated_settle_unpaid_bank_invoice_payload(
 
 
 @dataclass(frozen=True, slots=True)
+class StornoInvoiceContract:
+    invoice_id: str
+    expected_version: int
+    reason: str
+    confirmed: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "invoice_id", normalized_uuid(self.invoice_id, field="invoice_id")
+        )
+        version = int(self.expected_version)
+        if version < 1:
+            raise ContractError("an issued invoice requires expected_version of at least 1.")
+        object.__setattr__(self, "expected_version", version)
+        reason = str(self.reason or "").strip()
+        if len(reason) < 3 or len(reason) > 500:
+            raise ContractError("storno reason must contain 3 to 500 characters.")
+        object.__setattr__(self, "reason", reason)
+        if self.confirmed is not True:
+            raise ContractError("invoice storno must be explicitly confirmed.")
+
+    def payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def validated_storno_invoice_payload(value: Mapping[str, Any]) -> dict[str, Any]:
+    raw = dict(value)
+    unexpected = sorted(
+        set(raw) - {"invoice_id", "expected_version", "reason", "confirmed"}
+    )
+    if unexpected:
+        raise ContractError(
+            "invoice storno contains unsupported fields: " + ", ".join(unexpected)
+        )
+    try:
+        return StornoInvoiceContract(**raw).payload()
+    except (TypeError, ValueError) as exc:
+        if isinstance(exc, ContractError):
+            raise
+        raise ContractError("invoice storno payload is invalid.") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class SyncOperationEnvelope:
     operation_id: str
     operation_type: str

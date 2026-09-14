@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -121,6 +122,22 @@ class CashierCommandJournalTests(unittest.TestCase):
         self.assertEqual(row["operation_type"], "SettleUnpaidBankInvoice")
         self.assertEqual(row["aggregate_type"], "INVOICE")
         self.assertEqual(row["aggregate_uuid"], invoice_id)
+
+    def test_storno_is_durably_prepared_without_a_stock_instruction(self):
+        invoice_id = str(uuid4())
+        operation_id = self.journal.prepare_storno_invoice({
+            "invoice_id": invoice_id, "expected_version": 3,
+            "reason": "Napačen kupec", "confirmed": True,
+        })
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "StornoInvoice")
+        self.assertEqual(row["aggregate_uuid"], invoice_id)
+        saved_payload = json.loads(row["payload_json"])
+        self.assertEqual(saved_payload, {
+            "invoice_id": invoice_id, "expected_version": 3,
+            "reason": "Napačen kupec", "confirmed": True,
+        })
+        self.assertNotIn("return_stock", saved_payload)
 
     def test_direct_sale_is_durably_prepared_before_dispatch(self):
         sale_id = str(uuid4())

@@ -8,7 +8,7 @@ in testni bazi imata centralni model uporabnikov, dovoljenj, registriranih
 delovnih postaj, sej in revizijske sledi; produkcijski preklop ni izveden.
 
 Centralna Blagajna podpira tudi `OpenCashSession`, `RecordManualCashEntry`,
-`CloseCashSession` in `SettleUnpaidBankInvoice`. Za posamezen poslovni prostor in elektronsko napravo je
+`CloseCashSession`, `SettleUnpaidBankInvoice` in `StornoInvoice`. Za posamezen poslovni prostor in elektronsko napravo je
 dovoljena samo ena odprta seja. Gotovinska izdaja računa in pripadajoča knjižba
 sta ena transakcija; kartično ali TRR plačilo fizičnega blagajniškega salda ne
 spreminja. Zaporedje knjižb, tekoči saldo in končni PDF se vedno sestavijo iz
@@ -25,6 +25,15 @@ Centralno zgodovino izdanih računov bereta Blagajna in Office iz istega vira.
 Iskanje pokriva številko in datum računa, kupca in davčno številko, opis artikla,
 barkodo ter identiteto oziroma številko povezanega servisa. Office je pri tem
 samo bralec; izdaja in potrjevanje plačila ostajata odgovornost Blagajne.
+
+`StornoInvoice` je različično varovan, atomski in idempotenten ukaz Blagajne z
+ločenim dovoljenjem `STORNO_DOCUMENT`. Sprejme samo identiteto dokončno izdanega
+računa, pričakovano različico, razlog in izrecno potrditev. Ustvari nov negativni
+račun v istem centralnem zaporedju in ga poveže z izvirnikom. Gotovinski del
+ustvari natanko eno negativno knjižbo v odprti blagajni istega prostora in
+naprave; gotovinski ali kartični storno se dokonča šele po FURS. Storno nima
+zalogovnega ali servisnega učinka. Fizično vračilo artikla, reklamacija in
+ponovno odprtje servisa so ločeni poslovni dogodki.
 
 Knjiženje prejema oziroma pripenjanje poznejšega dobaviteljevega računa zahteva
 poleg dostopa do Office tudi ločeno centralno dovoljenje `CONFIRM_DOCUMENT`.
@@ -71,7 +80,10 @@ knjiženje dveh dogodkov, nespremenljivo zaporedje salda, idempotentno ponovitev
 odprtja, ročne knjižbe in zaprtja ter zavrnitev gotovinskega računa brez odprte
 seje. Preverjen je tudi sočasni poskus dveh Office odjemalcev sprostiti isti
 prejem: uspe samo eden, zaloga se poveča enkrat in porabi se ena številka PRA.
-Trenutna migracijska glava je `20260914_19`.
+Preizkusi storna dodatno dokazujejo eno negativno številko, eno gotovinsko
+vračilo, referenco na izvirni FURS račun, nespremenjeno zalogo in nespremenjene
+LOT-razporeditve ter varno ponovitev istega ukaza. Trenutna migracijska glava je
+`20260914_20`.
 
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do

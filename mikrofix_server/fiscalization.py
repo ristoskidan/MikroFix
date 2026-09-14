@@ -29,6 +29,16 @@ class FiscalStateError(RuntimeError):
     pass
 
 
+def _invoice_event_aggregate(invoice) -> tuple[str, UUID]:
+    if invoice.source_type == "DIRECT_SALE":
+        return "DIRECT_SALE", invoice.direct_sale_uuid
+    if invoice.source_type == "SERVICE":
+        return "INVOICE_DRAFT", invoice.draft_uuid
+    if invoice.source_type == "REVERSAL":
+        return "INVOICE", invoice.invoice_uuid
+    raise FiscalStateError("Invoice has an unsupported source type.")
+
+
 def _publish(
     connection: Connection, *, event_type: str, aggregate_type: str,
     aggregate_uuid: UUID, aggregate_version: int, payload: dict,
@@ -185,15 +195,12 @@ def mark_fiscal_submission_uncertain(
     connection.execute(
         update(invoices)
         .where(invoices.c.invoice_uuid == invoice_uuid)
-        .values(status="FISCAL_RECONCILIATION", updated_at=now)
+        .values(
+            status="FISCAL_RECONCILIATION",
+            row_version=invoices.c.row_version + 1, updated_at=now,
+        )
     )
-    aggregate_type = (
-        "DIRECT_SALE" if invoice.source_type == "DIRECT_SALE" else "INVOICE_DRAFT"
-    )
-    aggregate_uuid = (
-        invoice.direct_sale_uuid
-        if invoice.source_type == "DIRECT_SALE" else invoice.draft_uuid
-    )
+    aggregate_type, aggregate_uuid = _invoice_event_aggregate(invoice)
     _publish(
         connection,
         event_type="InvoiceFiscalizationUncertain",
@@ -258,7 +265,8 @@ def confirm_fiscal_submission(
         .where(invoices.c.invoice_uuid == invoice_uuid)
         .values(
             status="ISSUED", furs_zoi=clean_zoi, furs_eor=clean_eor,
-            finalized_at=now, updated_at=now,
+            finalized_at=now, row_version=invoices.c.row_version + 1,
+            updated_at=now,
         )
     )
     if invoice.source_type == "SERVICE":
@@ -298,13 +306,37 @@ def confirm_fiscal_submission(
                 },
                 occurred_at=now,
             )
-    aggregate_type = (
-        "DIRECT_SALE" if invoice.source_type == "DIRECT_SALE" else "INVOICE_DRAFT"
-    )
-    aggregate_uuid = (
-        invoice.direct_sale_uuid
-        if invoice.source_type == "DIRECT_SALE" else invoice.draft_uuid
-    )
+    if invoice.source_type == "REVERSAL":
+        original = connection.execute(
+            select(invoices)
+            .where(invoices.c.invoice_uuid == invoice.reversal_of_invoice_uuid)
+            .with_for_update()
+        ).one_or_none()
+        if original is None or original.status != "REVERSAL_PENDING":
+            raise FiscalStateError("Original invoice is not awaiting this reversal.")
+        connection.execute(
+            update(invoices)
+            .where(invoices.c.invoice_uuid == original.invoice_uuid)
+            .values(
+                status="REVERSED", row_version=invoices.c.row_version + 1,
+                updated_at=now,
+            )
+        )
+        _publish(
+            connection, event_type="InvoiceReversed", aggregate_type="INVOICE",
+            aggregate_uuid=original.invoice_uuid,
+            aggregate_version=int(original.row_version) + 1,
+            payload={
+                "invoice_id": str(original.invoice_uuid),
+                "invoice_number": original.invoice_number,
+                "reversal_invoice_id": str(invoice_uuid),
+                "reversal_invoice_number": invoice.invoice_number,
+                "status": "REVERSED", "stock_effect": "NONE",
+                "service_effect": "NONE",
+            },
+            occurred_at=now,
+        )
+    aggregate_type, aggregate_uuid = _invoice_event_aggregate(invoice)
     _publish(
         connection,
         event_type="InvoiceFiscalizationConfirmed",

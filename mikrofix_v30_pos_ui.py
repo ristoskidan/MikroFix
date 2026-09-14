@@ -1366,6 +1366,8 @@ class PosWindow:
         refresh()
 
     def manage_issued_invoices(self):
+        if self.central_mode:
+            return self._manage_central_issued_invoices()
         dialog = tk.Toplevel(self.win)
         dialog.title("MikroFix – izdani računi")
         dialog.transient(self.win)
@@ -1485,6 +1487,183 @@ class PosWindow:
         ttk.Button(actions,text="REKLAMACIJA",command=claim_selected).pack(side="right",padx=5)
         if self._can_storno():ttk.Button(actions,text="STORNO",command=storno_selected).pack(side="right")
         refresh_history();search.focus_set()
+
+    def _manage_central_issued_invoices(self):
+        dialog = tk.Toplevel(self.win)
+        dialog.title("MikroFix – centralni izdani računi")
+        dialog.transient(self.win)
+        maximize_work_window(dialog, "1180x720")
+        query = tk.StringVar()
+        ttk.Label(
+            dialog,
+            text="Išči po številki, datumu, kupcu, artiklu, barkodi ali servisu",
+        ).pack(anchor="w", padx=14, pady=(14, 3))
+        search = ttk.Entry(dialog, textvariable=query)
+        search.pack(fill="x", padx=14, pady=(0, 8))
+        columns = ("no", "date", "type", "customer", "amount", "status")
+        tree = ttk.Treeview(
+            dialog, columns=columns, show="headings", selectmode="browse"
+        )
+        for key, label, width in (
+            ("no", "Številka", 165), ("date", "Datum", 155),
+            ("type", "Vrsta", 135), ("customer", "Kupec", 280),
+            ("amount", "Znesek", 110), ("status", "Stanje", 170),
+        ):
+            tree.heading(key, text=label)
+            tree.column(
+                key, width=width,
+                anchor="e" if key == "amount" else "w",
+                stretch=key == "customer",
+            )
+        tree.pack(fill="both", expand=True, padx=14, pady=(0, 8))
+        rows_by_id = {}
+
+        def refresh(*_args):
+            try:
+                rows = self.central_cashier.invoices(query.get(), limit=500)
+            except Exception as exc:
+                messagebox.showerror("Izdani računi", str(exc), parent=dialog)
+                return
+            rows_by_id.clear()
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for row in rows:
+                identity = str(row["invoice_id"])
+                rows_by_id[identity] = row
+                customer = dict(row.get("snapshot") or {}).get(
+                    "billing_customer", {}
+                )
+                document_type = (
+                    "STORNO RAČUNA"
+                    if row.get("source_type") == "REVERSAL" else "RAČUN"
+                )
+                tree.insert("", "end", iid=identity, values=(
+                    row["invoice_number"],
+                    str(row.get("issued_at") or "").replace("T", " ")[:19],
+                    document_type, customer.get("name") or "Končni kupec",
+                    f"{dec(row['total_amount']):.2f} EUR", row["status"],
+                ))
+
+        def selected():
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo(
+                    "Izdani računi", "Izberi račun.", parent=dialog
+                )
+                return None
+            try:
+                return self.central_cashier.transport.get_invoice(selection[0])
+            except Exception as exc:
+                messagebox.showerror("Izdani računi", str(exc), parent=dialog)
+                return None
+
+        def open_original(receipt=False):
+            invoice = selected()
+            if not invoice:
+                return
+            printable_statuses = (
+                {"ISSUED"} if invoice.get("source_type") == "REVERSAL"
+                else {"ISSUED", "REVERSAL_PENDING", "REVERSED"}
+            )
+            if invoice.get("status") not in printable_statuses:
+                messagebox.showwarning(
+                    "Izdani računi",
+                    "Dokument še ni dokončno fiskaliziran in zato še nima "
+                    "končnega originalnega PDF-ja.", parent=dialog,
+                )
+                return
+            try:
+                a4, narrow = generate_central_invoice_pdfs(
+                    invoice=invoice, output_dir=self.pdf_dir,
+                    company=self._company_data(),
+                    paper_width_mm=self._paper_width(),
+                    test_mode=self.runtime.is_test,
+                )
+                open_local_file(narrow if receipt else a4)
+            except Exception as exc:
+                messagebox.showerror("Izdani računi", str(exc), parent=dialog)
+
+        def storno_selected():
+            invoice = selected()
+            if invoice:
+                self._storno_central_invoice(invoice, parent=dialog, on_success=refresh)
+
+        query.trace_add("write", refresh)
+        footer = ttk.Frame(dialog, padding=(14, 0, 14, 14))
+        footer.pack(fill="x")
+        ttk.Button(footer, text="ZAPRI", command=dialog.destroy).pack(side="left")
+        ttk.Button(
+            footer, text="ODPRI A4", command=lambda: open_original(False)
+        ).pack(side="left", padx=5)
+        ttk.Button(
+            footer, text=f"ODPRI {self._paper_width()} mm",
+            command=lambda: open_original(True),
+        ).pack(side="left")
+        if self._can_storno():
+            ttk.Button(
+                footer, text="STORNO RAČUNA", command=storno_selected
+            ).pack(side="right")
+        refresh()
+        search.focus_set()
+
+    def _storno_central_invoice(self, invoice, *, parent, on_success=None):
+        if not self._require_storno_permission():
+            return
+        if invoice.get("source_type") == "REVERSAL":
+            messagebox.showwarning(
+                "Storno računa", "Storno dokumenta ni mogoče ponovno stornirati.",
+                parent=parent,
+            )
+            return
+        if invoice.get("status") != "ISSUED":
+            messagebox.showwarning(
+                "Storno računa",
+                "Stornirati je mogoče samo dokončno izdani račun.", parent=parent,
+            )
+            return
+        reason = simpledialog.askstring(
+            "Storno računa", "Razlog popolnega storna:", parent=parent
+        )
+        if not reason:
+            return
+        if not messagebox.askyesno(
+            "Dokončno potrdi storno",
+            f"Račun {invoice['invoice_number']} bo finančno storniran z novim "
+            "dokumentom.\n\nStorno NE vrne delov na zalogo in NE odpre "
+            "servisa. Fizično vračilo in ponovno odprtje sta ločena "
+            "postopka.\n\nNadaljujem?", parent=parent,
+        ):
+            return
+        try:
+            result = self.central_cashier.storno_invoice(
+                invoice_id=str(invoice["invoice_id"]),
+                expected_version=int(invoice["row_version"]), reason=reason,
+            )
+        except Exception as exc:
+            messagebox.showerror("Storno računa", str(exc), parent=parent)
+            return
+        reversal = result.invoice
+        if reversal.get("status") == "ISSUED":
+            try:
+                a4, _receipt = generate_central_invoice_pdfs(
+                    invoice=reversal, output_dir=self.pdf_dir,
+                    company=self._company_data(),
+                    paper_width_mm=self._paper_width(),
+                    test_mode=self.runtime.is_test,
+                )
+                open_local_file(a4)
+                note = " Končni storno PDF je pripravljen."
+            except Exception as exc:
+                note = f" PDF-ja ni bilo mogoče pripraviti: {exc}"
+        else:
+            note = " Storno čaka na varno davčno potrditev FURS."
+        messagebox.showinfo(
+            "Storno računa",
+            f"Ustvarjen je dokument {reversal['invoice_number']}.{note}",
+            parent=parent,
+        )
+        if callable(on_success):
+            on_success()
 
     def refresh_stock(self):
         if self.issued_id:
@@ -3079,6 +3258,18 @@ class PosWindow:
             self.used_frame.pack_forget()
             self.total_var.set("SKUPAJ: 0,00 EUR")
             self.autosave_var.set("Prejšnji račun zaključen – delovno območje je prazno")
+        elif ready and self.central_mode and self._can_storno():
+            invoice = self.central_invoice or {}
+            if (
+                invoice.get("status") == "ISSUED"
+                and invoice.get("source_type") != "REVERSAL"
+            ):
+                b = ttk.Button(
+                    footer, text="STORNO RAČUNA",
+                    command=self.storno_current_invoice,
+                )
+                b.pack(side="right", padx=4, pady=10)
+                self.post_buttons.append(b)
 
     def print_copy(self):
         try:
@@ -3116,6 +3307,15 @@ class PosWindow:
             return
         if not self.issued_id or not self.print_confirmed:
             return
+        if self.central_mode:
+            try:
+                invoice = self.central_cashier.transport.get_invoice(
+                    str(self.issued_id)
+                )
+            except Exception as exc:
+                messagebox.showerror("Storno računa", str(exc), parent=self.win)
+                return
+            return self._storno_central_invoice(invoice, parent=self.win)
         reason = simpledialog.askstring(
             "Storno računa", "Razlog za storno celotnega računa:", parent=self.win
         )

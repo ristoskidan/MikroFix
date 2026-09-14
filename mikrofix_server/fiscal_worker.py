@@ -44,6 +44,11 @@ def _provider_input(invoice, outbox) -> dict[str, Any]:
     }
     if bool(dict(outbox.request_json or {}).get("subsequent_submit")):
         result["subsequent_submit"] = True
+    if invoice.source_type == "REVERSAL":
+        reference = dict(invoice.snapshot_json or {}).get("reference_invoice")
+        if not isinstance(reference, dict) or not reference:
+            raise ValueError("Invoice reversal has no immutable original reference.")
+        result["reference_invoice"] = reference
     return result
 
 
