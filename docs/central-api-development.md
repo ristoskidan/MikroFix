@@ -301,6 +301,14 @@ sejo in takoj zahteva sinhronizacijo.
 
 ## Razvojni priklop Blagajne
 
+Skupno odjemalsko jedro `mikrofix_central_identity.py` že podpira pravo spletno
+prijavo za samostojna Office in Blagajno. Vrnjeno sejo sprejme samo, če se
+ujemajo uporabnik, program in registrirana postaja ter seja vsebuje zahtevano
+modulsko dovoljenje. Žeton ostane samo v pomnilniku; zavrnjena neujemajoča seja
+se poskusi takoj preklicati. Produkcijska zagonska mostova lahko uporabljata to
+preverjeno sejo, še ne pa razvojnega skupnega žetona. Manjkata še priklop
+prijavnega zaslona in dosledna obravnava poteka seje v samostojnih ovojih.
+
 Glavni namizni program odpre centralni tok Blagajne, kadar je nastavljen
 `database.server_url`. Uporabi isto razvojno okoljsko skrivnost
 `MIKROFIX_SYNC_TOKEN`; skrivnost se ne zapisuje v nastavitve ali lokalno bazo.

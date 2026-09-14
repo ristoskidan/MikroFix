@@ -47,6 +47,14 @@ Offline centralni uporabniški posnetek je omejen na sedem dni. Po izteku in ob
 premiku sistemske ure pred zadnjo centralno prijavo se dostop varno zavrne.
 Vsaka uspešna offline prijava pokaže opozorilo in natančen čas izteka.
 
+Za samostojna Office in Blagajno je izdelano ter testirano skupno centralno
+identitetno jedro. Preveri uporabnika, vrsto programa, registrirano delovno
+postajo in zahtevano dovoljenje; dostopni žeton hrani samo v pomnilniku in ga ob
+odjavi pozabi tudi ob izpadu povezave. Produkcijska zagonska mostova sprejmeta
+samo tako preverjeno sejo, skupni razvojni žeton pa v produkciji še naprej
+zavrneta. Prijavni zaslon in priklop samostojnih uporabniških ovojev še nista
+dokončana, zato Office in Blagajna s tem še nista produkcijsko pripravljena.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:

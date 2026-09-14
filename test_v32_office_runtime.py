@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
+from mikrofix_central_auth_client import CentralSession
+
 from mikrofix_central_office_bootstrap import (
     CentralOfficeBootstrapError,
     build_central_office,
@@ -265,6 +267,25 @@ class CentralOfficeBootstrapTests(unittest.TestCase):
                 office_db=":memory:", actor_id="office-a", device_id="OFFICE-PC-A",
                 token="development-token-with-24-chars",
             )
+
+    def test_production_accepts_matching_central_office_session(self):
+        session = CentralSession(
+            access_token="office-session-token", expires_at="2099-01-01T00:00:00Z",
+            user_id=str(uuid4()), user_version=1, username="office-a",
+            display_name="Office A", role="OFFICE", workstation_code="OFFICE-PC-A",
+            application_type="OFFICE", permissions=frozenset({"MODULE_OFFICE"}),
+            must_change_pin=False,
+        )
+        handle = build_central_office(
+            settings={
+                "environment": "PRODUCTION",
+                "database": {"server_url": "https://central.example"},
+            },
+            office_db=":memory:", actor_id="office-a", device_id="OFFICE-PC-A",
+            session=session,
+        )
+        self.assertEqual(handle.workflow.transport.token, "office-session-token")
+        handle.close()
 
 if __name__ == "__main__":
     unittest.main()

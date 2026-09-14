@@ -4,6 +4,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from uuid import uuid4
+
+from mikrofix_central_auth_client import CentralSession
 
 from mikrofix_central_cashier_bootstrap import (
     CentralCashierBootstrapError,
@@ -60,6 +63,25 @@ class CentralCashierBootstrapTests(unittest.TestCase):
                 office_db=":memory:", actor_id="blagajnik", device_id="POS-1",
                 token="development-token-with-24-chars",
             )
+
+    def test_production_accepts_matching_central_cashier_session(self):
+        session = CentralSession(
+            access_token="cashier-session-token", expires_at="2099-01-01T00:00:00Z",
+            user_id=str(uuid4()), user_version=1, username="blagajnik",
+            display_name="Blagajnik", role="CASHIER",
+            workstation_code="POS-1", application_type="CASHIER",
+            permissions=frozenset({"MODULE_CASHIER"}), must_change_pin=False,
+        )
+        handle = build_central_cashier(
+            settings={
+                "environment": "PRODUCTION",
+                "database": {"server_url": "https://central.example"},
+            },
+            office_db=":memory:", actor_id="blagajnik", device_id="POS-1",
+            session=session,
+        )
+        self.assertEqual(handle.workflow.transport.token, "cashier-session-token")
+        handle.close()
 
     def test_central_window_refuses_legacy_local_draft_without_mutating_it(self):
         window = PosWindow.__new__(PosWindow)
