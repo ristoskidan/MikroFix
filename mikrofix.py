@@ -29,6 +29,12 @@ from mikrofix_auth import (
     PERMISSION_SERVICE,
 )
 from mikrofix_user_ui import SessionAuthUI
+from mikrofix_central_auth_client import RequestsCentralAuthClient
+from mikrofix_device_signing import load_private_key
+from mikrofix_service_identity import (
+    ServiceCentralIdentityManager,
+    ServiceIdentityCache,
+)
 from mikrofix_runtime import APP_VERSION, load_runtime
 from mikrofix_policy import (
     WARRANTY_SCOPE_INSTALLED_PARTS,
@@ -309,6 +315,112 @@ def auth_store():
     return _AUTH_STORE
 
 
+SERVICE_SYNC_DEVICE_ID = service_device_id(
+    RUNTIME.active_premise, RUNTIME.electronic_device
+)
+CENTRAL_SERVER_URL = str(
+    RUNTIME.settings.get("database", {}).get("server_url") or ""
+).strip()
+CENTRAL_SERVICE_IDENTITY = None
+CENTRAL_SERVICE_SIGNING_KEY = None
+CENTRAL_SERVICE_CONFIGURATION_ERROR = ""
+_central_workstation_secret = str(
+    os.environ.get("MIKROFIX_WORKSTATION_SECRET") or ""
+).strip()
+_central_user_auth_required = bool(
+    CENTRAL_SERVER_URL and (
+        _central_workstation_secret or not RUNTIME.is_test
+    )
+)
+if _central_user_auth_required:
+    _signing_key_path = Path(
+        os.environ.get("MIKROFIX_SERVICE_SIGNING_KEY")
+        or DATA_DIR / "service-workstation-signing.key"
+    ).expanduser()
+    if not _central_workstation_secret:
+        CENTRAL_SERVICE_CONFIGURATION_ERROR = (
+            "Manjka skrivnost centralno registrirane delovne postaje Servisa."
+        )
+    elif not _signing_key_path.is_file():
+        CENTRAL_SERVICE_CONFIGURATION_ERROR = (
+            f"Manjka zasebni podpisni ključ Servisa: {_signing_key_path}"
+        )
+    else:
+        try:
+            CENTRAL_SERVICE_SIGNING_KEY = load_private_key(_signing_key_path)
+            CENTRAL_SERVICE_IDENTITY = ServiceCentralIdentityManager(
+                RequestsCentralAuthClient(CENTRAL_SERVER_URL),
+                ServiceIdentityCache(
+                    RUNTIME.db_dir / "service_central_identity.sqlite"
+                ),
+                workstation_code=SERVICE_SYNC_DEVICE_ID,
+                workstation_secret=_central_workstation_secret,
+            )
+        except Exception as exc:
+            CENTRAL_SERVICE_CONFIGURATION_ERROR = (
+                f"Centralne identitete Servisa ni mogoče pripraviti: {exc}"
+            )
+
+
+def central_service_login(user, pin):
+    if not _central_user_auth_required:
+        return False
+    if CENTRAL_SERVICE_IDENTITY is None:
+        raise RuntimeError(CENTRAL_SERVICE_CONFIGURATION_ERROR)
+    CENTRAL_SERVICE_IDENTITY.login(
+        username=str(user["username"]), pin=str(pin)
+    )
+    protect_file_permissions(
+        RUNTIME.db_dir / "service_central_identity.sqlite"
+    )
+    return CENTRAL_SERVICE_IDENTITY.must_change_pin
+
+
+def central_service_change_pin(user, current_pin, new_pin):
+    if CENTRAL_SERVICE_IDENTITY is None:
+        raise RuntimeError(CENTRAL_SERVICE_CONFIGURATION_ERROR)
+    worker_was_running = bool(
+        service_sync_worker is not None and service_sync_worker.running
+    )
+    if worker_was_running and not stop_service_sync_worker():
+        raise RuntimeError(
+            "Menjava PIN-a trenutno ni varna, ker se sinhronizacija še zaključuje."
+        )
+    try:
+        CENTRAL_SERVICE_IDENTITY.change_pin_and_relogin(
+            username=str(user["username"]),
+            current_pin=str(current_pin), new_pin=str(new_pin),
+        )
+    finally:
+        if worker_was_running:
+            start_service_sync_worker()
+
+
+def central_service_end_session():
+    if CENTRAL_SERVICE_IDENTITY is None:
+        return True
+    return CENTRAL_SERVICE_IDENTITY.end_session()
+
+
+def central_service_operation_identity():
+    """Return complete signing arguments, or fail before writing an outbox row."""
+    if not _central_user_auth_required:
+        return {}
+    identity = (
+        CENTRAL_SERVICE_IDENTITY.identity
+        if CENTRAL_SERVICE_IDENTITY is not None else None
+    )
+    if identity is None or CENTRAL_SERVICE_SIGNING_KEY is None:
+        raise RuntimeError(
+            "Centralna identiteta Servisa ni prijavljena; dogodka ni mogoče podpisati."
+        )
+    return {
+        "actor_user_id": identity.user_id,
+        "actor_authorization_version": identity.user_version,
+        "signing_private_key": CENTRAL_SERVICE_SIGNING_KEY,
+    }
+
+
 AUTH_SESSION = SessionAuthUI(
     auth_store,
     version_label=RUNTIME.version_label,
@@ -320,6 +432,13 @@ AUTH_SESSION = SessionAuthUI(
     dark=DARK,
     light_gray=LIGHT_GRAY,
     danger=DANGER,
+    external_login=central_service_login if _central_user_auth_required else None,
+    external_change_pin=(
+        central_service_change_pin if _central_user_auth_required else None
+    ),
+    external_end_session=(
+        central_service_end_session if _central_user_auth_required else None
+    ),
 )
 
 
@@ -373,8 +492,10 @@ def end_application_user_session(reason):
     return True
 
 
-def run_pin_login(parent, username_only=None):
-    return AUTH_SESSION.login(parent, username_only=username_only)
+def run_pin_login(parent, username_only=None, *, verify_central=True):
+    return AUTH_SESSION.login(
+        parent, username_only=username_only, verify_external=verify_central
+    )
 
 
 def change_pin_dialog(parent):
@@ -391,10 +512,19 @@ def logout_and_lock():
         return
     if not persist_active_service_draft():
         return
+    if not stop_service_sync_worker():
+        messagebox.showerror(
+            "MikroFIX – sinhronizacija se še zaključuje",
+            "Odjava trenutno ni varna, ker sinhronizacija še uporablja lokalno bazo. "
+            "Počakaj in poskusi znova.",
+            parent=root,
+        )
+        return
     end_application_user_session("MANUAL_LOGOUT")
     ACTIVE_SCREEN = "LOGIN"
     root.withdraw()
     if run_login_or_close_safely():
+        start_service_sync_worker()
         root.deiconify()
         try:
             root.state("zoomed")
@@ -432,7 +562,9 @@ def lock_for_inactivity():
         audit_event("AUTO_LOCK", "user", required_username)
         ACTIVE_SCREEN = "LOGIN"
         root.withdraw()
-        if not run_login_or_close_safely(username_only=required_username):
+        if not run_login_or_close_safely(
+            username_only=required_username, verify_central=False
+        ):
             ACTIVE_SCREEN = "CLOSED"
             return
         ACTIVE_SCREEN = previous_screen
@@ -475,11 +607,6 @@ def connect():
 
 def inventory_connect():
     return RUNTIME.connect_sqlite("inventory", foreign_keys=True)
-
-
-SERVICE_SYNC_DEVICE_ID = service_device_id(
-    RUNTIME.active_premise, RUNTIME.electronic_device
-)
 
 
 def _service_sync_status_from_worker(worker_status):
@@ -525,14 +652,24 @@ def start_service_sync_worker():
     server_url = str(
         RUNTIME.settings.get("database", {}).get("server_url") or ""
     ).strip()
-    token = str(os.environ.get("MIKROFIX_SYNC_TOKEN") or "").strip()
+    if _central_user_auth_required:
+        token = (
+            CENTRAL_SERVICE_IDENTITY.access_token
+            if CENTRAL_SERVICE_IDENTITY is not None else ""
+        )
+    else:
+        token = str(os.environ.get("MIKROFIX_SYNC_TOKEN") or "").strip()
     if not server_url:
         service_sync_status_var.set("SYNC: NI NASTAVLJEN")
         service_sync_status_label.configure(fg=GRAY)
         return False
     if not token:
-        service_sync_status_var.set("SYNC: MANJKA SKRIVNOST")
-        service_sync_status_label.configure(fg=DANGER)
+        if _central_user_auth_required:
+            service_sync_status_var.set("SYNC: BREZ POVEZAVE")
+            service_sync_status_label.configure(fg=WARNING)
+        else:
+            service_sync_status_var.set("SYNC: MANJKA SKRIVNOST")
+            service_sync_status_label.configure(fg=DANGER)
         return False
     try:
         interval = max(
@@ -2863,6 +3000,7 @@ def _save_service():
             actor_id=AUTH_SESSION.username or RUNTIME.operator_code,
             device_id=SERVICE_SYNC_DEVICE_ID,
             data_dir=RUNTIME.data_dir,
+            **central_service_operation_identity(),
         )
         link_service_result(
             c, int(active_service_order_id), int(service_id), commit=False
@@ -3270,6 +3408,7 @@ def save_intake_from_tab():
                 record,
                 actor_id=AUTH_SESSION.username or RUNTIME.operator_code,
                 device_id=SERVICE_SYNC_DEVICE_ID,
+                **central_service_operation_identity(),
             )
             last_intake_pdf_path = generate_service_order_pdf(
                 record, PDF_DIR, test_mode=RUNTIME.is_test
@@ -4257,6 +4396,7 @@ def record_removed_part_for_selected_service():
                     condition_note=note,
                     actor_id=AUTH_SESSION.username or RUNTIME.operator_code,
                     device_id=SERVICE_SYNC_DEVICE_ID,
+                    **central_service_operation_identity(),
                 )
         except Exception as exc:
             messagebox.showerror(
@@ -7075,10 +7215,12 @@ def service_time_blocks_logout():
     return True
 
 
-def run_login_or_close_safely(*, username_only=None):
+def run_login_or_close_safely(*, username_only=None, verify_central=True):
     """Keep the login gate open while active service time forbids exiting."""
     while True:
-        if run_pin_login(root, username_only=username_only):
+        if run_pin_login(
+            root, username_only=username_only, verify_central=verify_central
+        ):
             return True
         if not service_time_blocks_application_close():
             end_application_user_session("LOGIN_CANCELLED_EXIT")

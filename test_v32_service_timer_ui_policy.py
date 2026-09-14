@@ -1,6 +1,7 @@
 import ast
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 from mikrofix_user_ui import SessionAuthUI
 
@@ -49,13 +50,30 @@ class ServiceTimerUiPolicyTests(unittest.TestCase):
         self.assertIn("persist_active_service_draft", calls)
         self.assertIn("run_login_or_close_safely", calls)
         self.assertIn("end_application_user_session", calls)
+        self.assertIn("stop_service_sync_worker", calls)
+        self.assertIn("start_service_sync_worker", calls)
         self.assertNotIn("destroy", calls)
 
     def test_auto_lock_keeps_same_user_and_does_not_pause_time(self):
         calls = self.calls_in("lock_for_inactivity")
         self.assertIn("run_login_or_close_safely", calls)
         self.assertNotIn("pause_active_service_timer", calls)
+        function_source = ast.get_source_segment(
+            self.source, self.functions["lock_for_inactivity"]
+        )
+        self.assertIn("verify_central=False", function_source)
         self.assertNotIn("destroy", calls)
+
+    def test_service_outbox_writes_receive_central_signing_identity(self):
+        for function_name in (
+            "_save_service", "save_intake_from_tab",
+            "record_removed_part_for_selected_service",
+        ):
+            with self.subTest(function=function_name):
+                self.assertIn(
+                    "central_service_operation_identity",
+                    self.calls_in(function_name),
+                )
 
     def test_main_close_uses_service_time_gate(self):
         calls = self.calls_in("on_close")
@@ -115,6 +133,24 @@ class EphemeralSessionTests(unittest.TestCase):
         self.assertFalse(session.is_authenticated)
         self.assertEqual(session.username, "")
         self.assertEqual(session.permissions, set())
+
+    def test_end_session_forgets_local_login_when_central_logout_fails(self):
+        session = SessionAuthUI.__new__(SessionAuthUI)
+        session.current = {
+            "username": "serviser", "display_name": "Serviser",
+            "role": "SERVICE", "is_active": 1,
+            "permissions": {"MODULE_SERVICE"},
+        }
+        session._authenticated = True
+        session._caption_vars = []
+        session._admin_widgets = []
+        session.external_end_session = Mock(side_effect=RuntimeError("offline"))
+
+        session.end_session()
+
+        session.external_end_session.assert_called_once_with()
+        self.assertFalse(session.is_authenticated)
+        self.assertEqual(session.username, "")
 
 
 if __name__ == "__main__":

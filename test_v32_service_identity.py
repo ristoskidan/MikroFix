@@ -130,6 +130,33 @@ class ServiceIdentityTests(unittest.TestCase):
         self.assertEqual(identity.user_version, 4)
         self.assertEqual(self.cache.get("serviser-a").user_version, 4)
 
+    def test_identity_requiring_pin_change_is_not_available_offline(self):
+        self.cache.remember(central_session(user_version=2))
+        self.client.login.return_value = central_session(
+            must_change_pin=True, user_version=3
+        )
+
+        self.manager.login(username="serviser-a", pin="246810")
+
+        self.assertTrue(self.manager.must_change_pin)
+        self.assertIsNone(self.cache.get("serviser-a"))
+
+    def test_voluntary_pin_change_also_relogs_with_the_new_pin(self):
+        first = central_session(user_version=3)
+        second = central_session(access_token="new-token", user_version=4)
+        self.client.login.side_effect = [first, second]
+        self.manager.login(username="serviser-a", pin="246810")
+
+        identity = self.manager.change_pin_and_relogin(
+            username="serviser-a", current_pin="246810", new_pin="864209"
+        )
+
+        self.client.change_pin.assert_called_once_with(
+            "memory-only-token", current_pin="246810", new_pin="864209"
+        )
+        self.assertEqual(identity.user_version, 4)
+        self.assertEqual(self.manager.access_token, "new-token")
+
 
 if __name__ == "__main__":
     unittest.main()

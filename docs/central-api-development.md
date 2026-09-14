@@ -5,7 +5,8 @@ To je postopno grajen centralni razvojni rez. Sprejema `CreateServiceOrder`,
 izdajo servisnega ali neposrednega računa, blagajniški dnevnik,
 `ConfirmPurchaseReceipt` in `AttachPurchaseInvoice`. Razvojni
 in testni bazi imata centralni model uporabnikov, dovoljenj, registriranih
-delovnih postaj, sej in revizijske sledi; produkcijski preklop ni izveden.
+delovnih postaj, sej in revizijske sledi. Produkcijska centralna identiteta je
+priklopljena za Servis; Blagajna in Office sta še v postopni migraciji.
 
 Centralna Blagajna podpira tudi `OpenCashSession`, `RecordManualCashEntry`,
 `CloseCashSession`, `SettleUnpaidBankInvoice` in `StornoInvoice`. Za posamezen poslovni prostor in elektronsko napravo je
@@ -255,10 +256,9 @@ računalnike registrira skrbnik prek administrativnega API-ja. Service računaln
 ob registraciji pošlje samo javni Ed25519 ključ; zasebni ključ z dovoljenji 0600
 ostane lokalno.
 
-## Razvojni priklop Servisa
+## Priklop Servisa
 
-Servis zažene sinhronizacijo samo, če sta hkrati nastavljena URL in skrivnost.
-Skrivnost se ne zapisuje v JSON:
+V načinu TEST lahko Servis še uporablja izključno razvojni transportni žeton:
 
 ```sh
 export MIKROFIX_SYNC_TOKEN="$MIKROFIX_DEV_SYNC_TOKEN"
@@ -270,6 +270,31 @@ V aktivni datoteki nastavitev mora biti `database.server_url` na primer
 brez okoljske skrivnosti pomeni `SYNC: MANJKA SKRIVNOST`. Sinhronizacija teče v
 ozadju ob zagonu, po novem lokalnem dogodku in periodično. Ne blokira zaključka
 servisa in nima produkcijskega obvoda.
+
+Produkcijski Servis ne uporablja skupnega razvojnega žetona. Delovna postaja
+mora biti centralno registrirana z oznako, ki jo program sestavi iz poslovnega
+prostora in elektronske naprave. Enkrat izdana skrivnost postaje in pot do
+zasebnega Ed25519 ključa se podata procesu, ne zapišeta pa se v nastavitve ali
+Git:
+
+```sh
+export MIKROFIX_WORKSTATION_SECRET='<skrivnost registrirane postaje>'
+export MIKROFIX_SERVICE_SIGNING_KEY='/zaščitena/pot/service-workstation-signing.key'
+```
+
+Če pot ni podana, je privzeta datoteka
+`<data_dir>/service/service-workstation-signing.key`. Imeti mora dovoljenja
+`0600`; program je ne ustvari sam, ker mora biti njen javni ključ že vezan na
+točno registrirano postajo.
+
+Centralni dostopni žeton obstaja samo v pomnilniku. Ob ročni odjavi ali izhodu
+se sinhronizacija najprej ustavi, seja se centralno prekliče in lokalna
+identiteta pozabi tudi, če je strežnik nedosegljiv. Za delo brez povezave se
+lokalno hrani samo zadnja potrjena centralna identiteta uporabnika in različica
+dovoljenj. Prva prijava uporabnika zato zahteva povezavo. Izrecno zavrnjena
+prijava, napačen odgovor strežnika ali obvezna še neopravljena menjava PIN-a se
+nikoli ne obravnavajo kot izpad omrežja. Offline servisni dogodki se podpišejo z
+zasebnim ključem postaje in ob sinhronizaciji ponovno preverijo na strežniku.
 
 ## Razvojni priklop Blagajne
 

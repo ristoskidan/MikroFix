@@ -109,6 +109,14 @@ class ServiceIdentityCache:
             user_version=int(row[2]), verified_at=str(row[3]),
         )
 
+    def forget(self, username: str) -> None:
+        self.init()
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM service_central_identities WHERE username=?",
+                (str(username or "").strip().lower(),),
+            )
+
 
 class ServiceCentralIdentityManager:
     """Keeps the bearer token in memory and supports verified offline actors."""
@@ -168,8 +176,16 @@ class ServiceCentralIdentityManager:
             raise ServiceIdentityError("Centralni strežnik je vrnil drugega uporabnika.")
         if session.application_type != "SERVICE" or "MODULE_SERVICE" not in session.permissions:
             raise ServiceIdentityError("Centralna seja nima pravice za program Servis.")
-        cached = self.cache.remember(session)
         self._session = session
+        if session.must_change_pin:
+            # This identity is not authorized for application operations yet.
+            self.cache.forget(normalized)
+            self._identity = ServiceLoginIdentity(
+                username=normalized, user_id=str(UUID(str(session.user_id))),
+                user_version=int(session.user_version), online=True,
+            )
+            return self._identity
+        cached = self.cache.remember(session)
         self._identity = ServiceLoginIdentity(
             username=cached.username, user_id=cached.user_id,
             user_version=cached.user_version, online=True,
@@ -180,8 +196,10 @@ class ServiceCentralIdentityManager:
         self, *, username: str, current_pin: str, new_pin: str
     ) -> ServiceLoginIdentity:
         """Complete the mandatory change and obtain a fresh usable session."""
-        if self._session is None or not self._session.must_change_pin:
-            raise ServiceIdentityError("Centralna seja ne zahteva menjave PIN-a.")
+        if self._session is None:
+            raise ServiceIdentityError(
+                "Centralnega PIN-a brez povezane aktivne seje ni mogoče spremeniti."
+            )
         token = self._session.access_token
         self.auth_client.change_pin(
             token, current_pin=current_pin, new_pin=new_pin

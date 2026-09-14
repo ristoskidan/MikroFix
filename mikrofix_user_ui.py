@@ -67,6 +67,9 @@ class SessionAuthUI:
         dark: str,
         light_gray: str,
         danger: str,
+        external_login: Callable[[dict, str], bool] | None = None,
+        external_change_pin: Callable[[dict, str, str], None] | None = None,
+        external_end_session: Callable[[], object] | None = None,
     ) -> None:
         self.store_factory = store_factory
         self.version_label = version_label
@@ -78,6 +81,9 @@ class SessionAuthUI:
         self.dark = dark
         self.light_gray = light_gray
         self.danger = danger
+        self.external_login = external_login
+        self.external_change_pin = external_change_pin
+        self.external_end_session = external_end_session
         self.current = {
             "username": DEFAULT_USERNAME,
             "display_name": DEFAULT_DISPLAY_NAME,
@@ -138,6 +144,7 @@ class SessionAuthUI:
 
     def end_session(self) -> None:
         """Forget the in-memory login; no authenticated session is persisted."""
+        self._end_external_session()
         self.current = {
             "username": "",
             "display_name": "Odjavljen",
@@ -147,6 +154,15 @@ class SessionAuthUI:
         }
         self._authenticated = False
         self._refresh_bound_widgets()
+
+    def _end_external_session(self) -> None:
+        external_end_session = getattr(self, "external_end_session", None)
+        if external_end_session is not None:
+            try:
+                external_end_session()
+            except Exception:
+                # Local logout must always finish even when central is unreachable.
+                pass
 
     def adopt_authenticated_user(self, user: dict) -> None:
         """Prevzame uporabnika iz preverjene enkratne predaje lokalne seje."""
@@ -187,7 +203,10 @@ class SessionAuthUI:
         y = (win.winfo_screenheight() - win.winfo_height()) // 2
         win.geometry(f"+{max(0, x)}+{max(0, y)}")
 
-    def login(self, parent, *, username_only: str | None = None) -> bool:
+    def login(
+        self, parent, *, username_only: str | None = None,
+        verify_external: bool = True,
+    ) -> bool:
         """Modalna lokalna PIN prijava. Vrne True samo po uspešni prijavi."""
         store = self.store_factory()
         store.init()
@@ -354,8 +373,40 @@ class SessionAuthUI:
                 if pin != confirm_var.get():
                     message_var.set("PIN-a se ne ujemata.")
                     return
-                store.set_pin(pin, username, event_type="PIN_SET")
+                try:
+                    central_change_required = bool(
+                        self.external_login(user, pin)
+                    ) if verify_external and self.external_login is not None else False
+                except Exception as exc:
+                    pin_var.set("")
+                    confirm_var.set("")
+                    message_var.set(str(exc) or "Centralna prijava ni uspela.")
+                    return
+                effective_pin = pin
+                if central_change_required:
+                    new_pin = self._ask_new_pin(
+                        win,
+                        "MikroFIX - Obvezna menjava PIN-a",
+                        "Začasni centralni PIN zamenjaj s svojim novim PIN-om.",
+                    )
+                    if new_pin is None:
+                        self._end_external_session()
+                        pin_var.set("")
+                        confirm_var.set("")
+                        message_var.set("Pred nadaljevanjem moraš določiti novi PIN.")
+                        return
+                    try:
+                        if self.external_change_pin is None:
+                            raise RuntimeError("Centralna menjava PIN-a ni nastavljena.")
+                        self.external_change_pin(user, pin, new_pin)
+                    except Exception as exc:
+                        self._end_external_session()
+                        message_var.set(str(exc) or "Centralna menjava PIN-a ni uspela.")
+                        return
+                    effective_pin = new_pin
+                store.set_pin(effective_pin, username, event_type="PIN_SET")
                 if not self._configure_admin_recovery(win, required=True):
+                    self._end_external_session()
                     pin_var.set("")
                     confirm_var.set("")
                     message_var.set(
@@ -373,28 +424,48 @@ class SessionAuthUI:
 
             login = store.verify_pin(pin, username)
             if login.ok:
-                if login.must_change_pin:
+                try:
+                    central_change_required = bool(
+                        self.external_login(user, pin)
+                    ) if verify_external and self.external_login is not None else False
+                except Exception as exc:
+                    pin_var.set("")
+                    message_var.set(str(exc) or "Centralna prijava ni uspela.")
+                    pin_entry.focus_set()
+                    return
+                if login.must_change_pin or central_change_required:
                     new_pin = self._ask_new_pin(
                         win,
                         "MikroFIX - Obvezna menjava PIN-a",
                         "Začasni PIN zamenjaj s svojim novim PIN-om.",
                     )
                     if new_pin is None:
+                        self._end_external_session()
                         pin_var.set("")
                         message_var.set("Pred nadaljevanjem moraš določiti novi PIN.")
                         pin_entry.focus_set()
                         return
-                    store.set_pin(
-                        new_pin,
-                        username,
-                        event_type="PIN_CHANGED_FIRST_LOGIN",
-                        changed_by=username,
-                    )
+                    try:
+                        if verify_external and self.external_change_pin is not None:
+                            self.external_change_pin(user, pin, new_pin)
+                        store.set_pin(
+                            new_pin,
+                            username,
+                            event_type="PIN_CHANGED_FIRST_LOGIN",
+                            changed_by=username,
+                        )
+                    except Exception as exc:
+                        self._end_external_session()
+                        pin_var.set("")
+                        message_var.set(str(exc) or "Menjava PIN-a ni uspela.")
+                        pin_entry.focus_set()
+                        return
                 if (
                     username == DEFAULT_USERNAME
                     and not store.has_recovery(DEFAULT_USERNAME)
                     and not self._configure_admin_recovery(win, required=True)
                 ):
+                    self._end_external_session()
                     pin_var.set("")
                     message_var.set(
                         "Pred nadaljevanjem nastavi obnovitveni namig in geslo."
@@ -718,6 +789,18 @@ class SessionAuthUI:
                     "MikroFIX", "Nova PIN-a se ne ujemata.", parent=win
                 )
                 return
+            if self.external_change_pin is not None:
+                try:
+                    self.external_change_pin(
+                        self.current, old_var.get(), new_var.get()
+                    )
+                except Exception as exc:
+                    messagebox.showerror(
+                        "MikroFIX",
+                        str(exc) or "Centralna menjava PIN-a ni uspela.",
+                        parent=win,
+                    )
+                    return
             store.set_pin(
                 new_var.get(),
                 self.username,
