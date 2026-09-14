@@ -8,6 +8,22 @@ from typing import Any
 from mikrofix_sync_client import SyncTransportError
 
 
+class CentralAuthUnavailable(SyncTransportError):
+    """The central server could not be reached."""
+
+
+class CentralAuthRejected(SyncTransportError):
+    """The central server explicitly rejected the credentials or workstation."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code)
+
+
+class CentralAuthProtocolError(SyncTransportError):
+    """The central server replied, but not with the agreed auth contract."""
+
+
 @dataclass(frozen=True, slots=True)
 class CentralSession:
     access_token: str
@@ -35,15 +51,20 @@ class RequestsCentralAuthClient:
                 detail = str(response.json().get("detail") or "")
             except (ValueError, AttributeError):
                 detail = ""
-            raise SyncTransportError(
-                detail or f"Central authentication returned HTTP {response.status_code}."
+            raise CentralAuthRejected(
+                detail or f"Central authentication returned HTTP {response.status_code}.",
+                status_code=response.status_code,
             )
         try:
             result = response.json()
         except ValueError as exc:
-            raise SyncTransportError("Central authentication returned invalid JSON.") from exc
+            raise CentralAuthProtocolError(
+                "Central authentication returned invalid JSON."
+            ) from exc
         if not isinstance(result, dict):
-            raise SyncTransportError("Central authentication response is invalid.")
+            raise CentralAuthProtocolError(
+                "Central authentication response is invalid."
+            )
         return result
 
     def login(
@@ -70,7 +91,7 @@ class RequestsCentralAuthClient:
                 timeout=self.timeout_seconds,
             )
         except requests.RequestException as exc:
-            raise SyncTransportError(str(exc)) from exc
+            raise CentralAuthUnavailable(str(exc)) from exc
         result = self._json(response)
         required = {
             "access_token", "expires_at", "user_id", "user_version", "username",
@@ -78,7 +99,9 @@ class RequestsCentralAuthClient:
             "permissions", "must_change_pin",
         }
         if not required.issubset(result) or not isinstance(result["permissions"], list):
-            raise SyncTransportError("Central authentication response is incomplete.")
+            raise CentralAuthProtocolError(
+                "Central authentication response is incomplete."
+            )
         return CentralSession(
             access_token=str(result["access_token"]),
             expires_at=str(result["expires_at"]), user_id=str(result["user_id"]),
@@ -89,3 +112,51 @@ class RequestsCentralAuthClient:
             permissions=frozenset(str(value) for value in result["permissions"]),
             must_change_pin=bool(result["must_change_pin"]),
         )
+
+    def logout(self, access_token: str) -> None:
+        """Revoke one in-memory central session token."""
+        import requests
+
+        token = str(access_token or "").strip()
+        if not token:
+            return
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/auth/logout",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise CentralAuthUnavailable(str(exc)) from exc
+        if response.status_code != 204:
+            try:
+                detail = str(response.json().get("detail") or "")
+            except (ValueError, AttributeError):
+                detail = ""
+            raise CentralAuthRejected(
+                detail or f"Central logout returned HTTP {response.status_code}.",
+                status_code=response.status_code,
+            )
+
+    def change_pin(self, access_token: str, *, current_pin: str, new_pin: str) -> None:
+        """Change the central PIN; the server revokes the current session."""
+        import requests
+
+        try:
+            response = requests.post(
+                f"{self.base_url}/v1/auth/change-pin",
+                json={"current_pin": current_pin, "new_pin": new_pin},
+                headers={"Authorization": f"Bearer {str(access_token).strip()}"},
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise CentralAuthUnavailable(str(exc)) from exc
+        if response.status_code != 204:
+            try:
+                detail = str(response.json().get("detail") or "")
+            except (ValueError, AttributeError):
+                detail = ""
+            raise CentralAuthRejected(
+                detail or f"Central PIN change returned HTTP {response.status_code}.",
+                status_code=response.status_code,
+            )
