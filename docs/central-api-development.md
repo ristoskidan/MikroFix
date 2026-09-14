@@ -1,7 +1,8 @@
 # MikroFIX central API — razvojni zagon
 
-To je prvi, namenoma ozek sinhronizacijski rez. Sprejema `CreateServiceOrder`,
-`CompleteServiceTechnically`, `CreatePartner`, `IssueServiceInvoice`,
+To je postopno grajen centralni razvojni rez. Sprejema `CreateServiceOrder`,
+`CompleteServiceTechnically`, življenjski cikel partnerja, `CreateInventoryItem`,
+izdajo servisnega ali neposrednega računa, blagajniški dnevnik,
 `ConfirmPurchaseReceipt` in `AttachPurchaseInvoice`. Razvojni
 in testni bazi imata centralni model uporabnikov, dovoljenj, registriranih
 delovnih postaj, sej in revizijske sledi; produkcijski preklop ni izveden.
@@ -86,6 +87,12 @@ poslovnim pošiljanjem trajno shrani nespremenljiv ukaz. Digitalne priloge so
 neobvezne; pogodba sprejme njihov kontrolni opis, dejanski prenos datotek v
 centralni upravljani arhiv pa še ni produkcijsko priklopljen.
 
+Nov artikel lahko ustvari samo Office z dovoljenjem `MANAGE_INVENTORY`. Nastane
+z ničelno količino in ničelno ceno; količine ni mogoče vnesti mimo dobavnice ali
+drugega dovoljenega dokumentiranega izvora. Glavna barkoda je centralno
+enolična. Prvi potrjeni prejem nato ustvari dobaviteljevo identiteto, LOT in
+preverjeno prodajno ceno.
+
 Office lahko partnerja tudi ustvari, popravi, deaktivira ali ponovno aktivira.
 Vsaka sprememba zahteva pričakovano različico zapisa; sočasna popravka istega
 partnerja zato nimata tihega zadnjega zmagovalca. Davčna številka ostaja enolična,
@@ -105,17 +112,26 @@ Glavni namizni program ob nastavljenem `database.server_url` zdaj odpre prvi
 centralni Office pregled za zalogo, prejeme, izdane račune in partnerje.
 Partnerje je mogoče ustvariti, urediti, deaktivirati in znova aktivirati z
 različico zapisa ter razlogom spremembe. Zaslon omogoča tudi izrecno uskladitev
-istega nedokončanega ukaza po izgubljenem odgovoru. Knjiženje prejemov v tem rezu
-še ni priklopljeno in ni preusmerjeno v stare lokalne tabele. Prazen URL odpre
-stari lokalni Office. Neposreden samostojni zagon stare datoteke
+istega nedokončanega ukaza po izgubljenem odgovoru. Prejem je mogoče sestaviti,
+po barkodi poiskati ali ustvariti artikel ter ga centralno potrditi. Pri `DOB`
+ostane zaloga blokirana do pozneje pripetega računa; `DRA` jo sprosti v isti
+transakciji. Poznejši račun ne sme zamenjati artikla, količine, barkode, LOT-a ali
+vrstnega reda že fizično potrjenih postavk.
+
+Nedokončan obrazec se s kontrolnim odtisom samodejno hrani v lokalni SQLite
+datoteki samo za istega uporabnika in postajo. To ni zalogovna baza in ne knjiži
+nobenega poslovnega dogodka. Ob izgubljenem odgovoru ohrani isto identiteto
+ukaza; poslovno zavrnjen in popravljen obrazec dobi novo identiteto. Prazen URL
+odpre stari lokalni Office. Neposreden samostojni zagon stare datoteke
 `mikrofix_office.py` še ni centralni zaganjalnik in ni del centralnega testnega
 postopka.
 
 Centralni seznam prejemov vrne tudi izvirne finančne podatke vsake vrstice
 (neto ceno, rabat, DDV, dobaviteljev znesek in razporeditev prevoza) ter podatke
-povezanega računa. To je nespremenljiva osnova, ki jo bo naslednji UI rez uporabil
-za primerjavo pozneje prejetega računa; odjemalec teh vrednosti ne rekonstruira
-in ne ugiba.
+povezanega računa. Obrazec poznejšega računa to osnovo prebere s strežnika;
+odjemalec je ne rekonstruira in ne ugiba. Strežnik pred sprostitvijo zaloge
+ponovno preveri finančne vsote, prodajno cenovno varovalko in identiteto fizično
+prejetih postavk.
 
 Centralni P7 model je že prisoten: odpiranje osnutka ne ustvari `CLAIMED`, ukaz
 izdaje pa sprejme samo plačilno izbiro in identitete blagajne. Vsebina računa se
