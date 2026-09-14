@@ -117,6 +117,18 @@ class OfficeCommandJournalTests(unittest.TestCase):
         self.assertEqual({row["aggregate_type"] for row in rows}, {"PARTNER"})
         self.assertEqual([row["expected_version"] for row in rows], [0, 1, 2])
 
+    def test_inventory_item_creation_is_a_zero_version_inventory_command(self):
+        article_id = str(uuid4())
+        operation_id = self.journal.prepare_create_inventory_item({
+            "article_id": article_id, "main_barcode": "ART-NEW-1",
+            "description": "Nov artikel", "track_mode": "SERIAL",
+        })
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "CreateInventoryItem")
+        self.assertEqual(row["aggregate_type"], "INVENTORY_ITEM")
+        self.assertEqual(row["aggregate_uuid"], article_id)
+        self.assertEqual(row["expected_version"], 0)
+
     @patch("requests.get")
     def test_office_reads_pending_receipts(self, get):
         response = Mock(status_code=200)

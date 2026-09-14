@@ -371,6 +371,28 @@ class CentralApiIntegrationTests(unittest.TestCase):
             "contract_version": 1,
         }
 
+    def create_inventory_item_operation(
+        self, *, sequence, barcode="ART-NEW-API", article_id=None,
+    ):
+        article_id = str(article_id or uuid4())
+        return {
+            "operation_id": str(uuid4()),
+            "operation_type": "CreateInventoryItem",
+            "aggregate_type": "INVENTORY_ITEM",
+            "aggregate_id": article_id,
+            "expected_version": 0,
+            "actor_id": "office-test",
+            "device_id": "OFFICE-PC-TEST",
+            "device_sequence": sequence,
+            "occurred_at": "2026-09-12T10:00:00+02:00",
+            "payload": {
+                "article_id": article_id, "main_barcode": barcode,
+                "description": "Nov centralni artikel",
+                "track_mode": "QUANTITY",
+            },
+            "contract_version": 1,
+        }
+
     def purchase_receipt_operation(
         self, receipt_id, supplier_id, article_id, *, sequence,
         document_type="DOB", external_no="DOB-SUP-1", quantity="2",
@@ -2402,6 +2424,81 @@ class CentralApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403, response.text)
         self.assertIn("CONFIRM_DOCUMENT", response.json()["detail"])
+
+    def test_office_creates_zero_stock_article_and_duplicate_barcode_is_rejected(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import inventory_items
+
+        login = self.central_login(role="OFFICE", application="OFFICE")
+        self.assertEqual(login.status_code, 200, login.text)
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+        first = self.create_inventory_item_operation(
+            sequence=1, barcode="OFFICE-NEW-ARTICLE",
+        )
+        created = self.client.post(
+            "/v1/sync/operations", json=first, headers=headers,
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(created.json()["result_code"], "ACCEPTED")
+
+        inventory = self.client.get(
+            "/v1/office/inventory", params={"q": "OFFICE-NEW-ARTICLE"},
+            headers=headers,
+        )
+        self.assertEqual(inventory.status_code, 200, inventory.text)
+        item = inventory.json()["inventory"][0]
+        self.assertEqual(item["article_id"], first["aggregate_id"])
+        self.assertEqual(item["article_quantity_available"], "0.0000")
+        self.assertEqual(item["current_sale_price"], "0.00")
+
+        duplicate = self.create_inventory_item_operation(
+            sequence=2, barcode="OFFICE-NEW-ARTICLE",
+        )
+        rejected = self.client.post(
+            "/v1/sync/operations", json=duplicate, headers=headers,
+        )
+        self.assertEqual(rejected.status_code, 200, rejected.text)
+        self.assertEqual(rejected.json()["result_code"], "REJECTED")
+        self.assertEqual(
+            rejected.json()["error_code"], "INVENTORY_ITEM_ALREADY_EXISTS",
+        )
+        self.assertEqual(
+            rejected.json()["result"]["existing_article_id"],
+            first["aggregate_id"],
+        )
+        with self.engine.connect() as connection:
+            count = connection.execute(
+                select(func.count()).select_from(inventory_items)
+            ).scalar_one()
+        self.assertEqual(count, 1)
+
+    def test_office_cannot_create_article_without_inventory_permission(self):
+        from mikrofix_server.auth import create_central_user, register_workstation
+
+        with self.engine.begin() as connection:
+            user_id = create_central_user(
+                connection, username="office-no-inventory",
+                display_name="Office brez zaloge", role="OFFICE", pin="246810",
+                permissions={"MODULE_OFFICE"}, must_change_pin=False,
+            )
+            _, secret = register_workstation(
+                connection, workstation_code="OFFICE-PC-NO-INVENTORY",
+                display_name="Office brez zaloge PC", application_type="OFFICE",
+                approved_by=user_id,
+            )
+        login = self.client.post("/v1/auth/login", json={
+            "username": "office-no-inventory", "pin": "246810",
+            "workstation_code": "OFFICE-PC-NO-INVENTORY",
+            "workstation_secret": secret, "application_type": "OFFICE",
+        })
+        self.assertEqual(login.status_code, 200, login.text)
+        response = self.client.post(
+            "/v1/sync/operations",
+            json=self.create_inventory_item_operation(sequence=1),
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIn("MANAGE_INVENTORY", response.json()["detail"])
 
     def test_office_invoice_history_is_read_only_and_session_scoped(self):
         _, draft_id = self.prepared_draft(sequence=1, barcode="OFFICE-HISTORY")

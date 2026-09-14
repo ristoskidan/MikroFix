@@ -21,6 +21,7 @@ from mikrofix_sync_contracts import (
     WorkIntervalContract,
     canonical_json,
     payload_sha256,
+    validated_create_inventory_item_payload,
     validated_create_service_order_payload,
     validated_create_partner_payload,
     validated_issue_service_invoice_payload,
@@ -389,6 +390,29 @@ class SyncContractTests(unittest.TestCase):
             validated_create_partner_payload({**payload, "review_confirmed": False})
         with self.assertRaisesRegex(ContractError, "must contain 8 digits"):
             validated_create_partner_payload({**payload, "tax_number": "napačna"})
+
+    def test_new_inventory_item_is_identity_only_and_starts_without_stock(self):
+        article_id = str(uuid4())
+        payload = validated_create_inventory_item_payload({
+            "article_id": article_id,
+            "main_barcode": "  ART-001  ",
+            "description": "  Testni artikel  ",
+            "track_mode": "quantity",
+        })
+        self.assertEqual(payload, {
+            "article_id": article_id,
+            "main_barcode": "ART-001",
+            "description": "Testni artikel",
+            "track_mode": "QUANTITY",
+        })
+        with self.assertRaisesRegex(ContractError, "unsupported fields"):
+            validated_create_inventory_item_payload({
+                **payload, "quantity_on_hand": "1",
+            })
+        with self.assertRaisesRegex(ContractError, "QUANTITY or SERIAL"):
+            validated_create_inventory_item_payload({
+                **payload, "track_mode": "NONE",
+            })
 
     def test_partner_update_and_status_contracts_require_version_and_reason(self):
         partner_id = str(uuid4())

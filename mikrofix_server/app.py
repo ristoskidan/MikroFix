@@ -362,6 +362,7 @@ def create_app(
             "CreateOfficePartner": ("MODULE_OFFICE", "OFFICE"),
             "UpdatePartner": ("MODULE_OFFICE", "OFFICE"),
             "SetPartnerActive": ("MODULE_OFFICE", "OFFICE"),
+            "CreateInventoryItem": ("MODULE_OFFICE", "OFFICE"),
             "IssueServiceInvoice": ("MODULE_CASHIER", "CASHIER"),
             "IssueDirectSaleInvoice": ("MODULE_CASHIER", "CASHIER"),
             "OpenCashSession": ("MODULE_CASHIER", "CASHIER"),
@@ -372,6 +373,7 @@ def create_app(
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
         }
         additional_permissions = {
+            "CreateInventoryItem": ("MANAGE_INVENTORY",),
             "ConfirmPurchaseReceipt": ("CONFIRM_DOCUMENT",),
             "AttachPurchaseInvoice": ("CONFIRM_DOCUMENT",),
         }

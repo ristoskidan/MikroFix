@@ -119,6 +119,17 @@ class CentralOfficeWorkflowTests(unittest.TestCase):
         self.assertEqual(result["partner_id"], payload["partner_id"])
         self.assertEqual(self.workflow.unresolved_commands(), [])
 
+    def test_inventory_item_creation_uses_the_ordered_central_journal(self):
+        article_id = str(uuid4())
+        result = self.workflow.create_inventory_item({
+            "article_id": article_id, "main_barcode": "ART-NEW-2",
+            "description": "Artikel iz Office", "track_mode": "QUANTITY",
+        })
+        self.assertEqual(result["partner_id"], article_id)
+        submitted = self.transport.submitted[0]
+        self.assertEqual(submitted["operation_type"], "CreateInventoryItem")
+        self.assertEqual(submitted["aggregate_type"], "INVENTORY_ITEM")
+
     def test_receipt_commands_use_the_central_journal(self):
         receipt = receipt_payload()
         self.workflow.confirm_purchase_receipt(receipt)

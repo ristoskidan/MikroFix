@@ -277,6 +277,40 @@ def validated_set_partner_active_payload(value: Mapping[str, Any]) -> dict[str, 
     }
 
 
+def validated_create_inventory_item_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate a new zero-stock article before its first documented receipt."""
+    raw = dict(value)
+    allowed = {"article_id", "main_barcode", "description", "track_mode"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "inventory item creation contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    article_id = normalized_uuid(raw.get("article_id"), field="article_id")
+    barcode = str(raw.get("main_barcode") or "").strip()
+    description = str(raw.get("description") or "").strip()
+    track_mode = str(raw.get("track_mode") or "").strip().upper()
+    if not barcode or len(barcode) > 200:
+        raise ContractError(
+            "inventory_item.main_barcode is required and must be at most 200 characters."
+        )
+    if not description or len(description) > 500:
+        raise ContractError(
+            "inventory_item.description is required and must be at most 500 characters."
+        )
+    if track_mode not in {"QUANTITY", "SERIAL"}:
+        raise ContractError("inventory_item.track_mode must be QUANTITY or SERIAL.")
+    return {
+        "article_id": article_id,
+        "main_barcode": barcode,
+        "description": description,
+        "track_mode": track_mode,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiptAttachmentContract:
     attachment_id: str

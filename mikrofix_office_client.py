@@ -17,6 +17,7 @@ from mikrofix_sync_contracts import (
     SyncOperationEnvelope,
     validated_attach_receipt_invoice_payload,
     validated_confirm_receipt_payload,
+    validated_create_inventory_item_payload,
     validated_create_partner_payload,
     validated_set_partner_active_payload,
     validated_update_partner_payload,
@@ -126,6 +127,17 @@ class OfficeCommandJournal:
             operation_type="ConfirmPurchaseReceipt",
             aggregate_id=normalized["receipt_id"], expected_version=0,
             payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_create_inventory_item(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> str:
+        normalized = validated_create_inventory_item_payload(payload)
+        return self._prepare(
+            operation_type="CreateInventoryItem",
+            aggregate_id=normalized["article_id"], expected_version=0,
+            payload=normalized, operation_id=operation_id,
+            aggregate_type="INVENTORY_ITEM",
         )
 
     def prepare_create_partner(

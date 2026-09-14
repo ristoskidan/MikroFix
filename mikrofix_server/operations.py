@@ -19,6 +19,7 @@ from mikrofix_sync_contracts import (
     validated_attach_receipt_invoice_payload,
     validated_close_cash_session_payload,
     validated_confirm_receipt_payload,
+    validated_create_inventory_item_payload,
     validated_create_partner_payload,
     validated_create_service_order_payload,
     validated_issue_service_invoice_payload,
@@ -78,6 +79,73 @@ class CentralCashJournalError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _create_inventory_item(
+    connection: Connection, envelope: SyncOperationEnvelope, article_uuid: UUID,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "INVENTORY_ITEM":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE", "CreateInventoryItem requires INVENTORY_ITEM."
+        )
+    if envelope.expected_version != 0:
+        return _reject("VERSION_CONFLICT", "A new inventory item requires version 0.")
+    try:
+        payload = validated_create_inventory_item_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["article_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.article_id must equal aggregate_id."
+        )
+    created = connection.execute(insert(inventory_items).values(
+        article_uuid=article_uuid, barcode=payload["main_barcode"],
+        description=payload["description"], track_mode=payload["track_mode"],
+        quantity_on_hand=Decimal("0"), current_sale_price=Decimal("0"),
+        blocked=False, row_version=1,
+    ).on_conflict_do_nothing().returning(
+        inventory_items.c.article_uuid
+    )).scalar_one_or_none()
+    if created is None:
+        existing = connection.execute(select(
+            inventory_items.c.article_uuid, inventory_items.c.description
+        ).where(
+            (inventory_items.c.article_uuid == article_uuid)
+            | (inventory_items.c.barcode == payload["main_barcode"])
+        )).first()
+        return (
+            "REJECTED",
+            {
+                "error_code": "INVENTORY_ITEM_ALREADY_EXISTS",
+                "error_message": (
+                    "An inventory item with this identity or main barcode "
+                    "already exists."
+                ),
+                "existing_article_id": (
+                    str(existing.article_uuid) if existing else None
+                ),
+                "existing_description": existing.description if existing else None,
+            },
+            None,
+        )
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    updates = _inventory_updates_for_articles(connection, [article_uuid])
+    sequence = _publish_change(
+        connection, event_type="InventoryItemCreated",
+        aggregate_type="INVENTORY_ITEM", aggregate_uuid=article_uuid,
+        aggregate_version=1, payload={
+            "article_id": str(article_uuid), "row_version": 1,
+            "main_barcode": payload["main_barcode"],
+            "description": payload["description"],
+            "track_mode": payload["track_mode"],
+            "inventory_updates": updates,
+        }, occurred_at=now.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 1, "central_sequence": sequence,
+        "article_id": str(article_uuid), "row_version": 1,
+        "inventory_updates": updates,
+    }, sequence
 
 
 def _receipt(row) -> dict:
@@ -2526,6 +2594,10 @@ def process_operation(
 
     if envelope.operation_type == "CreateServiceOrder":
         result_code, response, central_sequence = _create_service_order(
+            connection, envelope, aggregate_uuid
+        )
+    elif envelope.operation_type == "CreateInventoryItem":
+        result_code, response, central_sequence = _create_inventory_item(
             connection, envelope, aggregate_uuid
         )
     elif envelope.operation_type in {"CreatePartner", "CreateOfficePartner"}:
