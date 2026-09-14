@@ -1,0 +1,528 @@
+"""Central Office purchase-receipt forms with durable local work drafts."""
+
+from __future__ import annotations
+
+import tkinter as tk
+from datetime import date
+from tkinter import messagebox, ttk
+from typing import Any, Callable
+from uuid import uuid4
+
+from mikrofix_office_runtime import (
+    CentralOfficeWorkflow,
+    OfficeCommandRejected,
+)
+from mikrofix_tk_bootstrap import maximize_work_window
+
+
+def new_receipt_form_payload(today: str | None = None) -> dict[str, Any]:
+    selected_date = str(today or date.today().isoformat())
+    return {
+        "receipt_id": str(uuid4()), "supplier_id": "",
+        "local_operation_id": str(uuid4()),
+        "supplier_expected_version": 0, "document_type": "DOB",
+        "custom_type_code": "", "external_document_no": "",
+        "document_date": selected_date, "received_date": selected_date,
+        "currency": "EUR", "document_total": "", "shipping_total": "0",
+        "invoice_due_date": "", "invoice_payment_status": "NEPLACAN",
+        "lines": [], "attachments": [],
+    }
+
+
+def attach_invoice_form_payload(receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "receipt_id": str(receipt.get("receipt_id") or ""),
+        "local_operation_id": str(uuid4()),
+        "expected_version": int(receipt.get("row_version") or 0),
+        "invoice_external_no": "", "invoice_date": date.today().isoformat(),
+        "invoice_due_date": date.today().isoformat(),
+        "invoice_payment_status": "NEPLACAN",
+        "document_total": str(receipt.get("document_total") or ""),
+        "shipping_total": str(receipt.get("shipping_total") or "0"),
+        "currency": "EUR", "lines": [
+            {key: str(line.get(key) or "") for key in (
+                "line_id", "article_id", "quantity", "net_unit_price",
+                "discount_percent", "vat_rate", "supplier_line_total",
+                "confirmed_sale_price", "supplier_barcode", "lot_serial",
+            )}
+            for line in receipt.get("lines") or []
+        ],
+        "attachments": [],
+    }
+
+
+def confirmed_receipt_payload(form: dict[str, Any]) -> dict[str, Any]:
+    result = dict(form)
+    result.pop("local_operation_id", None)
+    result["document_review_confirmed"] = True
+    if result.get("document_type") != "DRA":
+        result["invoice_due_date"] = ""
+        result["invoice_payment_status"] = ""
+    return result
+
+
+def confirmed_attach_invoice_payload(form: dict[str, Any]) -> dict[str, Any]:
+    result = dict(form)
+    result.pop("local_operation_id", None)
+    result["document_review_confirmed"] = True
+    return result
+
+
+class CentralReceiptDialog:
+    def __init__(
+        self, parent, *, workflow: CentralOfficeWorkflow,
+        draft_kind: str, form: dict[str, Any], draft_id: str | None = None,
+        source_receipt: dict[str, Any] | None = None,
+        on_posted: Callable[[], None] | None = None,
+    ) -> None:
+        self.parent = parent
+        self.workflow = workflow
+        self.draft_kind = draft_kind
+        self.form = dict(form)
+        self.form["lines"] = [dict(line) for line in form.get("lines") or []]
+        self.source_receipt = dict(source_receipt or {})
+        self.on_posted = on_posted
+        self.draft_id = draft_id
+        self._save_after: str | None = None
+        self._loading = True
+        self.suppliers: list[dict[str, Any]] = []
+        self.inventory: list[dict[str, Any]] = []
+
+        self.win = tk.Toplevel(parent)
+        self.win.title(
+            "Dodaj prejeti račun" if draft_kind == "ATTACH_PURCHASE_INVOICE"
+            else "Nov prejem blaga"
+        )
+        self.win.configure(bg="#F2F4F6")
+        maximize_work_window(self.win, "1180x760")
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+        self._build()
+        self._load_reference_data()
+        self._load_form()
+        self._loading = False
+        self._save_now()
+
+    @property
+    def attaching(self) -> bool:
+        return self.draft_kind == "ATTACH_PURCHASE_INVOICE"
+
+    def _build(self) -> None:
+        top = tk.Frame(self.win, bg="#F2F4F6")
+        top.pack(fill="x", padx=16, pady=12)
+        tk.Label(
+            top,
+            text="PREJETI RAČUN K OBSTOJEČEMU PREJEMU" if self.attaching else "NOV PREJEM BLAGA",
+            bg="#F2F4F6", fg="#2E3439", font=("Segoe UI", 17, "bold"),
+        ).pack(side="left")
+        ttk.Button(top, text="ZAPRI IN SHRANI", command=self.close).pack(side="right")
+        ttk.Button(top, text="ZAVRZI OSNUTEK", command=self.abandon).pack(
+            side="right", padx=6
+        )
+
+        details = tk.LabelFrame(
+            self.win, text="Dokument", bg="#F2F4F6", padx=10, pady=8,
+        )
+        details.pack(fill="x", padx=16, pady=(0, 8))
+        self.vars: dict[str, tk.StringVar] = {}
+        if self.attaching:
+            fields = (
+                ("invoice_external_no", "Št. računa"),
+                ("invoice_date", "Datum računa"),
+                ("invoice_due_date", "Rok plačila"),
+                ("invoice_payment_status", "Plačilo"),
+                ("document_total", "Skupaj EUR"),
+                ("shipping_total", "Dostava EUR"),
+            )
+        else:
+            fields = (
+                ("supplier", "Dobavitelj"), ("document_type", "Vrsta dokumenta"),
+                ("custom_type_code", "Koda vrste"),
+                ("external_document_no", "Št. dokumenta"),
+                ("document_date", "Datum dokumenta"),
+                ("received_date", "Datum prejema"),
+                ("document_total", "Skupaj EUR"),
+                ("shipping_total", "Dostava EUR"),
+                ("invoice_due_date", "Rok plačila (DRA)"),
+                ("invoice_payment_status", "Plačilo (DRA)"),
+            )
+        for index, (key, label) in enumerate(fields):
+            row, pair = divmod(index, 2)
+            column = pair * 2
+            tk.Label(details, text=label, bg="#F2F4F6").grid(
+                row=row, column=column, sticky="w", padx=(0, 7), pady=4,
+            )
+            variable = tk.StringVar()
+            self.vars[key] = variable
+            if key == "supplier":
+                widget = ttk.Combobox(details, textvariable=variable, state="readonly", width=42)
+                self.supplier_box = widget
+            elif key == "document_type":
+                widget = ttk.Combobox(
+                    details, textvariable=variable, state="readonly",
+                    values=("DOB", "DRA", "CUSTOM"), width=18,
+                )
+            elif key == "invoice_payment_status":
+                widget = ttk.Combobox(
+                    details, textvariable=variable, state="readonly",
+                    values=("NEPLACAN", "PLACAN"), width=18,
+                )
+            else:
+                widget = ttk.Entry(details, textvariable=variable, width=35)
+            widget.grid(row=row, column=column + 1, sticky="ew", padx=(0, 16), pady=4)
+            variable.trace_add("write", self._changed)
+        details.grid_columnconfigure(1, weight=1)
+        details.grid_columnconfigure(3, weight=1)
+
+        line_frame = tk.LabelFrame(
+            self.win, text="Postavke prevzema", bg="#F2F4F6", padx=8, pady=8,
+        )
+        line_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        columns = ("description", "barcode", "qty", "net", "discount", "vat", "total", "sale", "serial")
+        labels = ("Artikel", "Dob. barkoda", "Količina", "Neto/kos", "Popust %", "DDV %", "Vrstica", "Prodajna", "Serija/lot")
+        self.line_tree = ttk.Treeview(line_frame, columns=columns, show="headings", height=10)
+        for key, label in zip(columns, labels):
+            self.line_tree.heading(key, text=label)
+            self.line_tree.column(key, width=145 if key == "description" else 90, stretch=key == "description")
+        self.line_tree.pack(fill="both", expand=True)
+
+        actions = tk.Frame(line_frame, bg="#F2F4F6")
+        actions.pack(fill="x", pady=(7, 0))
+        if not self.attaching:
+            ttk.Button(actions, text="DODAJ POSTAVKO", command=self.add_line).pack(side="left")
+            ttk.Button(actions, text="ODSTRANI IZBRANO", command=self.remove_line).pack(side="left", padx=6)
+            ttk.Button(actions, text="NOV ARTIKEL", command=self.new_article).pack(side="left")
+        else:
+            tk.Label(
+                actions, text="Postavke so povzete iz potrjenega prejema in jih ni mogoče zamenjati.",
+                bg="#F2F4F6", fg="#805B13",
+            ).pack(side="left")
+
+        bottom = tk.Frame(self.win, bg="#F2F4F6")
+        bottom.pack(fill="x", padx=16, pady=(0, 14))
+        self.saved_var = tk.StringVar(value="Osnutek se hrani samodejno.")
+        tk.Label(bottom, textvariable=self.saved_var, bg="#F2F4F6", fg="#606A73").pack(side="left")
+        ttk.Button(
+            bottom,
+            text="POTRDI PREJETI RAČUN" if self.attaching else "POTRDI PREJEM",
+            command=self.post,
+        ).pack(side="right")
+
+    def _load_reference_data(self) -> None:
+        if not self.attaching:
+            self.suppliers = [row for row in self.workflow.partners("", limit=500) if row.get("active", True)]
+            labels = [
+                f"{row.get('name') or '—'}  [{str(row.get('partner_id'))[:8]}]"
+                for row in self.suppliers
+            ]
+            self.supplier_box.configure(values=labels)
+        self.inventory = self.workflow.inventory("", limit=500)
+
+    def _load_form(self) -> None:
+        for key, variable in self.vars.items():
+            if key == "supplier":
+                supplier_id = str(self.form.get("supplier_id") or "")
+                index = next((i for i, row in enumerate(self.suppliers) if str(row.get("partner_id")) == supplier_id), -1)
+                variable.set(self.supplier_box.cget("values")[index] if index >= 0 else "")
+                if index >= 0:
+                    self.supplier_box.current(index)
+            else:
+                variable.set(str(self.form.get(key) or ""))
+        self._refresh_lines()
+
+    def _collect(self) -> None:
+        for key, variable in self.vars.items():
+            if key == "supplier":
+                index = self.supplier_box.current()
+                if index >= 0:
+                    selected = self.suppliers[index]
+                    self.form["supplier_id"] = str(selected["partner_id"])
+                    self.form["supplier_expected_version"] = int(selected["row_version"])
+            else:
+                self.form[key] = variable.get().strip()
+
+    def _changed(self, *_args) -> None:
+        if self._loading:
+            return
+        if self._save_after:
+            self.win.after_cancel(self._save_after)
+        self._save_after = self.win.after(350, self._save_now)
+
+    def _save_now(self) -> bool:
+        self._save_after = None
+        self._collect()
+        try:
+            self.draft_id = self.workflow.save_work_draft(
+                self.draft_kind, self.form, draft_id=self.draft_id,
+                source_id=str(self.form.get("receipt_id") or "") if self.attaching else "",
+            )
+        except Exception as exc:
+            self.saved_var.set("OSNUTKA NI MOGOČE SHRANITI")
+            messagebox.showerror("Prejem", str(exc), parent=self.win)
+            return False
+        self.saved_var.set("Osnutek je varno shranjen na tej postaji.")
+        return True
+
+    def _refresh_lines(self) -> None:
+        for item in self.line_tree.get_children():
+            self.line_tree.delete(item)
+        inventory_by_id = {str(row.get("article_id")): row for row in self.inventory}
+        for index, line in enumerate(self.form.get("lines") or []):
+            article = inventory_by_id.get(str(line.get("article_id")), {})
+            self.line_tree.insert("", "end", iid=str(index), values=(
+                article.get("description") or line.get("description") or "—",
+                line.get("supplier_barcode") or "", line.get("quantity") or "",
+                line.get("net_unit_price") or "", line.get("discount_percent") or "",
+                line.get("vat_rate") or "", line.get("supplier_line_total") or "",
+                line.get("confirmed_sale_price") or "", line.get("lot_serial") or "",
+            ))
+
+    def add_line(self) -> None:
+        LineDialog(
+            self.win, workflow=self.workflow, inventory=self.inventory,
+            on_save=self._append_line,
+        )
+
+    def _append_line(self, line: dict[str, Any]) -> None:
+        self.form.setdefault("lines", []).append(line)
+        self._refresh_lines()
+        self._save_now()
+
+    def remove_line(self) -> None:
+        selected = self.line_tree.selection()
+        if not selected:
+            return
+        del self.form["lines"][int(selected[0])]
+        self._refresh_lines()
+        self._save_now()
+
+    def new_article(self) -> None:
+        NewArticleDialog(self.win, workflow=self.workflow, on_created=self._article_created)
+
+    def _article_created(self) -> None:
+        self.inventory = self.workflow.inventory("", limit=500)
+
+    def post(self) -> None:
+        if not self._save_now():
+            return
+        if not messagebox.askyesno(
+            "Končna potrditev",
+            "Preveri dobavitelja, dokument, zneske in vse postavke. Po potrditvi bo prejem knjižen v centralno zalogo. Nadaljujem?",
+            parent=self.win,
+        ):
+            return
+        try:
+            if self.attaching:
+                self.workflow.attach_purchase_invoice(
+                    confirmed_attach_invoice_payload(self.form),
+                    operation_id=str(self.form["local_operation_id"]),
+                )
+            else:
+                self.workflow.confirm_purchase_receipt(
+                    confirmed_receipt_payload(self.form),
+                    operation_id=str(self.form["local_operation_id"]),
+                )
+        except OfficeCommandRejected as exc:
+            # A rejected immutable operation cannot be reused with corrected
+            # input. Keep the form, but reserve a fresh identity for its edit.
+            self.form["local_operation_id"] = str(uuid4())
+            self._save_now()
+            messagebox.showerror(
+                "Prejem ni potrjen",
+                f"Strežnik je prejem zavrnil. Osnutek je ostal shranjen in ga lahko popraviš.\n\n{exc}",
+                parent=self.win,
+            )
+            return
+        except Exception as exc:
+            messagebox.showerror(
+                "Prejem ni potrjen",
+                f"Centralni prejem ni bil potrjen. Lokalni osnutek je ostal shranjen.\n\n{exc}",
+                parent=self.win,
+            )
+            return
+        try:
+            self.workflow.complete_work_draft(str(self.draft_id))
+        except Exception as exc:
+            messagebox.showwarning(
+                "Prejem je potrjen",
+                "Centralni dokument JE potrjen, lokalne oznake osnutka pa ni bilo mogoče posodobiti. "
+                "Dokumenta ne vnašaj znova.\n\n" + str(exc),
+                parent=self.win,
+            )
+        messagebox.showinfo("Prejem", "Dokument je uspešno centralno potrjen.", parent=self.win)
+        self.win.destroy()
+        if self.on_posted:
+            self.on_posted()
+
+    def close(self) -> None:
+        if self._save_after:
+            self.win.after_cancel(self._save_after)
+        if self._save_now():
+            self.win.destroy()
+
+    def abandon(self) -> None:
+        if not messagebox.askyesno(
+            "Zavrzi osnutek",
+            "Ta nedokončani vnos bo odstranjen s seznama za nadaljevanje. Centralni podatki se ne bodo spremenili. Nadaljujem?",
+            parent=self.win,
+        ):
+            return
+        try:
+            self.workflow.abandon_work_draft(str(self.draft_id))
+        except Exception as exc:
+            messagebox.showerror("Zavrzi osnutek", str(exc), parent=self.win)
+            return
+        self.win.destroy()
+
+
+class LineDialog:
+    def __init__(
+        self, parent, *, workflow: CentralOfficeWorkflow,
+        inventory: list[dict[str, Any]], on_save,
+    ) -> None:
+        self.workflow = workflow
+        self.inventory = inventory
+        self.on_save = on_save
+        self.win = tk.Toplevel(parent)
+        self.win.title("Dodaj postavko prejema")
+        self.win.transient(parent)
+        self.win.grab_set()
+        frame = ttk.Frame(self.win, padding=14)
+        frame.pack(fill="both", expand=True)
+        self.search = tk.StringVar()
+        ttk.Label(frame, text="Barkoda / iskanje").grid(row=0, column=0, sticky="w", pady=4)
+        search_entry = ttk.Entry(frame, textvariable=self.search, width=52)
+        search_entry.grid(row=0, column=1, sticky="ew", pady=4)
+        search_entry.bind("<Return>", lambda _event: self.find_articles())
+        ttk.Button(frame, text="POIŠČI", command=self.find_articles).grid(
+            row=0, column=2, padx=(6, 0), pady=4,
+        )
+        self.article = tk.StringVar()
+        ttk.Label(frame, text="Artikel").grid(row=1, column=0, sticky="w", pady=4)
+        self.article_box = ttk.Combobox(
+            frame, textvariable=self.article, state="readonly", width=68,
+        )
+        self.article_box.grid(row=1, column=1, columnspan=2, sticky="ew", pady=4)
+        self._show_articles()
+        fields = (
+            ("quantity", "Količina", "1"), ("net_unit_price", "Neto cena/kos", "0"),
+            ("discount_percent", "Popust %", "0"), ("vat_rate", "DDV %", "22"),
+            ("supplier_line_total", "Skupaj vrstica", "0"),
+            ("confirmed_sale_price", "Potrjena prodajna cena", "0"),
+            ("supplier_barcode", "Dobaviteljeva barkoda", ""),
+            ("lot_serial", "Serija / lot", ""),
+        )
+        self.vars = {}
+        for index, (key, label, default) in enumerate(fields, 2):
+            ttk.Label(frame, text=label).grid(row=index, column=0, sticky="w", pady=4)
+            variable = tk.StringVar(value=default)
+            self.vars[key] = variable
+            ttk.Entry(frame, textvariable=variable, width=38).grid(row=index, column=1, sticky="ew", pady=4)
+        self.article_box.bind("<<ComboboxSelected>>", self._selected_article)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(fields) + 2, column=0, columnspan=3, sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="PREKLIČI", command=self.win.destroy).pack(side="right")
+        ttk.Button(buttons, text="DODAJ", command=self.save).pack(side="right", padx=6)
+        search_entry.focus_set()
+
+    def _show_articles(self) -> None:
+        self.article_box.configure(values=[
+            f"{row.get('description') or '—'} | "
+            f"{row.get('supplier_barcode') or row.get('main_barcode') or '—'} "
+            f"[{str(row.get('article_id'))[:8]}]"
+            for row in self.inventory
+        ])
+        self.article.set("")
+
+    def find_articles(self) -> None:
+        try:
+            self.inventory = self.workflow.inventory(self.search.get().strip(), limit=200)
+        except Exception as exc:
+            messagebox.showerror("Iskanje artikla", str(exc), parent=self.win)
+            return
+        self._show_articles()
+        if len(self.inventory) == 1:
+            self.article_box.current(0)
+            self._selected_article()
+
+    def _selected_article(self, _event=None) -> None:
+        index = self.article_box.current()
+        if index >= 0:
+            row = self.inventory[index]
+            self.vars["supplier_barcode"].set(
+                str(row.get("supplier_barcode") or row.get("main_barcode") or "")
+            )
+            self.vars["confirmed_sale_price"].set(str(row.get("current_sale_price") or "0"))
+
+    def save(self) -> None:
+        index = self.article_box.current()
+        if index < 0:
+            messagebox.showwarning("Postavka", "Izberi artikel.", parent=self.win)
+            return
+        row = self.inventory[index]
+        self.on_save({
+            "line_id": str(uuid4()), "article_id": str(row["article_id"]),
+            **{key: variable.get().strip() for key, variable in self.vars.items()},
+        })
+        self.win.destroy()
+
+
+class NewArticleDialog:
+    def __init__(self, parent, *, workflow: CentralOfficeWorkflow, on_created) -> None:
+        self.workflow = workflow
+        self.on_created = on_created
+        self.win = tk.Toplevel(parent)
+        self.win.title("Nov artikel")
+        self.win.transient(parent)
+        self.win.grab_set()
+        frame = ttk.Frame(self.win, padding=14)
+        frame.pack(fill="both", expand=True)
+        self.vars = {
+            "main_barcode": tk.StringVar(), "description": tk.StringVar(),
+            "track_mode": tk.StringVar(value="QUANTITY"),
+        }
+        for row, (key, label) in enumerate((
+            ("main_barcode", "Glavna barkoda"), ("description", "Naziv artikla"),
+            ("track_mode", "Sledenje"),
+        )):
+            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            if key == "track_mode":
+                widget = ttk.Combobox(
+                    frame, textvariable=self.vars[key], state="readonly",
+                    values=("QUANTITY", "SERIAL"), width=35,
+                )
+            else:
+                widget = ttk.Entry(frame, textvariable=self.vars[key], width=38)
+            widget.grid(row=row, column=1, pady=5)
+        actions = ttk.Frame(frame)
+        actions.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(actions, text="PREKLIČI", command=self.win.destroy).pack(side="right")
+        ttk.Button(actions, text="USTVARI", command=self.create).pack(side="right", padx=6)
+
+    def create(self) -> None:
+        try:
+            self.workflow.create_inventory_item({
+                "article_id": str(uuid4()),
+                **{key: value.get().strip() for key, value in self.vars.items()},
+            })
+        except Exception as exc:
+            messagebox.showerror("Nov artikel", str(exc), parent=self.win)
+            return
+        self.win.destroy()
+        self.on_created()
+
+
+def open_new_receipt(parent, *, workflow, on_posted=None, draft=None):
+    form = dict((draft or {}).get("payload") or new_receipt_form_payload())
+    return CentralReceiptDialog(
+        parent, workflow=workflow, draft_kind="PURCHASE_RECEIPT", form=form,
+        draft_id=(draft or {}).get("draft_id"), on_posted=on_posted,
+    )
+
+
+def open_attach_invoice(parent, *, workflow, receipt, on_posted=None, draft=None):
+    form = dict((draft or {}).get("payload") or attach_invoice_form_payload(receipt))
+    return CentralReceiptDialog(
+        parent, workflow=workflow, draft_kind="ATTACH_PURCHASE_INVOICE",
+        form=form, draft_id=(draft or {}).get("draft_id"),
+        source_receipt=receipt, on_posted=on_posted,
+    )

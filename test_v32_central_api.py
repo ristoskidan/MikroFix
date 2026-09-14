@@ -1844,6 +1844,50 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(price_count, 1)
         self.assertEqual(pra_sequence, 1)
 
+    def test_attached_invoice_cannot_replace_physically_received_quantity(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import inventory_lots, purchase_receipts
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt_id = uuid4()
+        initial = self.purchase_receipt_operation(
+            receipt_id, supplier_id, article_id, sequence=215,
+            external_no="DOB-IMMUTABLE-PARTS",
+        )
+        created = self.client.post(
+            "/v1/sync/operations", json=initial, headers=self.headers,
+        ).json()
+        self.assertEqual(created["result_code"], "ACCEPTED")
+        changed_lines = deepcopy(initial["payload"]["lines"])
+        changed_lines[0].update(quantity="3", supplier_line_total="33.30")
+        invoice = {
+            "operation_id": str(uuid4()), "operation_type": "AttachPurchaseInvoice",
+            "aggregate_type": "PURCHASE_RECEIPT", "aggregate_id": str(receipt_id),
+            "expected_version": 1, "actor_id": "office-test",
+            "device_id": "OFFICE-PC-TEST", "device_sequence": 216,
+            "occurred_at": "2026-09-12T11:00:00+02:00", "contract_version": 1,
+            "payload": {
+                "receipt_id": str(receipt_id), "expected_version": 1,
+                "invoice_external_no": "PRA-IMMUTABLE-PARTS",
+                "invoice_date": "2026-09-12", "invoice_due_date": "2026-10-12",
+                "invoice_payment_status": "NEPLACAN", "currency": "EUR",
+                "document_total": "35.30", "shipping_total": "2.00",
+                "document_review_confirmed": True,
+                "lines": changed_lines, "attachments": [],
+            },
+        }
+        rejected = self.client.post(
+            "/v1/sync/operations", json=invoice, headers=self.headers,
+        ).json()
+        self.assertEqual(rejected["result_code"], "REJECTED")
+        self.assertEqual(rejected["error_code"], "INVALID_RECEIPT_INVOICE")
+        self.assertIn("cannot change", rejected["error_message"])
+        with self.engine.connect() as connection:
+            receipt = connection.execute(select(purchase_receipts)).one()
+            lot = connection.execute(select(inventory_lots)).one()
+        self.assertEqual(receipt.status, "PENDING_INVOICE")
+        self.assertEqual(str(lot.received_quantity), "2.0000")
+
     def test_dra_releases_immediately_and_rejects_financial_difference(self):
         from sqlalchemy import func, select
         from mikrofix_server.models import inventory_items, purchase_receipts

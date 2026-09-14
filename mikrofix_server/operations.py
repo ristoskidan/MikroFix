@@ -2012,6 +2012,53 @@ def _receipt_inventory_updates(
     return _inventory_updates_for_articles(connection, article_ids)
 
 
+def _assert_receipt_line_identity_unchanged(
+    connection: Connection, *, receipt_uuid: UUID, receipt_number: str,
+    lines: list[dict],
+) -> None:
+    """An invoice may price a delivery, but cannot replace received physical goods."""
+    existing_rows = connection.execute(select(
+        purchase_receipt_lines.c.line_uuid,
+        purchase_receipt_lines.c.line_no,
+        purchase_receipt_lines.c.article_uuid,
+        purchase_receipt_lines.c.quantity,
+        purchase_receipt_lines.c.supplier_barcode,
+        purchase_receipt_lines.c.lot_serial,
+    ).where(
+        purchase_receipt_lines.c.receipt_uuid == receipt_uuid
+    ).order_by(purchase_receipt_lines.c.line_no)).all()
+    existing = {str(row.line_uuid): row for row in existing_rows}
+    incoming = {str(line["line_id"]): line for line in lines}
+    if (
+        set(existing) != set(incoming)
+        or [str(row.line_uuid) for row in existing_rows]
+        != [str(line["line_id"]) for line in lines]
+    ):
+        raise ContractError(
+            "The supplier invoice must contain the same receipt lines in the same order."
+        )
+    for line_id, old in existing.items():
+        new = incoming[line_id]
+        unchanged = (
+            str(old.article_uuid) == str(new["article_id"])
+            and Decimal(old.quantity) == Decimal(new["quantity"])
+            and str(old.supplier_barcode or "") == str(new["supplier_barcode"])
+            and (
+                (
+                    not str(new["lot_serial"])
+                    and str(old.lot_serial or "")
+                    == f"LOT-{receipt_number}-{int(old.line_no):03d}"
+                )
+                or str(old.lot_serial or "") == str(new["lot_serial"])
+            )
+        )
+        if not unchanged:
+            raise ContractError(
+                "The supplier invoice cannot change the article, quantity, "
+                f"barcode or lot of received line {line_id}."
+            )
+
+
 def _confirm_purchase_receipt(
     connection: Connection, envelope: SyncOperationEnvelope,
     receipt_uuid: UUID, operation_uuid: UUID,
@@ -2147,6 +2194,10 @@ def _attach_purchase_invoice(
             return _reject("RECEIPT_NOT_FOUND", "The pending purchase receipt does not exist.")
         if receipt.status != "PENDING_INVOICE" or receipt.row_version != envelope.expected_version:
             return _reject("VERSION_CONFLICT", "The purchase receipt is no longer pending at this version.")
+        _assert_receipt_line_identity_unchanged(
+            connection, receipt_uuid=receipt_uuid,
+            receipt_number=receipt.receipt_number, lines=lines,
+        )
         duplicate = connection.execute(select(purchase_receipts).where(
             purchase_receipts.c.supplier_uuid == receipt.supplier_uuid,
             purchase_receipts.c.invoice_external_no == payload["invoice_external_no"],

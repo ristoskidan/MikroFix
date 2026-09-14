@@ -10,6 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from mikrofix_office_runtime import CentralOfficeWorkflow
+from mikrofix_central_receipt_ui import open_attach_invoice, open_new_receipt
 from mikrofix_tk_bootstrap import maximize_work_window
 
 
@@ -190,7 +191,7 @@ class CentralOfficeWindow:
         self.context_actions = tk.Frame(self.win, bg="#F2F4F6")
         self.context_actions.pack(fill="x", padx=18, pady=(0, 8))
         self.notice_var = tk.StringVar(
-            value="Centralni pregled je aktiven. Partnerje je mogoče varno urejati; knjiženje prejemov se priklopi v naslednjem rezu."
+            value="Centralni pregled je aktiven. Prejemi in partnerji se knjižijo prek centralnega strežnika; nedokončani vnosi se hranijo na tej postaji."
         )
         tk.Label(
             self.win, textvariable=self.notice_var, bg="#FFF4DC", fg="#805B13",
@@ -243,6 +244,18 @@ class CentralOfficeWindow:
                 command=self.toggle_partner,
             ).pack(side="left")
             self.tree.bind("<Double-1>", lambda _event: self.edit_partner())
+        elif self.kind == "receipts":
+            ttk.Button(
+                self.context_actions, text="NOV PREJEM", command=self.new_receipt
+            ).pack(side="left")
+            ttk.Button(
+                self.context_actions, text="DODAJ PREJETI RAČUN",
+                command=self.attach_receipt_invoice,
+            ).pack(side="left", padx=6)
+            ttk.Button(
+                self.context_actions, text="NEDOKONČANI VNOSI",
+                command=self.resume_receipt_draft,
+            ).pack(side="left")
 
     def refresh(self) -> None:
         query = self.search_var.get().strip()
@@ -310,6 +323,102 @@ class CentralOfficeWindow:
 
     def new_partner(self) -> None:
         self._partner_dialog(None)
+
+    def new_receipt(self) -> None:
+        try:
+            drafts = [
+                row for row in self.workflow.active_work_drafts()
+                if row["draft_kind"] == "PURCHASE_RECEIPT"
+            ]
+        except Exception as exc:
+            messagebox.showerror("Nov prejem", str(exc), parent=self.win)
+            return
+        if drafts and messagebox.askyesno(
+            "Nedokončan prejem",
+            "Na tej postaji že obstaja nedokončan prejem. Ali želiš najprej nadaljevati zadnjega?",
+            parent=self.win,
+        ):
+            open_new_receipt(
+                self.win, workflow=self.workflow, draft=drafts[0],
+                on_posted=self.refresh,
+            )
+            return
+        open_new_receipt(self.win, workflow=self.workflow, on_posted=self.refresh)
+
+    def attach_receipt_invoice(self) -> None:
+        receipt = self.selected_record()
+        if not receipt:
+            messagebox.showwarning("Prejemi", "Izberi prejem.", parent=self.win)
+            return
+        if receipt.get("status") != "PENDING_INVOICE":
+            messagebox.showwarning(
+                "Prejemi", "Izbrani prejem ne čaka na prejeti račun.", parent=self.win
+            )
+            return
+        try:
+            existing = next((
+                row for row in self.workflow.active_work_drafts()
+                if row["draft_kind"] == "ATTACH_PURCHASE_INVOICE"
+                and str(row.get("source_id")) == str(receipt.get("receipt_id"))
+            ), None)
+        except Exception as exc:
+            messagebox.showerror("Prejeti račun", str(exc), parent=self.win)
+            return
+        if existing:
+            open_attach_invoice(
+                self.win, workflow=self.workflow, receipt=receipt,
+                draft=existing, on_posted=self.refresh,
+            )
+            return
+        open_attach_invoice(
+            self.win, workflow=self.workflow, receipt=receipt, on_posted=self.refresh,
+        )
+
+    def resume_receipt_draft(self) -> None:
+        try:
+            drafts = self.workflow.active_work_drafts()
+        except Exception as exc:
+            messagebox.showerror("Nedokončani vnosi", str(exc), parent=self.win)
+            return
+        if not drafts:
+            messagebox.showinfo(
+                "Nedokončani vnosi", "Ni shranjenih nedokončanih vnosov.", parent=self.win
+            )
+            return
+        labels = [
+            f"{index + 1}. {('Prejeti račun' if row['draft_kind'] == 'ATTACH_PURCHASE_INVOICE' else 'Prejem')}"
+            f" • {row['updated_at'].replace('T', ' ')[:19]}"
+            for index, row in enumerate(drafts)
+        ]
+        chosen = simpledialog.askinteger(
+            "Nedokončani vnosi",
+            "Izberi številko vnosa:\n\n" + "\n".join(labels),
+            parent=self.win, minvalue=1, maxvalue=len(drafts),
+        )
+        if chosen is None:
+            return
+        draft = drafts[chosen - 1]
+        if draft["draft_kind"] == "PURCHASE_RECEIPT":
+            open_new_receipt(
+                self.win, workflow=self.workflow, draft=draft, on_posted=self.refresh,
+            )
+            return
+        receipt = next(
+            (row for row in self.workflow.purchase_receipts(status="PENDING_INVOICE", limit=500)
+             if str(row.get("receipt_id")) == str(draft.get("source_id"))),
+            None,
+        )
+        if not receipt:
+            messagebox.showerror(
+                "Nedokončani vnosi",
+                "Povezani prejem ne čaka več na račun. Osnutek ni bil spremenjen.",
+                parent=self.win,
+            )
+            return
+        open_attach_invoice(
+            self.win, workflow=self.workflow, receipt=receipt, draft=draft,
+            on_posted=self.refresh,
+        )
 
     def edit_partner(self) -> None:
         partner = self.selected_record()
