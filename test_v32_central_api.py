@@ -2352,6 +2352,62 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(allocation_count, 1)
         self.assertEqual(last_number, 2)
 
+    def test_two_cashiers_cannot_storno_the_same_invoice_concurrently(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.models import invoice_number_sequences, invoices
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=324,
+            document_type="DRA", external_no="DRA-STORNO-RACE",
+        )
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(uuid4(), sequence=325),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(issued["result_code"], "ACCEPTED", issued)
+        invoice_id = issued["result"]["invoice_id"]
+
+        first = self.storno_invoice_operation(invoice_id, sequence=326)
+        second = self.storno_invoice_operation(invoice_id, sequence=327)
+        second["actor_id"] = "blagajnik-b"
+        second["device_id"] = "POS-PC-B"
+
+        def submit(payload):
+            return self.client.post(
+                "/v1/sync/operations", json=payload, headers=self.headers
+            ).json()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(submit, (first, second)))
+
+        self.assertEqual(
+            sorted(result["result_code"] for result in results),
+            ["ACCEPTED", "REJECTED"],
+        )
+        rejected = next(
+            result for result in results if result["result_code"] == "REJECTED"
+        )
+        self.assertIn(
+            rejected["error_code"],
+            {"INVOICE_ALREADY_REVERSED", "VERSION_CONFLICT"},
+        )
+        with self.engine.connect() as connection:
+            reversal_count = connection.execute(
+                select(func.count()).select_from(invoices).where(
+                    invoices.c.source_type == "REVERSAL"
+                )
+            ).scalar_one()
+            last_number = connection.execute(
+                select(invoice_number_sequences.c.last_number)
+            ).scalar_one()
+        self.assertEqual(reversal_count, 1)
+        self.assertEqual(last_number, 2)
+
     def test_cash_storno_waits_for_furs_and_books_one_cash_refund(self):
         from sqlalchemy import func, select
         from mikrofix_server.fiscal_worker import process_fiscal_invoice
@@ -2445,6 +2501,114 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual([str(row.amount) for row in entries], ["15.00", "-15.00"])
         self.assertEqual(entries[1].entry_type, "CASH_REFUND")
         self.assertEqual(str(stock.quantity_on_hand), "1.0000")
+
+    def test_uncertain_storno_furs_retry_reuses_the_same_document_and_request(self):
+        from sqlalchemy import func, select
+        from mikrofix_server.fiscal_worker import process_fiscal_invoice
+        from mikrofix_server.models import fiscal_outbox, invoices
+
+        class UncertainThenConfirmingProvider:
+            def __init__(self):
+                self.prepared_inputs = []
+                self.submitted_payloads = []
+
+            def prepare_request(self, request, *, message_id):
+                self.prepared_inputs.append(dict(request))
+                return {"InvoiceRequest": {
+                    "Header": {"MessageID": message_id},
+                    "Invoice": {"ProtectedID": "e" * 32},
+                }}
+
+            def submit_prepared(self, payload):
+                self.submitted_payloads.append(deepcopy(payload))
+                if len(self.submitted_payloads) == 1:
+                    raise TimeoutError("FURS result unknown")
+                return {
+                    "status": "CONFIRMED", "zoi": "e" * 32,
+                    "eor": "EOR-STORNO-RETRY-1", "response": {"ok": True},
+                }
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=328,
+            document_type="DRA", external_no="DRA-STORNO-UNCERTAIN",
+        )
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers
+        ).json()["result_code"], "ACCEPTED")
+        self.assertEqual(self.client.post(
+            "/v1/sync/operations", json=self.open_cash_operation(sequence=329),
+            headers=self.headers,
+        ).json()["result_code"], "ACCEPTED")
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.direct_sale_operation(
+                uuid4(), sequence=330, method="CASH", confirmed=True,
+            ), headers=self.headers,
+        ).json()
+        original_id = issued["result"]["invoice_id"]
+
+        class OriginalConfirmingProvider:
+            def prepare_request(self, _request, *, message_id):
+                return {"InvoiceRequest": {
+                    "Header": {"MessageID": message_id},
+                    "Invoice": {"ProtectedID": "f" * 32},
+                }}
+
+            def submit_prepared(self, _payload):
+                return {
+                    "status": "CONFIRMED", "zoi": "f" * 32,
+                    "eor": "EOR-ORIGINAL-1", "response": {"ok": True},
+                }
+
+        process_fiscal_invoice(
+            self.engine, original_id, OriginalConfirmingProvider()
+        )
+        storno = self.client.post(
+            "/v1/sync/operations",
+            json=self.storno_invoice_operation(
+                original_id, sequence=331, expected_version=2,
+            ), headers=self.headers,
+        ).json()
+        self.assertEqual(storno["result_code"], "ACCEPTED", storno)
+        reversal_id = storno["result"]["reversal_invoice_id"]
+        provider = UncertainThenConfirmingProvider()
+
+        uncertain = process_fiscal_invoice(self.engine, reversal_id, provider)
+        self.assertEqual(uncertain["status"], "FISCAL_RECONCILIATION")
+        with self.engine.connect() as connection:
+            original = connection.execute(select(invoices).where(
+                invoices.c.invoice_uuid == original_id
+            )).one()
+            reversal = connection.execute(select(invoices).where(
+                invoices.c.invoice_uuid == reversal_id
+            )).one()
+            outbox = connection.execute(select(fiscal_outbox).where(
+                fiscal_outbox.c.invoice_uuid == reversal_id
+            )).one()
+        self.assertEqual(original.status, "REVERSAL_PENDING")
+        self.assertEqual(reversal.status, "FISCAL_RECONCILIATION")
+        self.assertEqual(outbox.status, "UNCERTAIN")
+
+        confirmed = process_fiscal_invoice(self.engine, reversal_id, provider)
+        self.assertEqual(confirmed["status"], "ISSUED")
+        self.assertEqual(len(provider.prepared_inputs), 1)
+        self.assertEqual(len(provider.submitted_payloads), 2)
+        self.assertEqual(
+            provider.submitted_payloads[0], provider.submitted_payloads[1]
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(select(invoices)).all()
+            original = next(row for row in rows if str(row.invoice_uuid) == original_id)
+            reversal = next(row for row in rows if str(row.invoice_uuid) == reversal_id)
+            reversal_count = connection.execute(
+                select(func.count()).select_from(invoices).where(
+                    invoices.c.source_type == "REVERSAL"
+                )
+            ).scalar_one()
+        self.assertEqual(original.status, "REVERSED")
+        self.assertEqual(reversal.status, "ISSUED")
+        self.assertEqual(reversal_count, 1)
 
     def test_service_invoice_storno_does_not_reopen_service_or_restore_part(self):
         from sqlalchemy import func, select

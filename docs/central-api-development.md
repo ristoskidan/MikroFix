@@ -82,8 +82,11 @@ seje. Preverjen je tudi sočasni poskus dveh Office odjemalcev sprostiti isti
 prejem: uspe samo eden, zaloga se poveča enkrat in porabi se ena številka PRA.
 Preizkusi storna dodatno dokazujejo eno negativno številko, eno gotovinsko
 vračilo, referenco na izvirni FURS račun, nespremenjeno zalogo in nespremenjene
-LOT-razporeditve ter varno ponovitev istega ukaza. Trenutna migracijska glava je
-`20260914_20`.
+LOT-razporeditve ter varno ponovitev istega ukaza. Sočasna storna dveh
+blagajnikov ustvarita največ en negativni dokument in porabita največ eno novo
+številko. Po nejasnem rezultatu FURS ponovitev pošlje isti trajno shranjeni
+zahtevek z isto identiteto; izvirnik do potrditve ostane v stanju
+`REVERSAL_PENDING`. Trenutna migracijska glava je `20260914_20`.
 
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do
