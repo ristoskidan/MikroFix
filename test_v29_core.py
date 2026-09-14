@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 
 from mikrofix_v29_core import (
@@ -287,7 +288,7 @@ class V29Tests(unittest.TestCase):
                 device_model="iPhone 11 Pro", recommended_sale_price=80,
                 price_source_kind="iFixit EU",
                 price_source_url="https://www.ifixit.com/en-eu/products/pulled-display",
-                price_observed_on="2026-09-05", location="KARANTENA-DELI",
+                price_observed_on=date.today().isoformat(), location="KARANTENA-DELI",
             )],
             waste_modules=[("BATTERY", "Neuporabna baterija")],
         )
