@@ -10,7 +10,11 @@ from typing import Any
 from uuid import uuid4
 
 from mikrofix_office_runtime import CentralOfficeWorkflow
-from mikrofix_central_receipt_ui import open_attach_invoice, open_new_receipt
+from mikrofix_central_receipt_ui import (
+    NewArticleDialog,
+    open_attach_invoice,
+    open_new_receipt,
+)
 from mikrofix_tk_bootstrap import maximize_work_window
 
 
@@ -256,6 +260,15 @@ class CentralOfficeWindow:
                 self.context_actions, text="NEDOKONČANI VNOSI",
                 command=self.resume_receipt_draft,
             ).pack(side="left")
+        elif self.kind == "inventory":
+            ttk.Button(
+                self.context_actions, text="NOV ARTIKEL",
+                command=self.new_inventory_item,
+            ).pack(side="left")
+            ttk.Button(
+                self.context_actions, text="SPREMENI PRODAJNO CENO",
+                command=self.change_inventory_price,
+            ).pack(side="left", padx=6)
 
     def refresh(self) -> None:
         query = self.search_var.get().strip()
@@ -323,6 +336,44 @@ class CentralOfficeWindow:
 
     def new_partner(self) -> None:
         self._partner_dialog(None)
+
+    def new_inventory_item(self) -> None:
+        NewArticleDialog(
+            self.win, workflow=self.workflow, on_created=self.refresh,
+        )
+
+    def change_inventory_price(self) -> None:
+        article = self.selected_record()
+        if not article:
+            messagebox.showwarning("Zaloga", "Izberi artikel.", parent=self.win)
+            return
+        selected = simpledialog.askstring(
+            "Sprememba prodajne cene",
+            f"Artikel: {article.get('description') or '—'}\n"
+            f"Trenutna cena: {Decimal(str(article.get('current_sale_price') or '0')):.2f} €\n\n"
+            "Nova prodajna cena v EUR:",
+            parent=self.win,
+        )
+        if selected is None:
+            return
+        reason = simpledialog.askstring(
+            "Razlog spremembe cene",
+            "Vpiši razlog spremembe (najmanj 3 znake):",
+            parent=self.win,
+        )
+        if reason is None:
+            return
+        try:
+            self.workflow.update_inventory_price({
+                "article_id": str(article["article_id"]),
+                "expected_version": int(article["row_version"]),
+                "new_sale_price": selected, "reason": reason,
+            })
+        except Exception as exc:
+            messagebox.showerror("Sprememba prodajne cene", str(exc), parent=self.win)
+            self.refresh()
+            return
+        self.refresh()
 
     def new_receipt(self) -> None:
         try:

@@ -393,12 +393,22 @@ inventory_price_history = Table(
     metadata,
     Column("price_history_uuid", UUID(as_uuid=True), primary_key=True),
     Column("article_uuid", UUID(as_uuid=True), ForeignKey("inventory_items_v32.article_uuid"), nullable=False),
-    Column("receipt_uuid", UUID(as_uuid=True), ForeignKey("purchase_receipts_v32.receipt_uuid"), nullable=False),
+    Column("receipt_uuid", UUID(as_uuid=True), ForeignKey("purchase_receipts_v32.receipt_uuid")),
+    Column(
+        "price_change_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), unique=True,
+    ),
+    Column("change_reason", String(500)),
     Column("previous_price", Numeric(18, 2), nullable=False),
     Column("confirmed_price", Numeric(18, 2), nullable=False),
     Column("highest_available_cost", Numeric(18, 4), nullable=False),
     Column("effective_at", DateTime(timezone=True), nullable=False),
     Column("actor_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    CheckConstraint(
+        "(receipt_uuid IS NOT NULL AND price_change_operation_id IS NULL) OR "
+        "(receipt_uuid IS NULL AND price_change_operation_id IS NOT NULL)",
+        name="inventory_price_history_one_source",
+    ),
 )
 
 

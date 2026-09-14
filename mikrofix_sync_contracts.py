@@ -311,6 +311,39 @@ def validated_create_inventory_item_payload(
     }
 
 
+def validated_update_inventory_price_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate an explicit versioned Office price decision."""
+    raw = dict(value)
+    allowed = {"article_id", "expected_version", "new_sale_price", "reason"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "inventory price change contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    article_id = normalized_uuid(raw.get("article_id"), field="article_id")
+    try:
+        expected_version = int(raw.get("expected_version"))
+    except (TypeError, ValueError) as exc:
+        raise ContractError("inventory price expected_version must be an integer.") from exc
+    if expected_version < 1:
+        raise ContractError("inventory price expected_version must be at least 1.")
+    price = scaled_decimal_text(
+        raw.get("new_sale_price"), field="new_sale_price", scale="0.01"
+    )
+    if Decimal(price) <= 0:
+        raise ContractError("new_sale_price must be greater than zero.")
+    reason = str(raw.get("reason") or "").strip()
+    if len(reason) < 3 or len(reason) > 500:
+        raise ContractError("inventory price change requires a reason from 3 to 500 characters.")
+    return {
+        "article_id": article_id, "expected_version": expected_version,
+        "new_sale_price": price, "reason": reason,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class ReceiptAttachmentContract:
     attachment_id: str

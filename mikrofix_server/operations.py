@@ -30,6 +30,7 @@ from mikrofix_sync_contracts import (
     validated_set_partner_active_payload,
     validated_technical_completion_payload,
     validated_update_partner_payload,
+    validated_update_inventory_price_payload,
 )
 
 from .models import (
@@ -144,6 +145,91 @@ def _create_inventory_item(
     return "ACCEPTED", {
         "aggregate_version": 1, "central_sequence": sequence,
         "article_id": str(article_uuid), "row_version": 1,
+        "inventory_updates": updates,
+    }, sequence
+
+
+def _update_inventory_sale_price(
+    connection: Connection, envelope: SyncOperationEnvelope, article_uuid: UUID,
+    operation_uuid: UUID, *, actor_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "INVENTORY_ITEM":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "UpdateInventorySalePrice requires INVENTORY_ITEM.",
+        )
+    try:
+        payload = validated_update_inventory_price_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["article_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH", "payload.article_id must equal aggregate_id."
+        )
+    if payload["expected_version"] != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            "payload.expected_version must equal envelope.expected_version.",
+        )
+    article = connection.execute(select(inventory_items).where(
+        inventory_items.c.article_uuid == article_uuid
+    ).with_for_update()).one_or_none()
+    if article is None:
+        return _reject("INVENTORY_ITEM_NOT_FOUND", "The inventory item does not exist.")
+    if int(article.row_version) != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT", "The inventory item changed; reload it before pricing."
+        )
+    available_costs = [Decimal(value) for value in connection.execute(select(
+        inventory_lots.c.landed_unit_cost
+    ).where(
+        inventory_lots.c.article_uuid == article_uuid,
+        inventory_lots.c.status == "AVAILABLE",
+        inventory_lots.c.available_quantity > 0,
+    ).with_for_update()).scalars().all()]
+    highest = max(available_costs, default=Decimal("0"))
+    minimum = (highest * _PART_FLOOR).quantize(_CENT, rounding=ROUND_HALF_UP)
+    selected = Decimal(payload["new_sale_price"])
+    if selected == Decimal(article.current_sale_price):
+        return _reject("SALE_PRICE_UNCHANGED", "The selected sale price is unchanged.")
+    if selected < minimum:
+        return _reject(
+            "SALE_PRICE_BELOW_AVAILABLE_COST",
+            f"Sale price must be at least {minimum:.2f} because of available LOT cost.",
+        )
+    now = datetime.now(ZoneInfo("Europe/Ljubljana"))
+    new_version = int(article.row_version) + 1
+    connection.execute(update(inventory_items).where(
+        inventory_items.c.article_uuid == article_uuid
+    ).values(
+        current_sale_price=selected, row_version=new_version, updated_at=now,
+    ))
+    connection.execute(insert(inventory_price_history).values(
+        price_history_uuid=uuid4(), article_uuid=article_uuid,
+        receipt_uuid=None, price_change_operation_id=operation_uuid,
+        change_reason=payload["reason"], previous_price=article.current_sale_price,
+        confirmed_price=selected, highest_available_cost=highest,
+        effective_at=now, actor_uuid=actor_uuid,
+    ))
+    updates = _inventory_updates_for_articles(connection, [article_uuid])
+    sequence = _publish_change(
+        connection, event_type="InventorySalePriceChanged",
+        aggregate_type="INVENTORY_ITEM", aggregate_uuid=article_uuid,
+        aggregate_version=new_version,
+        payload={
+            "article_id": str(article_uuid), "row_version": new_version,
+            "previous_sale_price": format(Decimal(article.current_sale_price), ".2f"),
+            "new_sale_price": format(selected, ".2f"),
+            "minimum_sale_price": format(minimum, ".2f"),
+            "reason": payload["reason"], "inventory_updates": updates,
+        },
+        occurred_at=envelope.occurred_at,
+    )
+    return "ACCEPTED", {
+        "aggregate_version": new_version, "central_sequence": sequence,
+        "article_id": str(article_uuid), "row_version": new_version,
+        "new_sale_price": format(selected, ".2f"),
+        "minimum_sale_price": format(minimum, ".2f"),
         "inventory_updates": updates,
     }, sequence
 
@@ -2650,6 +2736,11 @@ def process_operation(
     elif envelope.operation_type == "CreateInventoryItem":
         result_code, response, central_sequence = _create_inventory_item(
             connection, envelope, aggregate_uuid
+        )
+    elif envelope.operation_type == "UpdateInventorySalePrice":
+        result_code, response, central_sequence = _update_inventory_sale_price(
+            connection, envelope, aggregate_uuid, operation_uuid,
+            actor_uuid=transmitted_by_user_uuid,
         )
     elif envelope.operation_type in {"CreatePartner", "CreateOfficePartner"}:
         result_code, response, central_sequence = _create_partner(

@@ -29,6 +29,7 @@ from mikrofix_sync_contracts import (
     validated_technical_completion_payload,
     validated_set_partner_active_payload,
     validated_update_partner_payload,
+    validated_update_inventory_price_payload,
 )
 from mikrofix_workflows import (
     create_service_order,
@@ -413,6 +414,21 @@ class SyncContractTests(unittest.TestCase):
             validated_create_inventory_item_payload({
                 **payload, "track_mode": "NONE",
             })
+
+    def test_inventory_price_decision_requires_version_price_and_reason(self):
+        article_id = str(uuid4())
+        payload = validated_update_inventory_price_payload({
+            "article_id": article_id, "expected_version": 3,
+            "new_sale_price": "12.345", "reason": "Nov cenik dobavitelja",
+        })
+        self.assertEqual(payload["new_sale_price"], "12.35")
+        self.assertEqual(payload["expected_version"], 3)
+        with self.assertRaisesRegex(ContractError, "greater than zero"):
+            validated_update_inventory_price_payload({
+                **payload, "new_sale_price": "0",
+            })
+        with self.assertRaisesRegex(ContractError, "requires a reason"):
+            validated_update_inventory_price_payload({**payload, "reason": "x"})
 
     def test_partner_update_and_status_contracts_require_version_and_reason(self):
         partner_id = str(uuid4())

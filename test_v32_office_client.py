@@ -129,6 +129,18 @@ class OfficeCommandJournalTests(unittest.TestCase):
         self.assertEqual(row["aggregate_uuid"], article_id)
         self.assertEqual(row["expected_version"], 0)
 
+    def test_inventory_price_change_keeps_article_version_and_reason(self):
+        article_id = str(uuid4())
+        operation_id = self.journal.prepare_update_inventory_price({
+            "article_id": article_id, "expected_version": 4,
+            "new_sale_price": "19.90", "reason": "Spremenjen cenik",
+        })
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "UpdateInventorySalePrice")
+        self.assertEqual(row["aggregate_type"], "INVENTORY_ITEM")
+        self.assertEqual(row["aggregate_uuid"], article_id)
+        self.assertEqual(row["expected_version"], 4)
+
     @patch("requests.get")
     def test_office_reads_pending_receipts(self, get):
         response = Mock(status_code=200)

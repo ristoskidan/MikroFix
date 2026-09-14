@@ -130,6 +130,17 @@ class CentralOfficeWorkflowTests(unittest.TestCase):
         self.assertEqual(submitted["operation_type"], "CreateInventoryItem")
         self.assertEqual(submitted["aggregate_type"], "INVENTORY_ITEM")
 
+    def test_inventory_price_change_uses_the_ordered_central_journal(self):
+        article_id = str(uuid4())
+        self.workflow.update_inventory_price({
+            "article_id": article_id, "expected_version": 2,
+            "new_sale_price": "21.00", "reason": "Nova prodajna odločitev",
+        })
+        submitted = self.transport.submitted[0]
+        self.assertEqual(submitted["operation_type"], "UpdateInventorySalePrice")
+        self.assertEqual(submitted["aggregate_id"], article_id)
+        self.assertEqual(submitted["expected_version"], 2)
+
     def test_receipt_commands_use_the_central_journal(self):
         receipt = receipt_payload()
         self.workflow.confirm_purchase_receipt(receipt)

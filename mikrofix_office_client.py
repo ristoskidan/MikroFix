@@ -20,6 +20,7 @@ from mikrofix_sync_contracts import (
     validated_create_inventory_item_payload,
     validated_create_partner_payload,
     validated_set_partner_active_payload,
+    validated_update_inventory_price_payload,
     validated_update_partner_payload,
 )
 from mikrofix_sync_store import (
@@ -136,6 +137,18 @@ class OfficeCommandJournal:
         return self._prepare(
             operation_type="CreateInventoryItem",
             aggregate_id=normalized["article_id"], expected_version=0,
+            payload=normalized, operation_id=operation_id,
+            aggregate_type="INVENTORY_ITEM",
+        )
+
+    def prepare_update_inventory_price(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> str:
+        normalized = validated_update_inventory_price_payload(payload)
+        return self._prepare(
+            operation_type="UpdateInventorySalePrice",
+            aggregate_id=normalized["article_id"],
+            expected_version=normalized["expected_version"],
             payload=normalized, operation_id=operation_id,
             aggregate_type="INVENTORY_ITEM",
         )

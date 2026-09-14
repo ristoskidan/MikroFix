@@ -393,6 +393,25 @@ class CentralApiIntegrationTests(unittest.TestCase):
             "contract_version": 1,
         }
 
+    def update_inventory_price_operation(
+        self, article_id, *, sequence, expected_version, price, reason="Nov cenik",
+    ):
+        return {
+            "operation_id": str(uuid4()),
+            "operation_type": "UpdateInventorySalePrice",
+            "aggregate_type": "INVENTORY_ITEM",
+            "aggregate_id": str(article_id), "expected_version": expected_version,
+            "actor_id": "office-test", "device_id": "OFFICE-PC-TEST",
+            "device_sequence": sequence,
+            "occurred_at": "2026-09-14T10:00:00+02:00",
+            "payload": {
+                "article_id": str(article_id),
+                "expected_version": expected_version,
+                "new_sale_price": price, "reason": reason,
+            },
+            "contract_version": 1,
+        }
+
     def purchase_receipt_operation(
         self, receipt_id, supplier_id, article_id, *, sequence,
         document_type="DOB", external_no="DOB-SUP-1", quantity="2",
@@ -2613,6 +2632,109 @@ class CentralApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 403, response.text)
         self.assertIn("MANAGE_INVENTORY", response.json()["detail"])
+
+    def test_office_price_change_is_versioned_cost_guarded_and_audited(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import inventory_items, inventory_price_history
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt = self.purchase_receipt_operation(
+            uuid4(), supplier_id, article_id, sequence=1,
+            document_type="DRA", external_no="DRA-BEFORE-PRICE-CHANGE",
+        )
+        released = self.client.post(
+            "/v1/sync/operations", json=receipt, headers=self.headers,
+        ).json()
+        self.assertEqual(released["result_code"], "ACCEPTED")
+        login = self.central_login(role="OFFICE", application="OFFICE")
+        self.assertEqual(login.status_code, 200, login.text)
+        headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+        changed_request = self.update_inventory_price_operation(
+            article_id, sequence=1, expected_version=2, price="14.00",
+            reason="Nova prodajna odločitev",
+        )
+        changed = self.client.post(
+            "/v1/sync/operations", json=changed_request, headers=headers,
+        ).json()
+        self.assertEqual(changed["result_code"], "ACCEPTED")
+        self.assertEqual(changed["result"]["row_version"], 3)
+        self.assertEqual(changed["result"]["minimum_sale_price"], "12.71")
+
+        unchanged = self.client.post(
+            "/v1/sync/operations",
+            json=self.update_inventory_price_operation(
+                article_id, sequence=2, expected_version=3, price="14.00",
+            ),
+            headers=headers,
+        ).json()
+        self.assertEqual(unchanged["result_code"], "REJECTED")
+        self.assertEqual(unchanged["error_code"], "SALE_PRICE_UNCHANGED")
+
+        too_low = self.client.post(
+            "/v1/sync/operations",
+            json=self.update_inventory_price_operation(
+                article_id, sequence=3, expected_version=3, price="12.70",
+            ),
+            headers=headers,
+        ).json()
+        self.assertEqual(too_low["result_code"], "REJECTED")
+        self.assertEqual(too_low["error_code"], "SALE_PRICE_BELOW_AVAILABLE_COST")
+
+        stale = self.client.post(
+            "/v1/sync/operations",
+            json=self.update_inventory_price_operation(
+                article_id, sequence=4, expected_version=2, price="20.00",
+            ),
+            headers=headers,
+        ).json()
+        self.assertEqual(stale["result_code"], "REJECTED")
+        self.assertEqual(stale["error_code"], "VERSION_CONFLICT")
+        with self.engine.connect() as connection:
+            article = connection.execute(select(inventory_items)).one()
+            history = connection.execute(select(inventory_price_history).order_by(
+                inventory_price_history.c.effective_at
+            )).all()
+        self.assertEqual(str(article.current_sale_price), "14.00")
+        self.assertEqual(article.row_version, 3)
+        self.assertEqual(len(history), 2)
+        self.assertIsNone(history[-1].receipt_uuid)
+        self.assertEqual(
+            str(history[-1].price_change_operation_id),
+            changed_request["operation_id"],
+        )
+        self.assertEqual(history[-1].change_reason, "Nova prodajna odločitev")
+
+    def test_office_cannot_change_price_without_price_permission(self):
+        from mikrofix_server.auth import create_central_user, register_workstation
+
+        _, article_id = self.seed_supplier_and_article()
+        with self.engine.begin() as connection:
+            user_id = create_central_user(
+                connection, username="office-no-prices",
+                display_name="Office brez cen", role="OFFICE", pin="246810",
+                permissions={"MODULE_OFFICE"}, must_change_pin=False,
+            )
+            _, secret = register_workstation(
+                connection, workstation_code="OFFICE-PC-NO-PRICES",
+                display_name="Office brez cen PC", application_type="OFFICE",
+                approved_by=user_id,
+            )
+        login = self.client.post("/v1/auth/login", json={
+            "username": "office-no-prices", "pin": "246810",
+            "workstation_code": "OFFICE-PC-NO-PRICES",
+            "workstation_secret": secret, "application_type": "OFFICE",
+        })
+        self.assertEqual(login.status_code, 200, login.text)
+        response = self.client.post(
+            "/v1/sync/operations",
+            json=self.update_inventory_price_operation(
+                article_id, sequence=1, expected_version=1, price="20",
+            ),
+            headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertIn("MANAGE_PRICES", response.json()["detail"])
 
     def test_office_invoice_history_is_read_only_and_session_scoped(self):
         _, draft_id = self.prepared_draft(sequence=1, barcode="OFFICE-HISTORY")

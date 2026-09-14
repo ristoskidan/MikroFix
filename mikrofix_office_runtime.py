@@ -145,6 +145,15 @@ class CentralOfficeWorkflow:
         )
         return self._dispatch(identity)
 
+    def update_inventory_price(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_update_inventory_price(
+            payload, operation_id=operation_id
+        )
+        return self._dispatch(identity)
+
     def attach_purchase_invoice(
         self, payload: Mapping[str, Any], *, operation_id: str | None = None,
     ) -> dict[str, Any]:

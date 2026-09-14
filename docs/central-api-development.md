@@ -69,7 +69,9 @@ natanko enkrat, servisna poraba pa se FIFO poveže s konkretnim LOT-om.
 Integracijski paket preverja še sočasno odpiranje iste blagajne, sočasno
 knjiženje dveh dogodkov, nespremenljivo zaporedje salda, idempotentno ponovitev
 odprtja, ročne knjižbe in zaprtja ter zavrnitev gotovinskega računa brez odprte
-seje. Trenutna migracijska glava je `20260913_18`.
+seje. Preverjen je tudi sočasni poskus dveh Office odjemalcev sprostiti isti
+prejem: uspe samo eden, zaloga se poveča enkrat in porabi se ena številka PRA.
+Trenutna migracijska glava je `20260914_19`.
 
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do
@@ -92,6 +94,13 @@ z ničelno količino in ničelno ceno; količine ni mogoče vnesti mimo dobavnic
 drugega dovoljenega dokumentiranega izvora. Glavna barkoda je centralno
 enolična. Prvi potrjeni prejem nato ustvari dobaviteljevo identiteto, LOT in
 preverjeno prodajno ceno.
+
+Office lahko prodajno ceno pozneje spremeni samo z dovoljenjem `MANAGE_PRICES`,
+pričakovano različico artikla in obveznim razlogom. Strežnik zaklene artikel,
+ponovno izračuna najvišji nabavni strošek še razpoložljivih LOT-ov in zavrne
+ceno pod varovalko strošek + 5 %. Sprejeta odločitev ohrani staro in novo ceno,
+stroškovno osnovo, uporabnika, razlog ter identiteto operacije; sprememba je
+vidna Servisu in Blagajni prek istega inventurnega dogodka.
 
 Office lahko partnerja tudi ustvari, popravi, deaktivira ali ponovno aktivira.
 Vsaka sprememba zahteva pričakovano različico zapisa; sočasna popravka istega
