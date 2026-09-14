@@ -95,14 +95,17 @@ from mikrofix_service_inventory import (
     service_inventory_identities,
 )
 from mikrofix_service_sync import (
+    enqueue_removed_service_part,
     enqueue_service_order_created,
     enqueue_service_technical_completion,
     service_device_id,
 )
+from mikrofix_service_returns import service_returnable_parts
 from mikrofix_sync_store import (
     ensure_sync_store_schema,
     inventory_snapshot_complete,
     list_open_sync_conflicts,
+    service_return_snapshot_complete,
 )
 from mikrofix_sync_client import RequestsSyncTransport
 from mikrofix_sync_runtime import BackgroundSyncWorker
@@ -4084,6 +4087,197 @@ def new_claim_for_selected_service():
     claim_form_title.set("NOVA REKLAMACIJA")
 
 
+def record_removed_part_for_selected_service():
+    """Journal an exact previously installed part as physically removed."""
+    if not AUTH_SESSION.has_permission(PERMISSION_SERVICE):
+        messagebox.showwarning(
+            "MikroFIX", "Za odstranitev dela nimaš dovoljenja.", parent=root
+        )
+        return
+    selected_service_id = claim_selected_service_id.get().strip()
+    if not selected_service_id:
+        messagebox.showwarning(
+            "MikroFIX", "Najprej izberi povezani servis.", parent=root
+        )
+        return
+    c = connect()
+    try:
+        row = c.execute(
+            "SELECT o.sync_uuid FROM service_orders o WHERE o.service_id=?",
+            (int(selected_service_id),),
+        ).fetchone()
+        snapshot_ready = service_return_snapshot_complete(c)
+        parts = service_returnable_parts(
+            c, service_order_uuid=str(row[0]) if row else ""
+        ) if row else []
+    finally:
+        c.close()
+    if not row:
+        messagebox.showwarning(
+            "MikroFIX",
+            "Izbrani starejši servis še nima centralne identitete. "
+            "Odstranitve ni dovoljeno ugibati iz opisa ali stare zaloge.",
+            parent=root,
+        )
+        return
+    if not snapshot_ready:
+        request_service_sync()
+        messagebox.showwarning(
+            "MikroFIX – sinhronizacija",
+            "Popoln centralni seznam vgrajenih delov še ni prejet. "
+            "Po sinhronizaciji poskusi znova.",
+            parent=root,
+        )
+        return
+    parts = [part for part in parts if part.removable_quantity > 0]
+    if not parts:
+        messagebox.showinfo(
+            "MikroFIX",
+            "Za izbrani servis ni več dela, ki bi ga bilo dovoljeno odstraniti "
+            "po potrjeni povezavi račun–vrstica–LOT.",
+            parent=root,
+        )
+        return
+
+    win = tk.Toplevel(root)
+    win.title("MikroFIX – odstranjen vgrajeni del")
+    maximize_work_window(win, "900x560")
+    win.minsize(760, 480)
+    win.configure(bg=BG)
+    win.transient(root)
+    win.grab_set()
+    card = tk.Frame(
+        win, bg=PANEL, highlightthickness=1, highlightbackground=LIGHT_GRAY
+    )
+    card.pack(fill="both", expand=True, padx=14, pady=14)
+    tk.Label(
+        card, text="Fizično odstranjen vgrajeni del", bg=PANEL, fg=DARK,
+        font=("Segoe UI", 14, "bold"),
+    ).pack(anchor="w", padx=12, pady=(12, 3))
+    tk.Label(
+        card,
+        text=(
+            "Izberi samo del, ki je bil dejansko odstranjen iz naprave. "
+            "Po potrditvi gre v karanteno; zaloga se ne poveča, račun in "
+            "izvirni servis pa ostaneta nespremenjena."
+        ),
+        bg=PANEL, fg=GRAY, justify="left", wraplength=820,
+        font=("Segoe UI", 9),
+    ).pack(anchor="w", padx=12, pady=(0, 10))
+    tree = ttk.Treeview(
+        card,
+        columns=("invoice", "description", "barcode", "lot", "quantity"),
+        show="headings", height=9, selectmode="browse",
+    )
+    for name_v, title_v, width_v in (
+        ("invoice", "Račun", 150), ("description", "Artikel", 260),
+        ("barcode", "Barkoda", 150), ("lot", "LOT/SN", 150),
+        ("quantity", "Še odstranljivo", 110),
+    ):
+        tree.heading(name_v, text=title_v)
+        tree.column(name_v, width=width_v, anchor="w")
+    part_by_iid = {}
+    for index, part in enumerate(parts):
+        iid = f"part-{index}"
+        part_by_iid[iid] = part
+        tree.insert("", "end", iid=iid, values=(
+            part.invoice_number, part.description, part.barcode,
+            part.lot_serial or part.lot_uuid, format(part.removable_quantity, "f"),
+        ))
+    tree.pack(fill="both", expand=True, padx=12)
+    quantity_var = tk.StringVar(value=format(parts[0].removable_quantity, "f"))
+    form = tk.Frame(card, bg=PANEL)
+    form.pack(fill="x", padx=12, pady=(10, 4))
+    tk.Label(form, text="Količina", bg=PANEL, fg=GRAY).grid(
+        row=0, column=0, sticky="w"
+    )
+    ttk.Entry(form, textvariable=quantity_var, width=14).grid(
+        row=1, column=0, sticky="w", padx=(0, 14)
+    )
+    tk.Label(form, text="Stanje oziroma opomba", bg=PANEL, fg=GRAY).grid(
+        row=0, column=1, sticky="w"
+    )
+    note_entry = ttk.Entry(form, width=72)
+    note_entry.grid(row=1, column=1, sticky="ew")
+    form.grid_columnconfigure(1, weight=1)
+
+    def selected_part():
+        selection = tree.selection()
+        return part_by_iid.get(selection[0]) if selection else None
+
+    def on_select(_event=None):
+        part = selected_part()
+        if part is not None:
+            quantity_var.set(format(part.removable_quantity, "f"))
+
+    def confirm_removal():
+        part = selected_part()
+        if part is None:
+            messagebox.showwarning(
+                "MikroFIX", "Izberi odstranjeni del.", parent=win
+            )
+            return
+        note = note_entry.get().strip()
+        if not note:
+            messagebox.showwarning(
+                "MikroFIX", "Vpiši stanje odstranjenega dela.", parent=win
+            )
+            return
+        if not messagebox.askyesno(
+            "MikroFIX – potrdi fizično odstranitev",
+            f"Potrdi odstranitev: {part.description}\n"
+            f"Barkoda: {part.barcode}\nLOT/SN: {part.lot_serial or part.lot_uuid}\n"
+            f"Količina: {quantity_var.get().strip()}\n\n"
+            "Del bo evidentiran v karanteni in NE bo dodan v zalogo.",
+            parent=win,
+        ):
+            return
+        connection = connect()
+        try:
+            with connection:
+                enqueue_removed_service_part(
+                    connection,
+                    service_order_uuid=part.service_order_uuid,
+                    invoice_id=part.invoice_uuid,
+                    invoice_line_id=part.invoice_line_uuid,
+                    lot_id=part.lot_uuid,
+                    quantity=quantity_var.get().strip(),
+                    condition_note=note,
+                    actor_id=AUTH_SESSION.username or RUNTIME.operator_code,
+                    device_id=SERVICE_SYNC_DEVICE_ID,
+                )
+        except Exception as exc:
+            messagebox.showerror(
+                "MikroFIX – odstranitev ni shranjena", str(exc), parent=win
+            )
+            return
+        finally:
+            connection.close()
+        request_service_sync()
+        win.destroy()
+        messagebox.showinfo(
+            "MikroFIX",
+            "Odstranitev je varno shranjena. Del čaka na sinhronizacijo in "
+            "centralno karanteno; zaloga se ni povečala.",
+            parent=root,
+        )
+
+    tree.bind("<<TreeviewSelect>>", on_select)
+    first = tree.get_children()
+    if first:
+        tree.selection_set(first[0])
+        tree.focus(first[0])
+    buttons = tk.Frame(card, bg=PANEL)
+    buttons.pack(fill="x", padx=12, pady=(8, 12))
+    ttk.Button(
+        buttons, text="POTRDI ODSTRANITEV V KARANTENO",
+        command=confirm_removal, style="Blue.TButton",
+    ).pack(side="left")
+    ttk.Button(buttons, text="PREKLIČI", command=win.destroy).pack(
+        side="left", padx=(8, 0)
+    )
+
+
 
 def refresh_device_claim_history():
     """Prikaži vse reklamacije, vezane na katerikoli servis trenutno povezane naprave."""
@@ -4865,7 +5059,17 @@ def _sync_conflict_lines(conflicts):
         for item in conflict.get("details") or [{}]:
             description_v = item.get("description") or "Neznan artikel"
             barcode_v = item.get("barcode") or "brez barkode"
-            lines.append(f"{order_v}: {description_v} [barkoda {barcode_v}]")
+            if conflict.get("conflict_type") == "SERVICE_PART_RETURN_CONFLICT":
+                invoice_v = item.get("invoice_number") or item.get("invoice_id") or "-"
+                lot_v = item.get("lot_serial") or item.get("lot_id") or "-"
+                reason_v = item.get("error_message") or item.get("error_code") or ""
+                lines.append(
+                    f"Račun {invoice_v}: {description_v} "
+                    f"[barkoda {barcode_v}; LOT {lot_v}]"
+                    + (f" – {reason_v}" if reason_v else "")
+                )
+            else:
+                lines.append(f"{order_v}: {description_v} [barkoda {barcode_v}]")
     return lines
 
 
@@ -4876,10 +5080,20 @@ def show_sync_conflict_details():
     finally:
         c.close()
     lines = _sync_conflict_lines(conflicts)
+    has_return_conflict = any(
+        item.get("conflict_type") == "SERVICE_PART_RETURN_CONFLICT"
+        for item in conflicts
+    )
+    explanation = (
+        "Odstranitev dela ni bila sprejeta. Del ni bil dodan v karanteno ali "
+        "zalogo; preveri spodaj navedeni račun, artikel in LOT."
+        if has_return_conflict else
+        "Servis ostaja lokalno tehnično zaključen, vendar do razrešitve ni "
+        "na voljo Blagajni. Zaloga ni bila umetno popravljena."
+    )
     messagebox.showerror(
         "MikroFIX – KONFLIKT SINHRONIZACIJE",
-        "Servis ostaja lokalno tehnično zaključen, vendar do razrešitve ni "
-        "na voljo Blagajni. Zaloga ni bila umetno popravljena.\n\n"
+        explanation + "\n\n"
         + ("\n".join(lines) if lines else "Ni odprtih konfliktov."),
         parent=root,
     )
@@ -4919,9 +5133,17 @@ def refresh_sync_conflict_banners():
         shown = lines[:3]
         if len(lines) > 3:
             shown.append(f"… in še {len(lines) - 3} problematičnih artiklov")
-        sync_conflict_banner_var.set(
+        has_return_conflict = any(
+            item.get("conflict_type") == "SERVICE_PART_RETURN_CONFLICT"
+            for item in conflicts
+        )
+        heading = (
+            "KONFLIKT SINHRONIZACIJE – POTREBNA PREVERBA\n"
+            if has_return_conflict else
             "KONFLIKT SINHRONIZACIJE – NI POSLANO V BLAGAJNO\n"
-            + "\n".join(shown)
+        )
+        sync_conflict_banner_var.set(
+            heading + "\n".join(shown)
         )
     for frame in sync_conflict_banner_frames:
         try:
@@ -8773,6 +8995,12 @@ ttk.Button(
     claim_buttons,
     text="NOVA REKLAMACIJA",
     command=new_claim_for_selected_service
+).pack(side="left", padx=(8,0))
+
+ttk.Button(
+    claim_buttons,
+    text="EVIDENTIRAJ ODSTRANJEN DEL",
+    command=record_removed_part_for_selected_service,
 ).pack(side="left", padx=(8,0))
 
 

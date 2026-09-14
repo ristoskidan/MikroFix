@@ -403,6 +403,25 @@ class SyncClientTests(unittest.TestCase):
             invoice_id = str(uuid4())
             invoice_line_id = str(uuid4())
             lot_id = str(uuid4())
+            service_order_id = str(uuid4())
+            connection.execute(
+                "INSERT INTO central_service_part_returns_v32("
+                "invoice_uuid,invoice_line_uuid,lot_uuid,service_order_uuid,"
+                "invoice_number,article_uuid,barcode,description,lot_serial,"
+                "allocated_quantity,returned_quantity,central_sequence,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    invoice_id, invoice_line_id, lot_id, service_order_id,
+                    "R-2026-44", str(uuid4()), "BAR-44", "Baterija",
+                    "LOT-44", "1.0000", "0.0000", 4,
+                    "2026-09-12T08:00:00+02:00",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO sync_service_return_state_v32("
+                "singleton_id,snapshot_complete,snapshot_sequence,updated_at) "
+                "VALUES(1,1,4,'2026-09-12T08:00:00+02:00')"
+            )
             item = SyncOperationEnvelope(
                 operation_id=str(uuid4()),
                 operation_type="ReceiveRemovedServicePart",
@@ -440,6 +459,11 @@ class SyncClientTests(unittest.TestCase):
             self.assertEqual(detail["invoice_id"], invoice_id)
             self.assertEqual(detail["invoice_line_id"], invoice_line_id)
             self.assertEqual(detail["lot_id"], lot_id)
+            self.assertEqual(detail["service_order_id"], service_order_id)
+            self.assertEqual(detail["invoice_number"], "R-2026-44")
+            self.assertEqual(detail["description"], "Baterija")
+            self.assertEqual(detail["barcode"], "BAR-44")
+            self.assertEqual(detail["lot_serial"], "LOT-44")
             self.assertEqual(
                 detail["error_code"],
                 "PHYSICAL_RETURN_EXCEEDS_SOLD_QUANTITY",

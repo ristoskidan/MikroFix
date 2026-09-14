@@ -251,6 +251,17 @@ def synchronize_once(
                     and row.get("operation_type") == "ReceiveRemovedServicePart"
                 ):
                     payload = json.loads(row["payload_json"])
+                    projection = connection.execute(
+                        "SELECT service_order_uuid,invoice_number,barcode,"
+                        "description,lot_serial FROM "
+                        "central_service_part_returns_v32 WHERE invoice_uuid=? "
+                        "AND invoice_line_uuid=? AND lot_uuid=?",
+                        (
+                            str(payload.get("invoice_id") or ""),
+                            str(payload.get("invoice_line_id") or ""),
+                            str(payload.get("lot_id") or ""),
+                        ),
+                    ).fetchone()
                     record_sync_conflict(
                         connection,
                         row["operation_id"],
@@ -263,6 +274,21 @@ def synchronize_once(
                                 ),
                                 "lot_id": str(payload.get("lot_id") or ""),
                                 "quantity": str(payload.get("quantity") or ""),
+                                "service_order_id": str(
+                                    projection[0] if projection else ""
+                                ),
+                                "invoice_number": str(
+                                    projection[1] if projection else ""
+                                ),
+                                "barcode": str(
+                                    projection[2] if projection else ""
+                                ),
+                                "description": str(
+                                    projection[3] if projection else ""
+                                ),
+                                "lot_serial": str(
+                                    projection[4] if projection else ""
+                                ),
                                 "error_code": str(
                                     receipt.get("error_code") or ""
                                 ),
