@@ -1888,6 +1888,76 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(receipt.status, "PENDING_INVOICE")
         self.assertEqual(str(lot.received_quantity), "2.0000")
 
+    def test_two_office_clients_release_one_pending_receipt_only_once(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import (
+            inventory_items, purchase_receipts, receipt_number_sequences,
+        )
+
+        supplier_id, article_id = self.seed_supplier_and_article()
+        receipt_id = uuid4()
+        initial = self.purchase_receipt_operation(
+            receipt_id, supplier_id, article_id, sequence=217,
+            external_no="DOB-CONCURRENT-PRA",
+        )
+        created = self.client.post(
+            "/v1/sync/operations", json=initial, headers=self.headers,
+        ).json()
+        self.assertEqual(created["result_code"], "ACCEPTED")
+
+        requests = []
+        for sequence, invoice_no in ((218, "PRA-RACE-A"), (219, "PRA-RACE-B")):
+            requests.append({
+                "operation_id": str(uuid4()),
+                "operation_type": "AttachPurchaseInvoice",
+                "aggregate_type": "PURCHASE_RECEIPT",
+                "aggregate_id": str(receipt_id), "expected_version": 1,
+                "actor_id": "office-test", "device_id": "OFFICE-PC-TEST",
+                "device_sequence": sequence,
+                "occurred_at": "2026-09-12T11:00:00+02:00",
+                "contract_version": 1,
+                "payload": {
+                    "receipt_id": str(receipt_id), "expected_version": 1,
+                    "invoice_external_no": invoice_no,
+                    "invoice_date": "2026-09-12",
+                    "invoice_due_date": "2026-10-12",
+                    "invoice_payment_status": "NEPLACAN", "currency": "EUR",
+                    "document_total": "24.20", "shipping_total": "2.00",
+                    "document_review_confirmed": True,
+                    "lines": initial["payload"]["lines"], "attachments": [],
+                },
+            })
+
+        def submit(request):
+            return self.client.post(
+                "/v1/sync/operations", json=request, headers=self.headers,
+            ).json()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(submit, requests))
+        self.assertEqual(
+            sorted(result["result_code"] for result in results),
+            ["ACCEPTED", "REJECTED"],
+        )
+        rejected = next(
+            result for result in results if result["result_code"] == "REJECTED"
+        )
+        self.assertEqual(rejected["error_code"], "VERSION_CONFLICT")
+        with self.engine.connect() as connection:
+            receipt = connection.execute(select(purchase_receipts)).one()
+            stock = connection.execute(select(inventory_items).where(
+                inventory_items.c.article_uuid == article_id
+            )).one()
+            pra_sequence = connection.execute(select(
+                receipt_number_sequences.c.last_number
+            ).where(
+                receipt_number_sequences.c.series_code == "PRA"
+            )).scalar_one()
+        self.assertEqual(receipt.row_version, 2)
+        self.assertEqual(receipt.status, "RELEASED")
+        self.assertEqual(str(stock.quantity_on_hand), "2.0000")
+        self.assertEqual(pra_sequence, 1)
+
     def test_dra_releases_immediately_and_rejects_financial_difference(self):
         from sqlalchemy import func, select
         from mikrofix_server.models import inventory_items, purchase_receipts
