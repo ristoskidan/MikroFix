@@ -19,6 +19,7 @@ from mikrofix_sync_contracts import (
     validated_confirm_receipt_payload,
     validated_create_inventory_item_payload,
     validated_create_partner_payload,
+    validated_resolve_physical_stock_return_payload,
     validated_set_partner_active_payload,
     validated_update_inventory_price_payload,
     validated_update_partner_payload,
@@ -93,6 +94,15 @@ class RequestsOfficeTransport(RequestsSyncTransport):
         if not payload.get("invoice_id") or not isinstance(payload.get("snapshot"), dict):
             raise SyncTransportError("Central API returned an invalid invoice.")
         return payload
+
+    def list_physical_stock_returns(
+        self, *, status: str = "QUARANTINED", limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        payload = self._get(
+            "/v1/office/physical-stock-returns",
+            return_status=status, limit=limit,
+        )
+        return self._list(payload, "returns")
 
     def list_custom_document_types(self) -> list[dict[str, Any]]:
         payload = self._get("/v1/office/receipt-document-types")
@@ -214,6 +224,18 @@ class OfficeCommandJournal:
             aggregate_id=normalized["receipt_id"],
             expected_version=normalized["expected_version"],
             payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_resolve_physical_stock_return(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None,
+    ) -> str:
+        normalized = validated_resolve_physical_stock_return_payload(payload)
+        return self._prepare(
+            operation_type="ResolvePhysicalStockReturn",
+            aggregate_id=normalized["return_id"],
+            expected_version=normalized["expected_version"],
+            payload=normalized, operation_id=operation_id,
+            aggregate_type="STOCK_RETURN",
         )
 
     def _prepare(

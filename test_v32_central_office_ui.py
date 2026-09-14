@@ -20,6 +20,7 @@ class CentralOfficePresentationTests(unittest.TestCase):
     def test_legacy_tab_names_route_to_safe_central_views(self):
         self.assertEqual(normalized_central_office_tab("stock"), "inventory")
         self.assertEqual(normalized_central_office_tab("documents"), "receipts")
+        self.assertEqual(normalized_central_office_tab("returns"), "returns")
         self.assertEqual(normalized_central_office_tab("unknown"), "inventory")
 
     def test_inventory_rows_expose_no_acquisition_cost(self):
@@ -45,6 +46,17 @@ class CentralOfficePresentationTests(unittest.TestCase):
         }])[0]
         self.assertEqual(receipt[-1], "ČAKA NA RAČUN")
         self.assertEqual(partner[-1], "NEAKTIVEN")
+
+    def test_return_quarantine_rows_are_business_readable(self):
+        row = central_office_rows("returns", [{
+            "return_id": "ret-1", "invoice_number": "MFD-PIS-7",
+            "description": "Zaslon", "barcode": "SUP-1",
+            "lot_serial": "LOT-1", "quantity": "1.0000",
+            "receipt_source": "CASHIER_RETURN", "status": "QUARANTINED",
+        }])[0]
+        self.assertEqual(row[1], "MFD-PIS-7")
+        self.assertEqual(row[6], "Vračilo kupca")
+        self.assertEqual(row[7], "KARANTENA")
 
     def test_invoice_detail_is_business_readable_not_raw_json(self):
         text = central_invoice_detail_text({

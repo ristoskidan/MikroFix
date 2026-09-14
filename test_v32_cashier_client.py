@@ -139,6 +139,26 @@ class CashierCommandJournalTests(unittest.TestCase):
         })
         self.assertNotIn("return_stock", saved_payload)
 
+    def test_physical_return_is_durably_bound_to_invoice_line_and_lot(self):
+        return_id = str(uuid4())
+        invoice_id = str(uuid4())
+        line_id = str(uuid4())
+        lot_id = str(uuid4())
+        operation_id = self.journal.prepare_receive_returned_sale_item({
+            "return_id": return_id, "invoice_id": invoice_id,
+            "invoice_line_id": line_id, "lot_id": lot_id,
+            "quantity": "1", "condition_note": "Prevzeto na blagajni",
+            "confirmed": True,
+        })
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "ReceiveReturnedSaleItem")
+        self.assertEqual(row["aggregate_type"], "STOCK_RETURN")
+        self.assertEqual(row["aggregate_uuid"], return_id)
+        saved = json.loads(row["payload_json"])
+        self.assertEqual(saved["invoice_id"], invoice_id)
+        self.assertEqual(saved["invoice_line_id"], line_id)
+        self.assertEqual(saved["lot_id"], lot_id)
+
     def test_direct_sale_is_durably_prepared_before_dispatch(self):
         sale_id = str(uuid4())
         operation_id = self.journal.prepare_issue_direct_sale_invoice(
@@ -203,6 +223,26 @@ class CashierCommandJournalTests(unittest.TestCase):
         self.assertEqual(invoice["invoice_number"], "MFD-PIS-1")
         get.assert_called_once_with(
             f"https://central.example/v1/cashier/invoices/{invoice_id}",
+            params={}, headers={"Authorization": "Bearer token"},
+            timeout=15.0,
+        )
+
+    @patch("requests.get")
+    def test_returnable_stock_is_read_from_server_allocations(self, get):
+        invoice_id = str(uuid4())
+        response = Mock(status_code=200)
+        response.json.return_value = {"returnable_stock": [{
+            "invoice_line_id": str(uuid4()), "lot_id": str(uuid4()),
+            "returnable_quantity": "1.0000",
+        }]}
+        get.return_value = response
+        transport = RequestsCashierTransport("https://central.example", "token")
+
+        rows = transport.returnable_stock(invoice_id)
+
+        self.assertEqual(rows[0]["returnable_quantity"], "1.0000")
+        get.assert_called_once_with(
+            f"https://central.example/v1/cashier/invoices/{invoice_id}/returnable-stock",
             params={}, headers={"Authorization": "Bearer token"},
             timeout=15.0,
         )

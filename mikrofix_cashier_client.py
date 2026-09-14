@@ -21,6 +21,7 @@ from mikrofix_sync_contracts import (
     validated_issue_direct_sale_invoice_payload,
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
+    validated_receive_physical_stock_return_payload,
     validated_settle_unpaid_bank_invoice_payload,
     validated_storno_invoice_payload,
 )
@@ -85,6 +86,17 @@ class RequestsCashierTransport(RequestsSyncTransport):
         if not isinstance(snapshot, dict) or not response.get("invoice_number"):
             raise SyncTransportError("Central API returned an invalid invoice.")
         return response
+
+    def returnable_stock(self, invoice_id: str) -> list[dict[str, Any]]:
+        response = self._get(
+            f"/v1/cashier/invoices/{invoice_id}/returnable-stock"
+        )
+        rows = response.get("returnable_stock")
+        if not isinstance(rows, list):
+            raise SyncTransportError(
+                "Central API returned an invalid returnable-stock list."
+            )
+        return rows
 
     def list_invoices(
         self, query: str = "", *, invoice_status: str | None = None,
@@ -248,6 +260,17 @@ class CashierCommandJournal:
             operation_type="StornoInvoice", aggregate_type="INVOICE",
             aggregate_id=normalized["invoice_id"],
             expected_version=normalized["expected_version"],
+            payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_receive_returned_sale_item(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_receive_physical_stock_return_payload(payload)
+        return self._prepare(
+            operation_type="ReceiveReturnedSaleItem",
+            aggregate_type="STOCK_RETURN",
+            aggregate_id=normalized["return_id"], expected_version=0,
             payload=normalized, operation_id=operation_id,
         )
 

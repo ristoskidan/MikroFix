@@ -2674,6 +2674,24 @@ class CentralApiIntegrationTests(unittest.TestCase):
             allocation = connection.execute(select(
                 direct_sale_stock_allocations
             )).one()
+        returnable = self.client.get(
+            f"/v1/cashier/invoices/{invoice_id}/returnable-stock",
+            headers=self.headers,
+        )
+        self.assertEqual(returnable.status_code, 200, returnable.text)
+        self.assertEqual(len(returnable.json()["returnable_stock"]), 1)
+        self.assertEqual(
+            returnable.json()["returnable_stock"][0]["invoice_line_id"],
+            str(allocation.sale_line_uuid),
+        )
+        self.assertEqual(
+            returnable.json()["returnable_stock"][0]["lot_id"],
+            str(allocation.lot_uuid),
+        )
+        self.assertEqual(
+            returnable.json()["returnable_stock"][0]["returnable_quantity"],
+            "1.0000",
+        )
         return_id = uuid4()
         received_operation = self.receive_stock_return_operation(
             return_id, invoice_id, allocation.sale_line_uuid,
@@ -2689,6 +2707,23 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(received["result_code"], "ACCEPTED", received)
         self.assertEqual(received["result"]["status"], "QUARANTINED")
         self.assertEqual(received["result"]["stock_effect"], "NONE")
+        exhausted = self.client.get(
+            f"/v1/cashier/invoices/{invoice_id}/returnable-stock",
+            headers=self.headers,
+        ).json()
+        self.assertEqual(exhausted["returnable_stock"], [])
+        quarantine = self.client.get(
+            "/v1/office/physical-stock-returns",
+            headers=self.headers,
+        )
+        self.assertEqual(quarantine.status_code, 200, quarantine.text)
+        self.assertEqual(len(quarantine.json()["returns"]), 1)
+        self.assertEqual(
+            quarantine.json()["returns"][0]["return_id"], str(return_id)
+        )
+        self.assertEqual(
+            quarantine.json()["returns"][0]["status"], "QUARANTINED"
+        )
         with self.engine.connect() as connection:
             returned = connection.execute(select(physical_stock_returns)).one()
             lot_before = connection.execute(select(inventory_lots).where(
@@ -2713,6 +2748,17 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(resolved, resolved_repeated)
         self.assertEqual(resolved["result"]["status"], "RELEASED_TO_STOCK")
         self.assertEqual(resolved["result"]["stock_effect"], "INCREASED")
+        self.assertEqual(self.client.get(
+            "/v1/office/physical-stock-returns",
+            headers=self.headers,
+        ).json()["returns"], [])
+        released = self.client.get(
+            "/v1/office/physical-stock-returns",
+            params={"return_status": "RELEASED_TO_STOCK"},
+            headers=self.headers,
+        ).json()["returns"]
+        self.assertEqual(len(released), 1)
+        self.assertEqual(released[0]["return_id"], str(return_id))
         with self.engine.connect() as connection:
             returned = connection.execute(select(physical_stock_returns)).one()
             lot_after = connection.execute(select(inventory_lots).where(

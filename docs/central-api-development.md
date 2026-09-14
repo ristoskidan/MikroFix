@@ -98,6 +98,14 @@ usmeritev v reklamacijski pregled. Samo sprostitev poveča zalogo, pri čemer LO
 ne sme preseči prvotno prejete količine. Trenutna migracijska glava je
 `20260914_21`.
 
+Blagajna podrobnosti vračila ne sestavlja iz prikazane vrstice računa. Pred
+prejemom od strežnika prebere še dovoljeno količino in natančno identiteto
+izvirnega LOT-a, nato pa fizični prejem najprej trajno zapiše v lokalni dnevnik
+ukazov. Centralna zgodovina računa ponuja ukaz `FIZIČNO VRAČILO ARTIKLA` in
+jasno pove, da kos preide v karanteno. Office ima ločen pregled `KARANTENA
+VRAČIL`; odločitev z razlogom in ponovno potrditvijo uporablja isti trajni
+dnevnik. Izgubljen odgovor zato ne ustvari drugega prejema ali druge razrešitve.
+
 Service prejete inventurne spremembe hrani ločeno od starih lokalnih zalogovnih
 tabel. `mikrofix_service_inventory.py` iz njih izračuna razpoložljivost in do
 prihoda ustreznega centralnega dogodka odšteva lokalno že zaključene porabe.

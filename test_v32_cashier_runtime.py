@@ -39,6 +39,11 @@ class FakeCashierTransport:
                 "invoice_id": operation["aggregate_id"],
                 "reversal_invoice_id": invoice_id,
             }
+        elif operation["operation_type"] == "ReceiveReturnedSaleItem":
+            result = {
+                "return_id": operation["aggregate_id"],
+                "status": "QUARANTINED", "stock_effect": "NONE",
+            }
         else:
             result = {"invoice_id": invoice_id}
         return {
@@ -63,6 +68,9 @@ class FakeCashierTransport:
 
     def list_ready_service_drafts(self, *, limit):
         return [{"draft_id": str(uuid4())}]
+
+    def returnable_stock(self, invoice_id):
+        return [{"invoice_id": invoice_id, "returnable_quantity": "1.0000"}]
 
     def search_partners(self, query, *, limit):
         return [{"name": query}]
@@ -228,3 +236,28 @@ class CentralCashierWorkflowTests(unittest.TestCase):
         self.assertEqual(operation["expected_version"], 4)
         self.assertNotIn("return_stock", operation["payload"])
         self.assertEqual(result.invoice["invoice_number"], "MFD-PIS-1")
+
+    def test_returned_sale_item_uses_durable_quarantine_command(self):
+        transport = FakeCashierTransport()
+        workflow = self.workflow(transport)
+        invoice_id, line_id, lot_id = map(
+            lambda _value: str(uuid4()), range(3)
+        )
+        self.assertEqual(
+            workflow.returnable_stock(invoice_id)[0]["returnable_quantity"],
+            "1.0000",
+        )
+
+        result = workflow.receive_returned_sale_item(
+            invoice_id=invoice_id, invoice_line_id=line_id, lot_id=lot_id,
+            quantity="1", condition_note="Embalaža odprta",
+        )
+
+        operation = transport.submissions[0]
+        self.assertEqual(operation["operation_type"], "ReceiveReturnedSaleItem")
+        self.assertEqual(operation["aggregate_type"], "STOCK_RETURN")
+        self.assertEqual(operation["payload"]["invoice_id"], invoice_id)
+        self.assertEqual(operation["payload"]["invoice_line_id"], line_id)
+        self.assertEqual(operation["payload"]["lot_id"], lot_id)
+        self.assertEqual(result["status"], "QUARANTINED")
+        self.assertEqual(result["stock_effect"], "NONE")

@@ -86,6 +86,9 @@ class CentralCashierWorkflow:
             payment_status=payment_status, limit=limit
         )
 
+    def returnable_stock(self, invoice_id: str) -> list[dict[str, Any]]:
+        return self.transport.returnable_stock(invoice_id)
+
     def current_cash_session(
         self, premise_id: str, electronic_device_id: str
     ) -> dict[str, Any] | None:
@@ -225,6 +228,20 @@ class CentralCashierWorkflow:
             )
         reversal = self.transport.get_invoice(reversal_id)
         return CentralInvoiceResult(operation_id=identity, invoice=reversal)
+
+    def receive_returned_sale_item(
+        self, *, invoice_id: str, invoice_line_id: str, lot_id: str,
+        quantity: Any, condition_note: str = "", return_id: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_receive_returned_sale_item({
+            "return_id": str(return_id or uuid4()), "invoice_id": invoice_id,
+            "invoice_line_id": invoice_line_id, "lot_id": lot_id,
+            "quantity": str(quantity), "condition_note": condition_note,
+            "confirmed": True,
+        }, operation_id=operation_id)
+        return self._dispatch_command(identity)
 
     def unresolved_commands(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return list_dispatchable_operations(

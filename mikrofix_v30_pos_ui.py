@@ -1588,6 +1588,13 @@ class PosWindow:
             if invoice:
                 self._storno_central_invoice(invoice, parent=dialog, on_success=refresh)
 
+        def physical_return_selected():
+            invoice = selected()
+            if invoice:
+                self._receive_central_sale_return(
+                    invoice, parent=dialog, on_success=refresh
+                )
+
         query.trace_add("write", refresh)
         footer = ttk.Frame(dialog, padding=(14, 0, 14, 14))
         footer.pack(fill="x")
@@ -1599,6 +1606,10 @@ class PosWindow:
             footer, text=f"ODPRI {self._paper_width()} mm",
             command=lambda: open_original(True),
         ).pack(side="left")
+        ttk.Button(
+            footer, text="FIZIČNO VRAČILO ARTIKLA",
+            command=physical_return_selected,
+        ).pack(side="right", padx=5)
         if self._can_storno():
             ttk.Button(
                 footer, text="STORNO RAČUNA", command=storno_selected
@@ -1664,6 +1675,119 @@ class PosWindow:
         )
         if callable(on_success):
             on_success()
+
+    def _receive_central_sale_return(self, invoice, *, parent, on_success=None):
+        if invoice.get("source_type") != "DIRECT_SALE":
+            messagebox.showwarning(
+                "Fizično vračilo",
+                "Blagajna lahko tukaj prevzame samo artikel z neposredne "
+                "prodaje. Vgrajeni del odstrani Service.", parent=parent,
+            )
+            return
+        try:
+            rows = self.central_cashier.returnable_stock(
+                str(invoice["invoice_id"])
+            )
+        except Exception as exc:
+            messagebox.showerror("Fizično vračilo", str(exc), parent=parent)
+            return
+        if not rows:
+            messagebox.showinfo(
+                "Fizično vračilo",
+                "Na tem računu ni več količine, ki bi jo bilo mogoče fizično "
+                "prevzeti.", parent=parent,
+            )
+            return
+        chooser = tk.Toplevel(parent)
+        chooser.title("Fizično vračilo artikla")
+        chooser.transient(parent)
+        chooser.grab_set()
+        chooser.geometry("920x430")
+        ttk.Label(
+            chooser,
+            text=f"Račun {invoice.get('invoice_number') or '—'} – izberi dejansko vrnjeni kos",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", padx=14, pady=(14, 8))
+        columns = ("article", "barcode", "lot", "sold", "received", "remaining")
+        tree = ttk.Treeview(
+            chooser, columns=columns, show="headings", selectmode="browse"
+        )
+        for key, label, width in (
+            ("article", "Artikel", 260), ("barcode", "Barkoda", 150),
+            ("lot", "LOT", 150), ("sold", "Prodano", 85),
+            ("received", "Že vrnjeno", 95), ("remaining", "Še možno", 85),
+        ):
+            tree.heading(key, text=label)
+            tree.column(key, width=width, stretch=key == "article")
+        by_item = {}
+        for index, row in enumerate(rows):
+            identity = f"returnable-{index}"
+            by_item[identity] = row
+            tree.insert("", "end", iid=identity, values=(
+                row.get("description") or "—", row.get("barcode") or "—",
+                row.get("lot_serial") or row.get("lot_id") or "—",
+                row.get("sold_quantity") or "0",
+                row.get("already_received_quantity") or "0",
+                row.get("returnable_quantity") or "0",
+            ))
+        tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+        def confirm_receipt():
+            selection = tree.selection()
+            if not selection:
+                messagebox.showwarning(
+                    "Fizično vračilo", "Izberi vrnjeni artikel.", parent=chooser
+                )
+                return
+            row = by_item[selection[0]]
+            quantity = simpledialog.askstring(
+                "Vrnjena količina",
+                f"Največja še dovoljena količina: {row['returnable_quantity']}\n"
+                "Dejansko fizično prevzeta količina:",
+                initialvalue=str(row["returnable_quantity"]), parent=chooser,
+            )
+            if quantity is None:
+                return
+            note = simpledialog.askstring(
+                "Stanje ob prevzemu",
+                "Neobvezna kratka opomba o stanju artikla:", parent=chooser,
+            )
+            if note is None:
+                return
+            if not messagebox.askyesno(
+                "Potrdi fizični prejem",
+                "Potrdi samo, če je artikel dejansko pri MikroFIX.\n\n"
+                "Artikel bo šel v KARANTENO in še ne bo na voljo za prodajo. "
+                "Office ga mora po pregledu posebej sprostiti ali označiti.",
+                parent=chooser,
+            ):
+                return
+            try:
+                self.central_cashier.receive_returned_sale_item(
+                    return_id=str(uuid.uuid4()),
+                    invoice_id=str(invoice["invoice_id"]),
+                    invoice_line_id=str(row["invoice_line_id"]),
+                    lot_id=str(row["lot_id"]), quantity=quantity,
+                    condition_note=str(note or "").strip(),
+                )
+            except Exception as exc:
+                messagebox.showerror("Fizično vračilo", str(exc), parent=chooser)
+                return
+            chooser.destroy()
+            messagebox.showinfo(
+                "Fizično vračilo",
+                "Fizični prejem je evidentiran. Artikel je v karanteni in "
+                "zaloga se še ni povečala.", parent=parent,
+            )
+            if callable(on_success):
+                on_success()
+
+        actions = ttk.Frame(chooser, padding=(14, 0, 14, 14))
+        actions.pack(fill="x")
+        ttk.Button(actions, text="PREKLIČI", command=chooser.destroy).pack(side="right")
+        ttk.Button(
+            actions, text="EVIDENTIRAJ FIZIČNI PREJEM", command=confirm_receipt
+        ).pack(side="right", padx=6)
 
     def refresh_stock(self):
         if self.issued_id:

@@ -59,12 +59,18 @@ class FakeOfficeTransport:
         if self.mode == "UNCERTAIN":
             raise RuntimeError("response lost")
         accepted = self.mode == "ACCEPT"
+        result = {"partner_id": operation["aggregate_id"]}
+        if operation["operation_type"] == "ResolvePhysicalStockReturn":
+            result = {
+                "return_id": operation["aggregate_id"],
+                "status": "DEFECTIVE", "stock_effect": "NONE",
+            }
         return {
             "operation_id": operation["operation_id"],
             "result_code": "ACCEPTED" if accepted else "REJECTED",
             "error_code": None if accepted else "VERSION_CONFLICT",
             "error_message": None if accepted else "Zapis se je vmes spremenil.",
-            "result": {"partner_id": operation["aggregate_id"]},
+            "result": result,
         }
 
     def search_partners(self, query, *, limit=50):
@@ -84,6 +90,9 @@ class FakeOfficeTransport:
 
     def get_issued_invoice(self, invoice_id):
         return {"invoice_id": invoice_id, "snapshot": {}}
+
+    def list_physical_stock_returns(self, *, status="QUARANTINED", limit=100):
+        return [{"status": status, "limit": limit}]
 
     def list_custom_document_types(self):
         return [{"type_code": "PREV", "display_name": "Prevzemnica"}]
@@ -117,6 +126,9 @@ class CentralOfficeWorkflowTests(unittest.TestCase):
             "kupec",
         )
         self.assertEqual(self.workflow.invoice("invoice-1")["invoice_id"], "invoice-1")
+        self.assertEqual(
+            self.workflow.physical_stock_returns(limit=3)[0]["limit"], 3
+        )
         self.assertEqual(self.workflow.receipt_document_types()[0]["type_code"], "PREV")
         self.assertEqual(self.workflow.unresolved_commands(), [])
 
@@ -165,6 +177,20 @@ class CentralOfficeWorkflowTests(unittest.TestCase):
             [item["operation_type"] for item in self.transport.submitted],
             ["ConfirmPurchaseReceipt", "AttachPurchaseInvoice"],
         )
+
+    def test_office_resolution_uses_ordered_versioned_command(self):
+        return_id = str(uuid4())
+        result = self.workflow.resolve_physical_stock_return(
+            return_id=return_id, decision="MARK_DEFECTIVE",
+            reason="Električno poškodovan",
+        )
+        operation = self.transport.submitted[0]
+        self.assertEqual(operation["operation_type"], "ResolvePhysicalStockReturn")
+        self.assertEqual(operation["aggregate_type"], "STOCK_RETURN")
+        self.assertEqual(operation["aggregate_id"], return_id)
+        self.assertEqual(operation["expected_version"], 1)
+        self.assertEqual(result["status"], "DEFECTIVE")
+        self.assertEqual(result["stock_effect"], "NONE")
 
     def test_uncertain_command_blocks_new_mutation_and_retries_same_identity(self):
         self.transport.mode = "UNCERTAIN"

@@ -141,6 +141,19 @@ class OfficeCommandJournalTests(unittest.TestCase):
         self.assertEqual(row["aggregate_uuid"], article_id)
         self.assertEqual(row["expected_version"], 4)
 
+    def test_return_resolution_is_a_versioned_stock_return_command(self):
+        return_id = str(uuid4())
+        operation_id = self.journal.prepare_resolve_physical_stock_return({
+            "return_id": return_id, "expected_version": 1,
+            "decision": "MARK_DEFECTIVE", "reason": "Počen priključek",
+            "confirmed": True,
+        })
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "ResolvePhysicalStockReturn")
+        self.assertEqual(row["aggregate_type"], "STOCK_RETURN")
+        self.assertEqual(row["aggregate_uuid"], return_id)
+        self.assertEqual(row["expected_version"], 1)
+
     @patch("requests.get")
     def test_office_reads_pending_receipts(self, get):
         response = Mock(status_code=200)
@@ -154,6 +167,26 @@ class OfficeCommandJournalTests(unittest.TestCase):
         get.assert_called_once_with(
             "https://central.example/v1/office/purchase-receipts",
             params={"status": "PENDING_INVOICE", "limit": 100},
+            headers={"Authorization": "Bearer token"}, timeout=15.0,
+        )
+
+    @patch("requests.get")
+    def test_office_reads_physical_return_quarantine(self, get):
+        response = Mock(status_code=200)
+        response.json.return_value = {"returns": [{
+            "return_id": str(uuid4()), "status": "QUARANTINED",
+        }]}
+        get.return_value = response
+        transport = RequestsOfficeTransport("https://central.example", "token")
+
+        rows = transport.list_physical_stock_returns(
+            status="QUARANTINED", limit=25
+        )
+
+        self.assertEqual(rows[0]["status"], "QUARANTINED")
+        get.assert_called_once_with(
+            "https://central.example/v1/office/physical-stock-returns",
+            params={"return_status": "QUARANTINED", "limit": 25},
             headers={"Authorization": "Bearer token"}, timeout=15.0,
         )
 

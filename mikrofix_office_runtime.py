@@ -90,6 +90,13 @@ class CentralOfficeWorkflow:
     def invoice(self, invoice_id: str) -> dict[str, Any]:
         return self.transport.get_issued_invoice(invoice_id)
 
+    def physical_stock_returns(
+        self, *, status: str = "QUARANTINED", limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return self.transport.list_physical_stock_returns(
+            status=status, limit=limit
+        )
+
     def receipt_document_types(self) -> list[dict[str, Any]]:
         return self.transport.list_custom_document_types()
 
@@ -187,6 +194,17 @@ class CentralOfficeWorkflow:
         identity = self.journal.prepare_set_partner_active(
             payload, operation_id=operation_id
         )
+        return self._dispatch(identity)
+
+    def resolve_physical_stock_return(
+        self, *, return_id: str, decision: str, reason: str,
+        expected_version: int = 1, operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_resolve_physical_stock_return({
+            "return_id": return_id, "expected_version": expected_version,
+            "decision": decision, "reason": reason, "confirmed": True,
+        }, operation_id=operation_id)
         return self._dispatch(identity)
 
     def unresolved_commands(self, *, limit: int = 100) -> list[dict[str, Any]]:

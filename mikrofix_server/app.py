@@ -41,6 +41,7 @@ from .models import (
     central_user_permission_history,
     central_users,
     change_feed,
+    direct_sale_stock_allocations,
     inventory_identities,
     inventory_items,
     inventory_lots,
@@ -48,6 +49,7 @@ from .models import (
     invoice_drafts,
     invoices,
     partners,
+    physical_stock_returns,
     purchase_receipt_lines,
     purchase_receipts,
     receipt_document_types,
@@ -795,6 +797,140 @@ def create_app(
         if row is None:
             raise HTTPException(status_code=404, detail="Invoice does not exist.")
         return public_cashier_invoice(row)
+
+    @app.get(
+        "/v1/cashier/invoices/{invoice_id}/returnable-stock",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def get_cashier_returnable_stock(invoice_id: UUID) -> dict:
+        """Expose exact sold line/LOT identities, never a client-guessed LOT."""
+        with database_engine.connect() as connection:
+            invoice = connection.execute(select(invoices).where(
+                invoices.c.invoice_uuid == invoice_id
+            )).one_or_none()
+            if invoice is None or invoice.source_type != "DIRECT_SALE":
+                raise HTTPException(
+                    status_code=404, detail="Direct-sale invoice does not exist."
+                )
+            allocations = connection.execute(select(
+                direct_sale_stock_allocations,
+                inventory_lots.c.lot_serial,
+                inventory_items.c.barcode,
+                inventory_items.c.description,
+            ).join(
+                inventory_lots,
+                inventory_lots.c.lot_uuid
+                == direct_sale_stock_allocations.c.lot_uuid,
+            ).join(
+                inventory_items,
+                inventory_items.c.article_uuid == inventory_lots.c.article_uuid,
+            ).where(
+                direct_sale_stock_allocations.c.invoice_uuid == invoice_id
+            ).order_by(
+                direct_sale_stock_allocations.c.sale_line_uuid,
+                direct_sale_stock_allocations.c.lot_uuid,
+            )).all()
+            received_rows = connection.execute(select(
+                physical_stock_returns.c.invoice_line_uuid,
+                physical_stock_returns.c.lot_uuid,
+                func.sum(physical_stock_returns.c.quantity).label("quantity"),
+            ).where(
+                physical_stock_returns.c.invoice_uuid == invoice_id
+            ).group_by(
+                physical_stock_returns.c.invoice_line_uuid,
+                physical_stock_returns.c.lot_uuid,
+            )).all()
+        received = {
+            (row.invoice_line_uuid, row.lot_uuid): row.quantity
+            for row in received_rows
+        }
+        snapshot_lines = {
+            str(line.get("line_id")): dict(line)
+            for line in dict(invoice.snapshot_json or {}).get("lines", ())
+            if isinstance(line, dict)
+        }
+        result = []
+        for row in allocations:
+            returned = received.get(
+                (row.sale_line_uuid, row.lot_uuid), row.quantity * 0
+            )
+            remaining = row.quantity - returned
+            if remaining <= 0:
+                continue
+            line = snapshot_lines.get(str(row.sale_line_uuid), {})
+            result.append({
+                "invoice_id": invoice.invoice_uuid,
+                "invoice_number": invoice.invoice_number,
+                "invoice_line_id": row.sale_line_uuid,
+                "lot_id": row.lot_uuid, "lot_serial": row.lot_serial,
+                "article_id": line.get("article_id"), "barcode": row.barcode,
+                "description": line.get("description") or row.description,
+                "sold_quantity": format(row.quantity, "f"),
+                "already_received_quantity": format(returned, "f"),
+                "returnable_quantity": format(remaining, "f"),
+            })
+        return {"invoice_id": invoice.invoice_uuid, "returnable_stock": result}
+
+    @app.get(
+        "/v1/office/physical-stock-returns",
+        dependencies=[Depends(office_identity)],
+    )
+    def list_physical_stock_returns(
+        return_status: str = Query(default="QUARANTINED"),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict:
+        cleaned_status = str(return_status or "").strip().upper()
+        allowed = {
+            "QUARANTINED", "RELEASED_TO_STOCK", "DEFECTIVE",
+            "CLAIM_REVIEW_REQUIRED",
+        }
+        if cleaned_status and cleaned_status not in allowed:
+            raise HTTPException(
+                status_code=422, detail="Unsupported physical return status."
+            )
+        statement = select(
+            physical_stock_returns,
+            invoices.c.invoice_number,
+            inventory_items.c.barcode,
+            inventory_items.c.description,
+            inventory_lots.c.lot_serial,
+        ).join(
+            invoices,
+            invoices.c.invoice_uuid == physical_stock_returns.c.invoice_uuid,
+        ).join(
+            inventory_items,
+            inventory_items.c.article_uuid
+            == physical_stock_returns.c.article_uuid,
+        ).join(
+            inventory_lots,
+            inventory_lots.c.lot_uuid == physical_stock_returns.c.lot_uuid,
+        )
+        if cleaned_status:
+            statement = statement.where(
+                physical_stock_returns.c.status == cleaned_status
+            )
+        with database_engine.connect() as connection:
+            rows = connection.execute(statement.order_by(
+                physical_stock_returns.c.received_at,
+                physical_stock_returns.c.return_uuid,
+            ).limit(limit)).all()
+        return {"returns": [{
+            "return_id": row.return_uuid, "row_version": row.row_version,
+            "invoice_id": row.invoice_uuid,
+            "invoice_number": row.invoice_number,
+            "invoice_line_id": row.invoice_line_uuid,
+            "lot_id": row.lot_uuid, "lot_serial": row.lot_serial,
+            "article_id": row.article_uuid, "barcode": row.barcode,
+            "description": row.description,
+            "quantity": format(row.quantity, "f"),
+            "receipt_source": row.receipt_source,
+            "condition_note": row.condition_note,
+            "status": row.status, "received_device_id": row.received_device_id,
+            "received_at": row.received_at,
+            "resolution_decision": row.resolution_decision,
+            "resolution_reason": row.resolution_reason,
+            "resolved_at": row.resolved_at,
+        } for row in rows]}
 
     @app.post(
         "/v1/cashier/direct-sale-quote",

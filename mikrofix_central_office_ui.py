@@ -18,7 +18,7 @@ from mikrofix_central_receipt_ui import (
 from mikrofix_tk_bootstrap import maximize_work_window
 
 
-TAB_KEYS = ("inventory", "receipts", "invoices", "partners")
+TAB_KEYS = ("inventory", "receipts", "returns", "invoices", "partners")
 
 
 def normalized_central_office_tab(value: str) -> str:
@@ -56,6 +56,28 @@ def central_office_rows(kind: str, rows: list[dict[str, Any]]) -> list[tuple[str
             f"{Decimal(str(row.get('total_amount') or '0')):.2f} €",
             "PLAČAN" if row.get("payment_status") == "PAID" else "NEPLAČAN",
             str(row.get("status") or ""),
+        ) for row in rows]
+    if kind == "returns":
+        status_labels = {
+            "QUARANTINED": "KARANTENA",
+            "RELEASED_TO_STOCK": "VRNJENO V ZALOGO",
+            "DEFECTIVE": "POKVARJENO / NEUPORABNO",
+            "CLAIM_REVIEW_REQUIRED": "REKLAMACIJSKI PREGLED",
+        }
+        source_labels = {
+            "CASHIER_RETURN": "Vračilo kupca",
+            "SERVICE_REMOVAL": "Odstranjeno iz servisa",
+        }
+        return [(
+            str(row.get("return_id") or ""),
+            str(row.get("invoice_number") or ""),
+            str(row.get("description") or ""),
+            str(row.get("barcode") or ""), str(row.get("lot_serial") or ""),
+            str(row.get("quantity") or "0"),
+            source_labels.get(str(row.get("receipt_source") or ""), "—"),
+            status_labels.get(
+                str(row.get("status") or ""), str(row.get("status") or "")
+            ),
         ) for row in rows]
     if kind == "partners":
         return [(
@@ -169,6 +191,7 @@ class CentralOfficeWindow:
         nav.pack(fill="x", padx=18, pady=(0, 8))
         for key, label in (
             ("inventory", "ZALOGA"), ("receipts", "PREJEMI"),
+            ("returns", "KARANTENA VRAČIL"),
             ("invoices", "IZDANI RAČUNI"), ("partners", "PARTNERJI"),
         ):
             ttk.Button(nav, text=label, command=lambda item=key: self.select_kind(item)).pack(
@@ -216,6 +239,8 @@ class CentralOfficeWindow:
                           ("ID", "Artikel", "Glavna barkoda", "Dobaviteljeva barkoda", "Na voljo", "Cena", "Stanje")),
             "receipts": (("id", "number", "date", "supplier", "external", "total", "status"),
                          ("ID", "Prejem", "Datum", "Dobavitelj", "Dokument", "Znesek", "Stanje")),
+            "returns": (("id", "invoice", "article", "barcode", "lot", "qty", "source", "status"),
+                        ("ID", "Račun", "Artikel", "Barkoda", "LOT", "Količina", "Vir", "Stanje")),
             "invoices": (("id", "number", "date", "customer", "total", "payment", "status"),
                          ("ID", "Račun", "Izdano", "Kupec", "Znesek", "Plačilo", "Stanje")),
             "partners": (("id", "name", "tax", "city", "phone", "email", "status"),
@@ -273,6 +298,19 @@ class CentralOfficeWindow:
                 self.context_actions, text="ZGODOVINA CEN",
                 command=self.open_inventory_price_history,
             ).pack(side="left")
+        elif self.kind == "returns":
+            ttk.Button(
+                self.context_actions, text="VRNI V ZALOGO",
+                command=lambda: self.resolve_selected_return("RETURN_TO_STOCK"),
+            ).pack(side="left")
+            ttk.Button(
+                self.context_actions, text="POKVARJENO / NEUPORABNO",
+                command=lambda: self.resolve_selected_return("MARK_DEFECTIVE"),
+            ).pack(side="left", padx=6)
+            ttk.Button(
+                self.context_actions, text="REKLAMACIJSKI PREGLED",
+                command=lambda: self.resolve_selected_return("REFER_TO_CLAIM"),
+            ).pack(side="left")
 
     def refresh(self) -> None:
         query = self.search_var.get().strip()
@@ -286,6 +324,16 @@ class CentralOfficeWindow:
                     rows = [row for row in rows if needle in json.dumps(row, ensure_ascii=False, default=str).casefold()]
             elif self.kind == "invoices":
                 rows = self.workflow.invoices(query, limit=300)
+            elif self.kind == "returns":
+                rows = self.workflow.physical_stock_returns(limit=300)
+                if query:
+                    needle = query.casefold()
+                    rows = [
+                        row for row in rows
+                        if needle in json.dumps(
+                            row, ensure_ascii=False, default=str
+                        ).casefold()
+                    ]
             else:
                 rows = self.workflow.partners(query, limit=200)
         except Exception as exc:
@@ -333,7 +381,8 @@ class CentralOfficeWindow:
         return next(
             (row for row in self.rows if str(
                 row.get("partner_id") or row.get("invoice_id")
-                or row.get("receipt_id") or row.get("article_id") or ""
+                or row.get("receipt_id") or row.get("return_id")
+                or row.get("article_id") or ""
             ) == identity),
             None,
         )
@@ -415,6 +464,59 @@ class CentralOfficeWindow:
             ))
         tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
         ttk.Button(dialog, text="ZAPRI", command=dialog.destroy).pack(pady=(0, 12))
+
+    def resolve_selected_return(self, decision: str) -> None:
+        returned = self.selected_record()
+        if not returned:
+            messagebox.showwarning(
+                "Karantena vračil", "Izberi vrnjeni kos.", parent=self.win
+            )
+            return
+        if returned.get("status") != "QUARANTINED":
+            messagebox.showwarning(
+                "Karantena vračil",
+                "Izbrani kos ni več v karanteni.", parent=self.win,
+            )
+            return
+        labels = {
+            "RETURN_TO_STOCK": "vrniti v prodajno zalogo",
+            "MARK_DEFECTIVE": "označiti kot pokvarjen oziroma neuporaben",
+            "REFER_TO_CLAIM": "usmeriti v reklamacijski pregled",
+        }
+        action = labels[decision]
+        reason = simpledialog.askstring(
+            "Pregled vrnjenega kosa",
+            f"Artikel: {returned.get('description') or '—'}\n"
+            f"Račun: {returned.get('invoice_number') or '—'}\n"
+            f"LOT: {returned.get('lot_serial') or returned.get('lot_id') or '—'}\n\n"
+            f"Vpiši razlog za odločitev »{action}«:",
+            parent=self.win,
+        )
+        if not str(reason or "").strip():
+            return
+        warning = (
+            "Samo ta odločitev bo povečala razpoložljivo količino istega "
+            "izvornega LOT-a.\n\n"
+            if decision == "RETURN_TO_STOCK" else
+            "Ta odločitev ne bo povečala razpoložljive zaloge.\n\n"
+        )
+        if not messagebox.askyesno(
+            "Potrdi pregled",
+            warning + f"Ali želiš kos {action}?",
+            parent=self.win,
+        ):
+            return
+        try:
+            self.workflow.resolve_physical_stock_return(
+                return_id=str(returned["return_id"]), decision=decision,
+                reason=str(reason).strip(),
+                expected_version=int(returned["row_version"]),
+            )
+        except Exception as exc:
+            messagebox.showerror("Karantena vračil", str(exc), parent=self.win)
+            self.refresh()
+            return
+        self.refresh()
 
     def new_receipt(self) -> None:
         try:
