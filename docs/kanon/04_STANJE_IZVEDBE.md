@@ -40,9 +40,12 @@ To še ni končna razdelitev podatkovnih poti. Samostojna Office in Blagajna
 trenutno še vsebujeta stari lokalni način; njuno obvezno centralno prijavo in
 API-only zapisovanje je treba preveriti ter dokončati pred produkcijo.
 
-Pri identifikaciji nepodprte naprave trenutni obrazec omogoča fizični prepis,
-vendar v poslovni zapis še ne shrani dovolj natančnega vira odčitka. Pred
-sprejemom je treba dodati vir, uporabnika in čas preverjanja ter pogodbeni test.
+Pri identifikaciji nepodprte naprave je obstoječi preprosti fizični prepis
+potrjen kot zadosten. Dodatno razčlenjevanje vira odčitka se ne uvaja.
+
+Offline centralni uporabniški posnetek je omejen na sedem dni. Po izteku in ob
+premiku sistemske ure pred zadnjo centralno prijavo se dostop varno zavrne.
+Vsaka uspešna offline prijava pokaže opozorilo in natančen čas izteka.
 
 ## Naslednja revizija kode
 

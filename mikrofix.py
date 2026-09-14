@@ -368,12 +368,28 @@ def central_service_login(user, pin):
         return False
     if CENTRAL_SERVICE_IDENTITY is None:
         raise RuntimeError(CENTRAL_SERVICE_CONFIGURATION_ERROR)
-    CENTRAL_SERVICE_IDENTITY.login(
+    identity = CENTRAL_SERVICE_IDENTITY.login(
         username=str(user["username"]), pin=str(pin)
     )
     protect_file_permissions(
         RUNTIME.db_dir / "service_central_identity.sqlite"
     )
+    if not identity.online:
+        try:
+            valid_until = datetime.fromisoformat(
+                str(identity.offline_valid_until)
+            ).astimezone().strftime("%d. %m. %Y ob %H:%M")
+        except (TypeError, ValueError):
+            valid_until = str(identity.offline_valid_until or "-")
+        messagebox.showwarning(
+            "MikroFIX Servis – offline prijava",
+            "Servis ni povezan s centralnim strežnikom. Prijava uporablja zadnji "
+            "potrjeni uporabniški posnetek.\n\n"
+            f"Offline dovoljenje velja najdlje do {valid_until}.\n\n"
+            "Spremembe uporabnika ali pravic bodo preverjene ob naslednji "
+            "centralni prijavi.",
+            parent=root,
+        )
     return CENTRAL_SERVICE_IDENTITY.must_change_pin
 
 

@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock
 from uuid import uuid4
@@ -85,6 +86,38 @@ class ServiceIdentityTests(unittest.TestCase):
         self.assertFalse(identity.online)
         self.assertEqual(identity.user_version, 3)
         self.assertEqual(self.manager.access_token, "")
+        self.assertIsNotNone(identity.offline_valid_until)
+
+    def test_offline_identity_expires_after_seven_days(self):
+        session = central_session()
+        cached = self.cache.remember(session)
+        verified = datetime.fromisoformat(cached.verified_at)
+        self.manager.now_provider = lambda: verified + timedelta(days=7)
+        self.client.login.side_effect = CentralAuthUnavailable("offline")
+
+        with self.assertRaisesRegex(OfflineIdentityUnavailable, "starejša od 7 dni"):
+            self.manager.login(username="serviser-a", pin="246810")
+
+    def test_offline_identity_is_valid_immediately_before_expiry(self):
+        session = central_session()
+        cached = self.cache.remember(session)
+        verified = datetime.fromisoformat(cached.verified_at)
+        self.manager.now_provider = lambda: verified + timedelta(days=7, seconds=-1)
+        self.client.login.side_effect = CentralAuthUnavailable("offline")
+
+        identity = self.manager.login(username="serviser-a", pin="246810")
+
+        self.assertFalse(identity.online)
+
+    def test_clock_rollback_blocks_offline_login(self):
+        session = central_session()
+        cached = self.cache.remember(session)
+        verified = datetime.fromisoformat(cached.verified_at)
+        self.manager.now_provider = lambda: verified - timedelta(seconds=1)
+        self.client.login.side_effect = CentralAuthUnavailable("offline")
+
+        with self.assertRaisesRegex(OfflineIdentityUnavailable, "Sistemska ura"):
+            self.manager.login(username="serviser-a", pin="246810")
 
     def test_first_offline_login_is_refused_without_cached_identity(self):
         self.client.login.side_effect = CentralAuthUnavailable("offline")

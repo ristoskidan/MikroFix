@@ -26,8 +26,9 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 - Zaključek ostane blokiran, dokler MicroDETECT pred ali po posegu ne prebere
   zahtevane identitete.
 - Ročni IMEI se ne more prikazati kot neposredno preverjen.
-- Nepodprta naprava se sprejme prek `FIZIČNO PREVERJENA IDENTITETA` z virom
-  odčitka.
+- Nepodprta naprava se sprejme prek preprostega postopka
+  `FIZIČNO PREVERJENA IDENTITETA`; sistem ne zahteva dodatnega razčlenjevanja
+  vira fizičnega prepisa.
 - Naprava brez lastne serijske številke dobi notranji UUID in MikroFIX nalepko,
   ne izmišljene proizvajalčeve serijske številke.
 
@@ -63,6 +64,9 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 - Po sinhronizaciji lokalni pogled prejme novejši centralni posnetek.
 - Ponovni zagon brez povezave vedno zahteva prijavo. Veljaven podpisan
   uporabniški posnetek jo omogoči, potekel ali spremenjen posnetek pa jo zavrne.
+- Vsaka uspešna offline prijava pokaže opozorilo in čas izteka. Posnetek je ob
+  dopolnjenih sedmih dneh zavrnjen; premik lokalne ure pred čas zadnje centralne
+  prijave se ne uporabi za podaljšanje veljavnosti.
 
 ## 7. Blagajna
 

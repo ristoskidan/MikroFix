@@ -42,11 +42,11 @@ Pri računu se dodatno shrani registrirana blagajniška/FURS identiteta. Isti
 
 Offline uporabniška seja uporablja strežniško podpisan posnetek identitete,
 vlog in dovoljenj. Posnetek ne nadomesti prijave: ob vsakem zagonu Servisa mora
-uporabnik ponovno vnesti svoje poverilnice. Priporočena začetna veljavnost
-posnetka je največ sedem dni od zadnje uspešne centralne prijave. Po poteku je
-offline prijava blokirana do ponovne centralne prijave. Končna dolžina je še
-poslovna odločitev; odvzem uporabnika ali pravic se na že odklopljeni postaji
-lahko uveljavi najpozneje ob poteku posnetka.
+uporabnik ponovno vnesti svoje poverilnice. Posnetek velja največ sedem dni od
+zadnje uspešne centralne prijave. Vsaka offline prijava uporabnika opozori, da
+strežnik ni dosegljiv, in pokaže konec veljavnosti. Po poteku je offline prijava
+blokirana do ponovne centralne prijave. Odvzem uporabnika ali pravic se na že
+odklopljeni postaji lahko uveljavi najpozneje ob poteku posnetka.
 
 ## 4. Stanja servisa
 

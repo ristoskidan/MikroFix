@@ -82,6 +82,14 @@ class ServiceTimerUiPolicyTests(unittest.TestCase):
         self.assertIn("start_service_sync_worker", calls)
         self.assertIn("request_service_sync", calls)
 
+    def test_every_offline_login_displays_expiry_warning(self):
+        source = ast.get_source_segment(
+            self.source, self.functions["central_service_login"]
+        )
+        self.assertIn("if not identity.online", source)
+        self.assertIn("messagebox.showwarning", source)
+        self.assertIn("offline_valid_until", source)
+
     def test_main_close_uses_service_time_gate(self):
         calls = self.calls_in("on_close")
         self.assertIn("service_time_blocks_application_close", calls)

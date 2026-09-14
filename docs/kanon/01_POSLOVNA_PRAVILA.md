@@ -105,9 +105,7 @@ branje. Zapis vsebuje:
 
 - kategorijo, proizvajalca in model;
 - serijsko številko ali drug stabilni identifikator, kadar obstaja;
-- dejanski vir odčitka: oznaka na napravi, firmware/BIOS, operacijski sistem ali
-  drug neposredno preverljiv fizični vir;
-- uporabnika ter datum in čas preverjanja.
+- potrditev uporabnika ter datum in čas fizičnega prepisa.
 
 Če naprava nima uporabnega proizvajalčevega identifikatorja, se ji dodeli samo
 notranji UUID in fizična MikroFIX nalepka. Sistem tega podatka ne predstavlja kot
@@ -160,6 +158,10 @@ prodaja vedno nastane na ločenem računu.
 ## 9. Offline Servis in sinhronizacija
 
 - Servis uporablja lokalni SQLite in zadnji potrjeni centralni posnetek.
+- Ob vsakem zagonu je tudi brez povezave obvezna nova prijava z lokalnim PIN-om.
+  Centralno potrjeni uporabniški posnetek velja največ sedem dni od zadnje
+  uspešne centralne prijave. Vsaka offline prijava pokaže jasno opozorilo in
+  čas, do katerega posnetek še velja; po poteku je prijava blokirana do povezave.
 - Nima lastne fizične zaloge.
 - Brez povezave lahko odpre, vodi in tehnično zaključi poljubno število nalogov.
 - Vsak nalog in dogodek imata UUID, identiteto izvorne namestitve in lokalno

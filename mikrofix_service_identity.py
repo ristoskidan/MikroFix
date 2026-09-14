@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import UUID
 
@@ -37,6 +37,7 @@ class ServiceLoginIdentity:
     user_id: str
     user_version: int
     online: bool
+    offline_valid_until: str | None = None
 
 
 class ServiceIdentityCache:
@@ -128,11 +129,17 @@ class ServiceCentralIdentityManager:
         *,
         workstation_code: str,
         workstation_secret: str,
+        offline_validity: timedelta = timedelta(days=7),
+        now_provider=None,
     ) -> None:
         self.auth_client = auth_client
         self.cache = cache
         self.workstation_code = str(workstation_code).strip()
         self.workstation_secret = str(workstation_secret).strip()
+        if offline_validity <= timedelta(0):
+            raise ValueError("Offline identity validity must be positive.")
+        self.offline_validity = offline_validity
+        self.now_provider = now_provider or (lambda: datetime.now(timezone.utc))
         self._session: CentralSession | None = None
         self._identity: ServiceLoginIdentity | None = None
 
@@ -166,10 +173,33 @@ class ServiceCentralIdentityManager:
                     "Za tega uporabnika še ni varno potrjene centralne identitete; "
                     "prva prijava zahteva povezavo s strežnikom."
                 ) from exc
+            try:
+                verified_at = datetime.fromisoformat(cached.verified_at)
+                if verified_at.tzinfo is None:
+                    verified_at = verified_at.replace(tzinfo=timezone.utc)
+                verified_at = verified_at.astimezone(timezone.utc)
+            except (TypeError, ValueError) as invalid_time:
+                raise OfflineIdentityUnavailable(
+                    "Lokalni uporabniški posnetek nima veljavnega časa preverjanja; "
+                    "potrebna je povezava s strežnikom."
+                ) from invalid_time
+            now = self.now_provider().astimezone(timezone.utc)
+            if now < verified_at:
+                raise OfflineIdentityUnavailable(
+                    "Sistemska ura je pred zadnjo centralno prijavo. Offline prijava "
+                    "je zaradi varnosti blokirana do povezave s strežnikom."
+                ) from exc
+            valid_until = verified_at + self.offline_validity
+            if now >= valid_until:
+                raise OfflineIdentityUnavailable(
+                    "Lokalna potrditev uporabnika je starejša od 7 dni. "
+                    "Za novo prijavo poveži Servis s centralnim strežnikom."
+                ) from exc
             self._session = None
             self._identity = ServiceLoginIdentity(
                 username=cached.username, user_id=cached.user_id,
                 user_version=cached.user_version, online=False,
+                offline_valid_until=valid_until.isoformat(timespec="seconds"),
             )
             return self._identity
 

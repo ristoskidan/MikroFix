@@ -83,9 +83,6 @@ primerom, ko je dejansko treba uporabiti VKR.
 
 ## 5. Odprte izvedbene podrobnosti
 
-- čas veljavnosti lokalnega podpisanega uporabniškega posnetka za offline
-  prijavo; arhitekturno priporočilo je največ sedem dni od zadnje uspešne
-  centralne prijave, odločitev uporabnika še ni potrjena;
 - podrobnosti uporabniškega toka reklamacije po obvezni izbiri računa;
 - dokončna FURS matrika delovnih postaj in programov.
 
@@ -100,3 +97,7 @@ primerom, ko je dejansko treba uporabiti VKR.
   garancije in dlje samo ob veljavnem zadržanju;
 - reklamacija se vedno odpre iz izdanega računa; račun ohrani povezavo s
   servisom in, kadar obstaja, garancijskim listom.
+- offline uporabniški posnetek velja največ sedem dni od zadnje centralne
+  prijave; vsaka offline prijava mora prikazati opozorilo in čas izteka;
+- obstoječi preprosti fizični prepis identitete nepodprte naprave je zadosten;
+  dodatnih polj za razčlenjevanje vira odčitka se ne uvaja.
