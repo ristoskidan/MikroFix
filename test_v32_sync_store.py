@@ -6,6 +6,8 @@ from mikrofix_sync_contracts import SyncOperationEnvelope
 from mikrofix_sync_store import (
     SyncStoreError,
     acknowledge_operation,
+    apply_complete_service_return_snapshot,
+    apply_service_part_return_updates,
     apply_inventory_updates,
     apply_complete_inventory_snapshot,
     advance_central_checkpoint,
@@ -18,6 +20,7 @@ from mikrofix_sync_store import (
     outbox_operation,
     recover_stale_sending,
     record_incoming_change,
+    service_return_snapshot_complete,
 )
 from mikrofix_workflows import create_service_order, ensure_workflow_schema
 
@@ -284,6 +287,105 @@ class SyncStoreTests(unittest.TestCase):
             "SELECT snapshot_complete,snapshot_sequence "
             "FROM sync_inventory_state_v32"
         ).fetchone(), (1, 0))
+
+    def test_service_return_projection_tracks_exact_lot_and_quarantine_event(self):
+        service_order_id = str(uuid4())
+        invoice_id = str(uuid4())
+        line_id = str(uuid4())
+        lot_id = str(uuid4())
+        apply_service_part_return_updates(
+            self.connection,
+            central_sequence=11,
+            event_type="ServiceBillingCompleted",
+            payload={
+                "service_order_id": service_order_id,
+                "invoice_id": invoice_id,
+                "invoice_number": "R-2026-11",
+                "returnable_parts": [{
+                    "invoice_line_id": line_id,
+                    "lot_id": lot_id,
+                    "article_id": str(uuid4()),
+                    "barcode": "BAR-1",
+                    "description": "Baterija",
+                    "lot_serial": "LOT-1",
+                    "allocated_quantity": "2.0000",
+                    "already_removed_quantity": "0.0000",
+                }],
+            },
+        )
+        apply_service_part_return_updates(
+            self.connection,
+            central_sequence=12,
+            event_type="PhysicalStockReturnQuarantined",
+            payload={
+                "receipt_source": "SERVICE_REMOVAL",
+                "invoice_id": invoice_id,
+                "invoice_line_id": line_id,
+                "lot_id": lot_id,
+                "quantity": "1.0000",
+            },
+        )
+        row = self.connection.execute(
+            "SELECT service_order_uuid,allocated_quantity,returned_quantity,"
+            "central_sequence FROM central_service_part_returns_v32"
+        ).fetchone()
+        self.assertEqual(row, (service_order_id, "2.0000", "1.0000", 12))
+
+        with self.assertRaisesRegex(SyncStoreError, "cannot be applied"):
+            apply_service_part_return_updates(
+                self.connection,
+                central_sequence=13,
+                event_type="PhysicalStockReturnQuarantined",
+                payload={
+                    "receipt_source": "SERVICE_REMOVAL",
+                    "invoice_id": invoice_id,
+                    "invoice_line_id": line_id,
+                    "lot_id": lot_id,
+                    "quantity": "2.0000",
+                },
+            )
+
+    def test_complete_service_return_snapshot_replaces_stale_projection(self):
+        stale_invoice = str(uuid4())
+        self.connection.execute(
+            "INSERT INTO central_service_part_returns_v32("
+            "invoice_uuid,invoice_line_uuid,lot_uuid,service_order_uuid,"
+            "invoice_number,article_uuid,barcode,description,lot_serial,"
+            "allocated_quantity,returned_quantity,central_sequence,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                stale_invoice, str(uuid4()), str(uuid4()), str(uuid4()),
+                "R-OLD", str(uuid4()), "OLD", "Star del", "",
+                "1.0000", "0.0000", 2, "2026-09-12T08:00:00+02:00",
+            ),
+        )
+        current = {
+            "service_order_id": str(uuid4()),
+            "invoice_id": str(uuid4()),
+            "invoice_number": "R-NEW",
+            "invoice_line_id": str(uuid4()),
+            "lot_id": str(uuid4()),
+            "article_id": str(uuid4()),
+            "barcode": "NEW",
+            "description": "Nov del",
+            "lot_serial": "LOT-NEW",
+            "allocated_quantity": "1.0000",
+            "already_removed_quantity": "0.0000",
+            "removable_quantity": "1.0000",
+        }
+        self.assertFalse(service_return_snapshot_complete(self.connection))
+        self.assertEqual(apply_complete_service_return_snapshot(
+            self.connection, snapshot_sequence=7, returnable_parts=[current]
+        ), 1)
+        self.assertTrue(service_return_snapshot_complete(self.connection))
+        rows = self.connection.execute(
+            "SELECT invoice_uuid,invoice_line_uuid,lot_uuid,central_sequence "
+            "FROM central_service_part_returns_v32"
+        ).fetchall()
+        self.assertEqual(rows, [(
+            current["invoice_id"], current["invoice_line_id"],
+            current["lot_id"], 7,
+        )])
 
 
 

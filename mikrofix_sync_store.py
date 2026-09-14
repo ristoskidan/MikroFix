@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from mikrofix_sync_contracts import (
@@ -228,6 +229,39 @@ def ensure_sync_store_schema(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS central_service_part_returns_v32(
+            invoice_uuid TEXT NOT NULL,
+            invoice_line_uuid TEXT NOT NULL,
+            lot_uuid TEXT NOT NULL,
+            service_order_uuid TEXT NOT NULL,
+            invoice_number TEXT NOT NULL,
+            article_uuid TEXT NOT NULL,
+            barcode TEXT NOT NULL,
+            description TEXT NOT NULL,
+            lot_serial TEXT NOT NULL,
+            allocated_quantity TEXT NOT NULL,
+            returned_quantity TEXT NOT NULL,
+            central_sequence INTEGER NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(invoice_uuid,invoice_line_uuid,lot_uuid),
+            CHECK(central_sequence>=1)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sync_service_return_state_v32(
+            singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+            snapshot_complete INTEGER NOT NULL DEFAULT 0,
+            snapshot_sequence INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            CHECK(snapshot_complete IN (0,1)),
+            CHECK(snapshot_sequence>=0)
+        )
+        """
+    )
 
 
 def _row_dict(cursor: sqlite3.Cursor, row) -> dict[str, Any] | None:
@@ -254,6 +288,194 @@ def operation_receipt(
     )
     row = cursor.fetchone()
     return json.loads(str(row[0])) if row else None
+
+
+def apply_service_part_return_updates(
+    connection: sqlite3.Connection, *, central_sequence: int,
+    event_type: str, payload: dict[str, Any],
+) -> None:
+    """Project exact Service invoice allocations and confirmed removals."""
+    parts = payload.get("returnable_parts")
+    if parts is not None:
+        if not isinstance(parts, list):
+            raise SyncStoreError("Service returnable-parts event is invalid.")
+        service_order_id = str(payload.get("service_order_id") or "")
+        invoice_id = str(payload.get("invoice_id") or "")
+        invoice_number = str(payload.get("invoice_number") or "")
+        if not service_order_id or not invoice_id or not invoice_number:
+            raise SyncStoreError("Service returnable-parts identity is incomplete.")
+        for part in parts:
+            if not isinstance(part, dict):
+                raise SyncStoreError("Service returnable part is invalid.")
+            required = {
+                "invoice_line_id", "lot_id", "article_id", "barcode",
+                "description", "allocated_quantity",
+                "already_removed_quantity",
+            }
+            if any(not str(part.get(key) or "").strip() for key in required):
+                raise SyncStoreError("Service returnable part is incomplete.")
+            connection.execute(
+                """
+                INSERT INTO central_service_part_returns_v32(
+                    invoice_uuid,invoice_line_uuid,lot_uuid,service_order_uuid,
+                    invoice_number,article_uuid,barcode,description,lot_serial,
+                    allocated_quantity,returned_quantity,central_sequence,updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(invoice_uuid,invoice_line_uuid,lot_uuid) DO UPDATE SET
+                    service_order_uuid=excluded.service_order_uuid,
+                    invoice_number=excluded.invoice_number,
+                    article_uuid=excluded.article_uuid,
+                    barcode=excluded.barcode,
+                    description=excluded.description,
+                    lot_serial=excluded.lot_serial,
+                    allocated_quantity=excluded.allocated_quantity,
+                    returned_quantity=excluded.returned_quantity,
+                    central_sequence=excluded.central_sequence,
+                    updated_at=excluded.updated_at
+                WHERE excluded.central_sequence>
+                    central_service_part_returns_v32.central_sequence
+                """,
+                (
+                    invoice_id, str(part["invoice_line_id"]),
+                    str(part["lot_id"]), service_order_id, invoice_number,
+                    str(part["article_id"]), str(part["barcode"]),
+                    str(part["description"]), str(part.get("lot_serial") or ""),
+                    str(part["allocated_quantity"]),
+                    str(part["already_removed_quantity"]), int(central_sequence),
+                    now_text(),
+                ),
+            )
+    if (
+        event_type == "PhysicalStockReturnQuarantined"
+        and payload.get("receipt_source") == "SERVICE_REMOVAL"
+    ):
+        identity = (
+            str(payload.get("invoice_id") or ""),
+            str(payload.get("invoice_line_id") or ""),
+            str(payload.get("lot_id") or ""),
+        )
+        try:
+            removed_quantity = Decimal(str(payload.get("quantity"))).quantize(
+                Decimal("0.0001")
+            )
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise SyncStoreError("Service removal quantity is invalid.") from exc
+        row = connection.execute(
+            "SELECT allocated_quantity,returned_quantity,central_sequence "
+            "FROM central_service_part_returns_v32 WHERE invoice_uuid=? "
+            "AND invoice_line_uuid=? AND lot_uuid=?",
+            identity,
+        ).fetchone()
+        if row is None or int(row[2]) >= int(central_sequence):
+            raise SyncStoreError(
+                "Service removal cannot be applied to the local central projection."
+            )
+        allocated_quantity = Decimal(str(row[0])).quantize(Decimal("0.0001"))
+        returned_quantity = Decimal(str(row[1])).quantize(Decimal("0.0001"))
+        new_returned_quantity = returned_quantity + removed_quantity
+        if removed_quantity <= 0 or new_returned_quantity > allocated_quantity:
+            raise SyncStoreError(
+                "Service removal cannot be applied to the local central projection."
+            )
+        cursor = connection.execute(
+            """
+            UPDATE central_service_part_returns_v32
+            SET returned_quantity=?,central_sequence=?,updated_at=?
+            WHERE invoice_uuid=? AND invoice_line_uuid=? AND lot_uuid=?
+              AND central_sequence<?
+            """,
+            (
+                format(new_returned_quantity, "f"), int(central_sequence),
+                now_text(), *identity, int(central_sequence),
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise SyncStoreError(
+                "Service removal cannot be applied to the local central projection."
+            )
+
+
+def service_return_snapshot_complete(connection: sqlite3.Connection) -> bool:
+    ensure_sync_store_schema(connection)
+    row = connection.execute(
+        "SELECT snapshot_complete FROM sync_service_return_state_v32 "
+        "WHERE singleton_id=1"
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def apply_complete_service_return_snapshot(
+    connection: sqlite3.Connection, *, snapshot_sequence: int,
+    returnable_parts: list[dict[str, Any]],
+) -> int:
+    """Replace the removal projection with one server-declared complete view."""
+    ensure_sync_store_schema(connection)
+    sequence = int(snapshot_sequence)
+    if sequence < 0 or not isinstance(returnable_parts, list):
+        raise SyncStoreError("A complete Service return snapshot is invalid.")
+    newest_local = int(connection.execute(
+        "SELECT COALESCE(MAX(central_sequence),0) "
+        "FROM central_service_part_returns_v32"
+    ).fetchone()[0])
+    if sequence < newest_local:
+        raise SyncStoreError(
+            "A complete Service return snapshot is older than the local projection."
+        )
+    identities: list[tuple[str, str, str]] = []
+    for part in returnable_parts:
+        if not isinstance(part, dict):
+            raise SyncStoreError("A complete Service return snapshot has an invalid row.")
+        identity = (
+            str(part.get("invoice_id") or ""),
+            str(part.get("invoice_line_id") or ""),
+            str(part.get("lot_id") or ""),
+        )
+        if not all(identity):
+            raise SyncStoreError(
+                "A complete Service return snapshot has incomplete identity."
+            )
+        identities.append(identity)
+        apply_service_part_return_updates(
+            connection,
+            central_sequence=sequence,
+            event_type="ServiceReturnablePartsSnapshot",
+            payload={
+                "service_order_id": str(part.get("service_order_id") or ""),
+                "invoice_id": identity[0],
+                "invoice_number": str(part.get("invoice_number") or ""),
+                "returnable_parts": [part],
+            },
+        )
+    if len(identities) != len(set(identities)):
+        raise SyncStoreError("A complete Service return snapshot repeats a LOT row.")
+    if identities:
+        keep = set(identities)
+        existing = connection.execute(
+            "SELECT invoice_uuid,invoice_line_uuid,lot_uuid "
+            "FROM central_service_part_returns_v32"
+        ).fetchall()
+        for identity in existing:
+            if tuple(identity) not in keep:
+                connection.execute(
+                    "DELETE FROM central_service_part_returns_v32 "
+                    "WHERE invoice_uuid=? AND invoice_line_uuid=? AND lot_uuid=?",
+                    tuple(identity),
+                )
+    else:
+        connection.execute("DELETE FROM central_service_part_returns_v32")
+    connection.execute(
+        """
+        INSERT INTO sync_service_return_state_v32(
+            singleton_id,snapshot_complete,snapshot_sequence,updated_at
+        ) VALUES(1,1,?,?)
+        ON CONFLICT(singleton_id) DO UPDATE SET
+            snapshot_complete=1,
+            snapshot_sequence=MAX(snapshot_sequence,excluded.snapshot_sequence),
+            updated_at=excluded.updated_at
+        """,
+        (sequence, now_text()),
+    )
+    return len(returnable_parts)
 
 
 def next_device_sequence(connection: sqlite3.Connection, device_id: str) -> int:

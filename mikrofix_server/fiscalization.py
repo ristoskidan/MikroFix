@@ -23,6 +23,7 @@ from .models import (
     invoices,
     service_orders,
 )
+from .stock_returns import service_returnable_parts
 
 
 class FiscalStateError(RuntimeError):
@@ -303,6 +304,9 @@ def confirm_fiscal_submission(
                     "invoice_id": str(invoice_uuid),
                     "invoice_number": invoice.invoice_number,
                     "status": "BILLING_COMPLETED",
+                    "returnable_parts": service_returnable_parts(
+                        connection, invoice
+                    ),
                 },
                 occurred_at=now,
             )

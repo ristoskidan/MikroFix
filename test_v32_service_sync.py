@@ -7,9 +7,15 @@ from pathlib import Path
 from uuid import uuid4
 
 from mikrofix_service_sync import (
+    enqueue_removed_service_part,
     enqueue_service_order_created,
     enqueue_service_technical_completion,
     service_device_id,
+)
+from mikrofix_service_returns import service_returnable_parts
+from mikrofix_sync_store import (
+    apply_service_part_return_updates,
+    ensure_sync_store_schema,
 )
 from mikrofix_workflows import (
     create_service_order,
@@ -44,6 +50,7 @@ class ServiceOutboxIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.connection = sqlite3.connect(":memory:")
         ensure_workflow_schema(self.connection)
+        ensure_sync_store_schema(self.connection)
         self.connection.execute(
             "CREATE TABLE service_tests(id INTEGER PRIMARY KEY,service_id INTEGER,"
             "stage TEXT,test_name TEXT,status TEXT)"
@@ -179,6 +186,73 @@ class ServiceOutboxIntegrationTests(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
+
+    def test_removed_part_is_journalled_offline_against_exact_synced_lot(self):
+        service_order_id = str(uuid4())
+        invoice_id = str(uuid4())
+        invoice_line_id = str(uuid4())
+        lot_id = str(uuid4())
+        apply_service_part_return_updates(
+            self.connection,
+            central_sequence=10,
+            event_type="ServiceBillingCompleted",
+            payload={
+                "service_order_id": service_order_id,
+                "invoice_id": invoice_id,
+                "invoice_number": "R-2026-99",
+                "returnable_parts": [{
+                    "invoice_line_id": invoice_line_id,
+                    "lot_id": lot_id,
+                    "article_id": str(uuid4()),
+                    "barcode": "BAR-BAT-1",
+                    "description": "Baterija",
+                    "lot_serial": "LOT-1",
+                    "allocated_quantity": "1.0000",
+                    "already_removed_quantity": "0.0000",
+                }],
+            },
+        )
+
+        envelope = enqueue_removed_service_part(
+            self.connection,
+            service_order_uuid=service_order_id,
+            invoice_id=invoice_id,
+            invoice_line_id=invoice_line_id,
+            lot_id=lot_id,
+            quantity="1",
+            condition_note="Odstranjeno ob reklamaciji.",
+            actor_id="serviser",
+            device_id=self.device_id,
+        )
+
+        row = self.connection.execute(
+            "SELECT operation_type,aggregate_type,payload_json,status "
+            "FROM sync_outbox_v32 WHERE operation_id=?",
+            (envelope.operation_id,),
+        ).fetchone()
+        self.assertEqual(row[0:2], ("ReceiveRemovedServicePart", "STOCK_RETURN"))
+        payload = json.loads(row[2])
+        self.assertEqual(payload["invoice_id"], invoice_id)
+        self.assertEqual(payload["invoice_line_id"], invoice_line_id)
+        self.assertEqual(payload["lot_id"], lot_id)
+        self.assertEqual(row[3], "PENDING")
+        projected = service_returnable_parts(
+            self.connection, service_order_uuid=service_order_id
+        )[0]
+        self.assertEqual(str(projected.pending_local_quantity), "1.0000")
+        self.assertEqual(str(projected.removable_quantity), "0.0000")
+        with self.assertRaisesRegex(ValueError, "presega"):
+            enqueue_removed_service_part(
+                self.connection,
+                service_order_uuid=service_order_id,
+                invoice_id=invoice_id,
+                invoice_line_id=invoice_line_id,
+                lot_id=lot_id,
+                quantity="1",
+                condition_note="Ponovljen klik.",
+                actor_id="serviser",
+                device_id=self.device_id,
+            )
 
 
 if __name__ == "__main__":

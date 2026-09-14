@@ -116,6 +116,18 @@ Potrdilo HTTP samo še ni dokaz osveženega posnetka. Pot
 tega markerja. Sprotni dogodek z isto različico in starejšo zaporedno številko
 posnetka ne more prepisati.
 
+Enako strogo je ločena evidenca prej vgrajenih delov. Ob obračunskem zaključku
+centralni dogodek `ServiceBillingCompleted` posreduje Service računalniku samo
+strežniško potrjene povezave servis–račun–vrstica–LOT in še odstranljivo
+količino. Ker posamezni računalnik ob nadgradnji lahko že ima checkpoint za
+starejše dogodke, `/v1/service/returnable-parts-snapshot` vrne tudi popoln,
+`REPEATABLE READ` začetni posnetek z njegovo centralno zaporedno številko.
+Service fizično odstranitev zapiše v lokalni outbox tudi brez povezave; lokalni
+prikaz jo takoj odšteje kot čakajočo, vendar zaloge ne poveča. Šele sprejet
+centralni dogodek jo potrdi v projekciji in jo uvrsti v karanteno. Zavrnitev
+ustvari viden konflikt z računom, vrstico, LOT-om, količino in razlogom; ne
+ustvari `STOCK_EXCEPTION`, ne odpre starega servisa in ne spremeni računa.
+
 Office ima bralne poti za partnerje, artikle in njihove dobaviteljeve identitete,
 prejeme ter uporabniške vrste dokumentov. `mikrofix_office_client.py` pred vsakim
 poslovnim pošiljanjem trajno shrani nespremenljiv ukaz. Digitalne priloge so

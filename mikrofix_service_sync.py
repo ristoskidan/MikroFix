@@ -10,6 +10,7 @@ import hashlib
 import mimetypes
 import sqlite3
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from mikrofix_sync_contracts import (
     SyncOperationEnvelope,
     validated_create_service_order_payload,
     validated_technical_completion_payload,
+    validated_receive_physical_stock_return_payload,
 )
 from mikrofix_sync_store import (
     enqueue_sync_operation,
@@ -24,6 +26,7 @@ from mikrofix_sync_store import (
     next_device_sequence,
 )
 from mikrofix_device_signing import sign_operation
+from mikrofix_service_returns import service_returnable_parts
 
 
 def _with_offline_actor_signature(
@@ -260,4 +263,54 @@ def enqueue_service_technical_completion(
         "UPDATE service_orders SET origin_device_id=?,sync_state='PENDING' WHERE id=?",
         (str(device_id), int(service_order_id)),
     )
+    return envelope
+
+
+def enqueue_removed_service_part(
+    connection: sqlite3.Connection, *, service_order_uuid: str,
+    invoice_id: str, invoice_line_id: str, lot_id: str, quantity: str,
+    condition_note: str, actor_id: str, device_id: str,
+    actor_user_id: str = "", actor_authorization_version: int = 0,
+    signing_private_key=None, return_id: str | None = None,
+) -> SyncOperationEnvelope:
+    """Persist a physical removal using only a previously synced exact LOT."""
+    ensure_sync_store_schema(connection)
+    match = next((part for part in service_returnable_parts(
+        connection, service_order_uuid=service_order_uuid
+    ) if (
+        part.invoice_uuid == str(invoice_id)
+        and part.invoice_line_uuid == str(invoice_line_id)
+        and part.lot_uuid == str(lot_id)
+    )), None)
+    if match is None:
+        raise ValueError(
+            "Odstranjeni del nima sinhronizirane povezave na račun, vrstico in LOT."
+        )
+    requested = Decimal(str(quantity))
+    if requested <= 0 or requested > match.removable_quantity:
+        raise ValueError(
+            "Odstranjena količina presega še dovoljeno količino tega vgrajenega dela."
+        )
+    identity = str(return_id or uuid4())
+    payload = validated_receive_physical_stock_return_payload({
+        "return_id": identity, "invoice_id": str(invoice_id),
+        "invoice_line_id": str(invoice_line_id), "lot_id": str(lot_id),
+        "quantity": str(quantity), "condition_note": str(condition_note or ""),
+        "confirmed": True,
+    })
+    envelope = SyncOperationEnvelope(
+        operation_id=str(uuid4()), operation_type="ReceiveRemovedServicePart",
+        aggregate_type="STOCK_RETURN", aggregate_id=identity,
+        expected_version=0, actor_id=str(actor_id or "SERVICE"),
+        device_id=str(device_id),
+        device_sequence=next_device_sequence(connection, device_id),
+        occurred_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+        payload=payload,
+    )
+    envelope = _with_offline_actor_signature(
+        envelope, actor_user_id=actor_user_id,
+        actor_authorization_version=actor_authorization_version,
+        signing_private_key=signing_private_key,
+    )
+    enqueue_sync_operation(connection, envelope)
     return envelope

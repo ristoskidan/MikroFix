@@ -60,6 +60,7 @@ from .operations import (
     DirectSalePreparationError, ProtocolConflict,
     _inventory_updates_for_articles, prepare_direct_sale_quote, process_operation,
 )
+from .stock_returns import all_service_returnable_parts
 from .schemas import (
     ChangePage,
     ChangeOwnPinRequest,
@@ -1079,6 +1080,26 @@ def create_app(
             "complete": True,
             "snapshot_sequence": snapshot_sequence,
             "inventory_updates": updates,
+        }
+
+    @app.get(
+        "/v1/service/returnable-parts-snapshot",
+        dependencies=[Depends(service_identity)],
+    )
+    def complete_service_returnable_parts_snapshot() -> dict:
+        """Bootstrap exact invoice-line/LOT removal eligibility."""
+        with database_engine.connect().execution_options(
+            isolation_level="REPEATABLE READ"
+        ) as connection:
+            with connection.begin():
+                snapshot_sequence = int(connection.execute(select(
+                    func.coalesce(func.max(change_feed.c.central_sequence), 0)
+                )).scalar_one())
+                parts = all_service_returnable_parts(connection)
+        return {
+            "complete": True,
+            "snapshot_sequence": snapshot_sequence,
+            "returnable_parts": parts,
         }
 
     @app.get(

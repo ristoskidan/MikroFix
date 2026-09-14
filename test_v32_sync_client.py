@@ -50,6 +50,12 @@ class FlakyTransport:
             "inventory_updates": [],
         }
 
+    def pull_service_return_snapshot(self):
+        return {
+            "complete": True, "snapshot_sequence": 0,
+            "returnable_parts": [],
+        }
+
 
 class MalformedChangeTransport(FlakyTransport):
     def __init__(self):
@@ -91,6 +97,20 @@ class StockConflictTransport(FlakyTransport):
             "error_code": "OFFLINE_STOCK_CONFLICT",
             "error_message": "Insufficient stock.",
             "result": {"conflicting_barcodes": ["BAR-1"]},
+        }
+
+
+class RemovedPartConflictTransport(StockConflictTransport):
+    def submit_operation(self, operation):
+        return {
+            "operation_id": operation["operation_id"],
+            "result_code": "REJECTED",
+            "aggregate_id": operation["aggregate_id"],
+            "aggregate_version": None,
+            "central_sequence": None,
+            "error_code": "PHYSICAL_RETURN_EXCEEDS_SOLD_QUANTITY",
+            "error_message": "The exact invoice line and LOT are no longer eligible.",
+            "result": {},
         }
 
 
@@ -226,6 +246,25 @@ class SyncClientTests(unittest.TestCase):
             timeout=9.0,
         )
 
+    @patch("requests.get")
+    def test_requests_transport_pulls_complete_service_return_bootstrap(self, get):
+        response = Mock(status_code=200)
+        response.json.return_value = {
+            "complete": True, "snapshot_sequence": 4,
+            "returnable_parts": [],
+        }
+        get.return_value = response
+        transport = RequestsSyncTransport(
+            "https://central.example/", "test-token", timeout_seconds=9
+        )
+        snapshot = transport.pull_service_return_snapshot()
+        self.assertIs(snapshot["complete"], True)
+        get.assert_called_once_with(
+            "https://central.example/v1/service/returnable-parts-snapshot",
+            headers={"Authorization": "Bearer test-token"},
+            timeout=9.0,
+        )
+
     def test_lost_response_retries_the_same_operation_identity(self):
         transport = FlakyTransport()
         first = synchronize_once(self.connection, transport, DEVICE_ID)
@@ -354,6 +393,57 @@ class SyncClientTests(unittest.TestCase):
             self.assertEqual(order["row_version"], 8)
             self.assertEqual(order["central_version"], 1)
             self.assertEqual(order["sync_state"], "SYNCED")
+        finally:
+            connection.close()
+
+    def test_rejected_removed_part_creates_a_visible_exact_lot_conflict(self):
+        connection = sqlite3.connect(":memory:")
+        try:
+            ensure_sync_store_schema(connection)
+            invoice_id = str(uuid4())
+            invoice_line_id = str(uuid4())
+            lot_id = str(uuid4())
+            item = SyncOperationEnvelope(
+                operation_id=str(uuid4()),
+                operation_type="ReceiveRemovedServicePart",
+                aggregate_type="STOCK_RETURN",
+                aggregate_id=str(uuid4()),
+                expected_version=0,
+                actor_id="serviser",
+                device_id=DEVICE_ID,
+                device_sequence=1,
+                occurred_at="2026-09-12T08:00:00+02:00",
+                payload={
+                    "return_id": str(uuid4()),
+                    "invoice_id": invoice_id,
+                    "invoice_line_id": invoice_line_id,
+                    "lot_id": lot_id,
+                    "quantity": "1.0000",
+                    "condition_note": "Odstranjeno",
+                    "confirmed": True,
+                },
+            )
+            enqueue_sync_operation(connection, item)
+            connection.commit()
+
+            result = synchronize_once(
+                connection, RemovedPartConflictTransport(), DEVICE_ID
+            )
+
+            self.assertFalse(result.interrupted)
+            conflicts = list_open_sync_conflicts(connection)
+            self.assertEqual(len(conflicts), 1)
+            self.assertEqual(
+                conflicts[0]["conflict_type"], "SERVICE_PART_RETURN_CONFLICT"
+            )
+            detail = conflicts[0]["details"][0]
+            self.assertEqual(detail["invoice_id"], invoice_id)
+            self.assertEqual(detail["invoice_line_id"], invoice_line_id)
+            self.assertEqual(detail["lot_id"], lot_id)
+            self.assertEqual(
+                detail["error_code"],
+                "PHYSICAL_RETURN_EXCEEDS_SOLD_QUANTITY",
+            )
         finally:
             connection.close()
 

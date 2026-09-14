@@ -66,6 +66,7 @@ from .models import (
     service_tariffs,
     technical_completions,
 )
+from .stock_returns import service_returnable_parts
 
 
 class ProtocolConflict(RuntimeError):
@@ -1191,6 +1192,12 @@ def _issue_service_invoice(
                 "invoice_id": str(invoice_uuid),
                 "invoice_number": invoice_number,
                 "status": "BILLING_COMPLETED",
+                "returnable_parts": service_returnable_parts(
+                    connection,
+                    connection.execute(select(invoices).where(
+                        invoices.c.invoice_uuid == invoice_uuid
+                    )).one(),
+                ),
             },
             occurred_at=now.isoformat(timespec="seconds"),
         )
@@ -1907,6 +1914,8 @@ def _receive_physical_stock_return(
         "quantity": format(quantity, "f"), "receipt_source": receipt_source,
         "status": "QUARANTINED", "stock_effect": "NONE",
     }
+    if invoice.source_type == "SERVICE":
+        event_payload["service_order_id"] = str(invoice.service_order_uuid)
     sequence = _publish_change(
         connection, event_type="PhysicalStockReturnQuarantined",
         aggregate_type="STOCK_RETURN", aggregate_uuid=return_uuid,

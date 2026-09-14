@@ -9,8 +9,10 @@ from typing import Any, Protocol
 
 from mikrofix_sync_store import (
     acknowledge_operation,
+    apply_complete_service_return_snapshot,
     apply_complete_inventory_snapshot,
     apply_inventory_updates,
+    apply_service_part_return_updates,
     advance_central_checkpoint,
     central_checkpoint,
     inventory_snapshot_complete,
@@ -21,6 +23,7 @@ from mikrofix_sync_store import (
     record_sync_conflict,
     record_incoming_change,
     recover_stale_sending,
+    service_return_snapshot_complete,
 )
 
 
@@ -30,6 +33,8 @@ class SyncTransport(Protocol):
     def pull_changes(self, *, after: int, limit: int) -> dict[str, Any]: ...
 
     def pull_inventory_snapshot(self) -> dict[str, Any]: ...
+
+    def pull_service_return_snapshot(self) -> dict[str, Any]: ...
 
 
 class SyncTransportError(RuntimeError):
@@ -103,6 +108,19 @@ class RequestsSyncTransport:
         try:
             response = requests.get(
                 f"{self.base_url}/v1/service/inventory-snapshot",
+                headers=self.headers,
+                timeout=self.timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise SyncTransportError(str(exc)) from exc
+        return self._json_response(response)
+
+    def pull_service_return_snapshot(self) -> dict[str, Any]:
+        import requests
+
+        try:
+            response = requests.get(
+                f"{self.base_url}/v1/service/returnable-parts-snapshot",
                 headers=self.headers,
                 timeout=self.timeout_seconds,
             )
@@ -228,6 +246,32 @@ def synchronize_once(
                         conflict_type="STOCK_SYNC_CONFLICT",
                         details=details,
                     )
+                if (
+                    receipt.get("result_code") == "REJECTED"
+                    and row.get("operation_type") == "ReceiveRemovedServicePart"
+                ):
+                    payload = json.loads(row["payload_json"])
+                    record_sync_conflict(
+                        connection,
+                        row["operation_id"],
+                        conflict_type="SERVICE_PART_RETURN_CONFLICT",
+                        details=[
+                            {
+                                "invoice_id": str(payload.get("invoice_id") or ""),
+                                "invoice_line_id": str(
+                                    payload.get("invoice_line_id") or ""
+                                ),
+                                "lot_id": str(payload.get("lot_id") or ""),
+                                "quantity": str(payload.get("quantity") or ""),
+                                "error_code": str(
+                                    receipt.get("error_code") or ""
+                                ),
+                                "error_message": str(
+                                    receipt.get("error_message") or ""
+                                ),
+                            }
+                        ],
+                    )
             sent += 1
         except Exception as exc:
             with connection:
@@ -265,6 +309,11 @@ def synchronize_once(
                         connection, central_sequence=sequence,
                         payload=change["payload"],
                     )
+                    apply_service_part_return_updates(
+                        connection, central_sequence=sequence,
+                        event_type=str(change["event_type"]),
+                        payload=change["payload"],
+                    )
                     connection.execute(
                         "UPDATE sync_inbox_v32 SET applied_at=? "
                         "WHERE central_sequence=?",
@@ -297,6 +346,32 @@ def synchronize_once(
                     connection,
                     snapshot_sequence=int(snapshot["snapshot_sequence"]),
                     inventory_updates=updates,
+                )
+        except Exception:
+            interrupted = True
+
+    if not interrupted and not service_return_snapshot_complete(connection):
+        try:
+            pull_snapshot = getattr(transport, "pull_service_return_snapshot", None)
+            if pull_snapshot is None:
+                raise SyncTransportError(
+                    "Transport does not support the complete Service return bootstrap."
+                )
+            snapshot = pull_snapshot()
+            if snapshot.get("complete") is not True:
+                raise SyncTransportError(
+                    "Service return bootstrap is not marked complete."
+                )
+            parts = snapshot.get("returnable_parts")
+            if not isinstance(parts, list):
+                raise SyncTransportError(
+                    "Service return bootstrap has no valid part list."
+                )
+            with connection:
+                apply_complete_service_return_snapshot(
+                    connection,
+                    snapshot_sequence=int(snapshot["snapshot_sequence"]),
+                    returnable_parts=parts,
                 )
         except Exception:
             interrupted = True

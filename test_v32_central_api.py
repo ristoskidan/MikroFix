@@ -940,6 +940,14 @@ class CentralApiIntegrationTests(unittest.TestCase):
                 response.raise_for_status()
                 return response.json()
 
+            def pull_service_return_snapshot(self):
+                response = self.client.get(
+                    "/v1/service/returnable-parts-snapshot",
+                    headers=self.headers,
+                )
+                response.raise_for_status()
+                return response.json()
+
         connection = sqlite3.connect(":memory:")
         try:
             ensure_sync_store_schema(connection)
@@ -2874,6 +2882,31 @@ class CentralApiIntegrationTests(unittest.TestCase):
             allocation = connection.execute(select(
                 service_stock_allocations
             )).one()
+        page = self.client.get(
+            "/v1/sync/changes?after=0", headers=self.headers
+        ).json()
+        billing_event = next(
+            change for change in page["changes"]
+            if change["event_type"] == "ServiceBillingCompleted"
+            and change["aggregate_id"] == order["aggregate_id"]
+        )
+        returnable = billing_event["payload"]["returnable_parts"]
+        self.assertEqual(len(returnable), 1)
+        self.assertEqual(returnable[0]["invoice_id"], invoice_id)
+        self.assertEqual(
+            returnable[0]["invoice_line_id"], str(allocation.service_line_uuid)
+        )
+        self.assertEqual(returnable[0]["lot_id"], str(allocation.lot_uuid))
+        self.assertEqual(returnable[0]["removable_quantity"], "1.0000")
+        snapshot = self.client.get(
+            "/v1/service/returnable-parts-snapshot", headers=self.headers
+        ).json()
+        self.assertIs(snapshot["complete"], True)
+        matching_snapshot_rows = [
+            item for item in snapshot["returnable_parts"]
+            if item["invoice_id"] == invoice_id
+        ]
+        self.assertEqual(matching_snapshot_rows, returnable)
         return_id = uuid4()
         operation = self.receive_stock_return_operation(
             return_id, invoice_id, allocation.service_line_uuid,
@@ -2886,6 +2919,9 @@ class CentralApiIntegrationTests(unittest.TestCase):
             "/v1/sync/operations", json=operation, headers=self.headers
         ).json()
         self.assertEqual(response["result_code"], "ACCEPTED", response)
+        self.assertEqual(
+            response["result"]["service_order_id"], order["aggregate_id"]
+        )
         referred = self.client.post(
             "/v1/sync/operations",
             json=self.resolve_stock_return_operation(
