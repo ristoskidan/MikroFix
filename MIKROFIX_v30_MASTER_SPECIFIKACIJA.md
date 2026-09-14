@@ -1,5 +1,12 @@
 # MikroFIX v30 - glavna specifikacija poteka
 
+> **ZGODOVINSKI DELOVNI DOKUMENT — NE UPORABLJAJ KOT EDINI VIR ZA NOVO DELO.**
+> Ta datoteka vsebuje več generacij pravil, med katerimi so tudi neposredna
+> nasprotja. Od 14. 9. 2026 je glavna vstopna točka
+> [`MIKROFIX_DOKUMENTACIJA.md`](MIKROFIX_DOKUMENTACIJA.md), veljavna poslovna
+> pravila pa so v [`docs/kanon/01_POSLOVNA_PRAVILA.md`](docs/kanon/01_POSLOVNA_PRAVILA.md).
+> Oznaka `POTRJENO` v tej zgodovinski datoteki ne prevlada nad kanonično mapo.
+
 Status: potrjena osnova in aktivna ločena izvedba v30-dev  
 Vir: pregled uporabnika z dne 29. 8. 2026 in priložena testna PDF izpisa  
 Pravilo: v29 ostaja nespremenjena testna osnova. Potrjeni sklopi se izvajajo samo v ločeni v30-dev kopiji.
