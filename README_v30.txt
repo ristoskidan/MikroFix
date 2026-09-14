@@ -71,7 +71,8 @@ FURS TEST:
   list z IMEI, nespremenljivim kontrolnim odtisom in potrditvijo podpisa;
 - celotni storno ohrani prvotni racun in ustvari nov zaporedni storno dokument;
   povezanega servisa ne odpre samodejno, reklamacija pa je vedno nov povezan
-  primer; servis se lahko ponovno odpre samo z locenim izrecnim ukazom;
+  primer; servis se lahko ponovno odpre samo z locenim izrecnim ukazom; storno
+  sam ne vrne zaloge, saj je za to potreben locen potrjen fizicni prevzem;
 - gotovinski in razdeljeni racun zahtevata odprt blagajniski dnevnik za izbrani
   prostor/napravo; cisti TRR ne zahteva odprte gotovinske blagajne;
 - odprtje shrani cas, operaterja in zacetno stanje; gotovinski racuni, storni,
