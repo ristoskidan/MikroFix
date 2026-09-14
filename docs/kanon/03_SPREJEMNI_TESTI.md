@@ -53,11 +53,16 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 ## 6. Offline sinhronizacija
 
 - Servis offline odpre in zaključi več nalogov v določenem vrstnem redu.
+- Vsak dobi enolično oznako oblike `MF-OFF-<POSTAJA>-<LETO>-<ZAPOREDJE>` in
+  UUID; po sinhronizaciji dobi še centralno številko, lokalna oznaka pa ostane
+  iskalna in revizijska referenca.
 - Po ponovni povezavi se vsak dogodek prenese natanko enkrat in v pravilnem
   zaporedju.
 - Prekinitev odgovora strežnika in ponovitev ne podvojita dogodka.
 - Konflikt zadnjega kosa ustvari `SYNC_CONFLICT`, brez centralnega osnutka.
 - Po sinhronizaciji lokalni pogled prejme novejši centralni posnetek.
+- Ponovni zagon brez povezave vedno zahteva prijavo. Veljaven podpisan
+  uporabniški posnetek jo omogoči, potekel ali spremenjen posnetek pa jo zavrne.
 
 ## 7. Blagajna
 
@@ -69,6 +74,9 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 - Prazna neposredna prodaja se lahko opusti brez številke.
 - Servis z vrednostjo `0,00 EUR` se ne more dokončno zapreti brez povezanega
   računa.
+- Ničelni račun ohrani pozitivni vrstici storitve in materiala ter ustvari
+  ustrezni negativni izravnalni vrstici; seštevek je `0,00 EUR`, zaloga pa se ob
+  negativni vrstici ne poveča.
 
 ## 8. Inventura
 
@@ -86,8 +94,19 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 - Javni dokumenti ne vsebujejo PIN-a, gesla, nabavne cene, marže ali interne
   opombe.
 - Dolga besedila in več strani ne prekrijejo postavk, zneskov ali podpisov.
+- Fotografija ni samodejno izbrisana pred potekom najdaljše pripadajoče
+  garancije. Po poteku jo nadzorovana retencija izbriše, razen ob reklamaciji,
+  sporu ali drugem veljavnem zadržanju.
 
-## 10. FURS in izredni postopki
+## 10. Reklamacije
+
+- Reklamacije ni mogoče ustvariti brez izbire konkretnega izdanega računa.
+- Reklamacija za servisni račun prek računa kaže isti servis in pripadajoči
+  garancijski list.
+- Storno in nadomestni račun ohranita celotno verigo povezav in ne ustvarita
+  nepovezane reklamacije.
+
+## 11. FURS in izredni postopki
 
 - Dvojni klik ne ustvari druge številke, ZOI ali FURS dogodka.
 - Nejasen odgovor se usklajuje z natančno istim podpisanim zahtevkom.
@@ -97,4 +116,3 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
   nobene dovoljene elektronske poti.
 - Produkcijski preizkus se izvede šele po novi prijavi naprav in podpisu novega
   internega akta.
-

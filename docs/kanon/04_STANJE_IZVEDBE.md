@@ -21,6 +21,29 @@ preverjeno v kodi. Oznaka `izvedeno` brez testa ne pomeni `sprejeto`.
   vseh testov. Zato noben spodnji produkcijsko občutljiv sklop ni razglašen za
   pripravljen samo na podlagi starega poročila.
 
+## Preverjeno 14. 9. 2026 po konsolidaciji
+
+- Dodani so trije ločeni produkcijski procesni vhodi:
+  `zazeni_mikrofix_service.py`, `zazeni_mikrofix_office.py` in
+  `zazeni_mikrofix_blagajna.py`.
+- Vsak vhod zažene svoj proces; Servis uporablja namenski način
+  `--service-only`, Office in Blagajna pa se zaženeta samostojno in zato ne
+  podedujeta seje Servisa.
+- Samostojni Servis po prijavi odpre servisni delovni prostor, vsebuje tudi
+  Odkup, ne kaže skupnega menija in ne ponuja gumba za odpiranje Blagajne.
+- Neposredno ustvarjanje reklamacije iz izbranega servisa je v samostojnem
+  Servisu skrito, dokler ni izveden novi tok, ki se začne iz računa.
+- Ciljani testi ločenih vhodov, sveže prijave, odjave, servisnega časa in
+  tehničnega zaključka so uspešni.
+
+To še ni končna razdelitev podatkovnih poti. Samostojna Office in Blagajna
+trenutno še vsebujeta stari lokalni način; njuno obvezno centralno prijavo in
+API-only zapisovanje je treba preveriti ter dokončati pred produkcijo.
+
+Pri identifikaciji nepodprte naprave trenutni obrazec omogoča fizični prepis,
+vendar v poslovni zapis še ne shrani dovolj natančnega vira odčitka. Pred
+sprejemom je treba dodati vir, uporabnika in čas preverjanja ter pogodbeni test.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:
@@ -31,13 +54,14 @@ Kodo je treba primerjati po tem vrstnem redu:
 4. tehnični zaključek brez odpiranja Blagajne;
 5. enkratna poraba delov in sinhronizacijski konflikt;
 6. zaklenjen servisni osnutek ter ločena neposredna prodaja;
-7. ničelni servisni račun;
+7. ničelni servisni račun z izravnalnimi negativnimi vrsticami;
 8. polna inventura in stanje vseh Service postaj;
-9. centralne priloge in nova strategija varnostnih kopij;
-10. FURS matrika, novi interni akt in produkcijski sprejemni test.
+9. reklamacija, ki se vedno začne iz računa in ohrani povezave;
+10. centralne priloge, garancijsko vezana retencija in nova strategija
+    varnostnih kopij;
+11. FURS matrika, novi interni akt in produkcijski sprejemni test.
 
 ## Produkcijski status
 
 Produkcijska izdaja ostaja blokirana, dokler niso opravljeni kanonični sprejemni
 testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
-

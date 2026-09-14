@@ -64,9 +64,10 @@ postavitev in se je ne prepisuje.
 
 ### Ničelni, garancijski in brezplačni račun
 
-Poslovno je odločeno, da se vsak servis zaključi z računom. Natančno besedilo,
-postavke in davčno/računovodsko obravnavo ničelnega računa je treba pred
-produkcijo potrditi z računovodjo oziroma uradnim virom.
+Poslovno je odločeno, da se vsak servis zaključi z računom in da ničelni račun
+ohrani pozitivne obračunske vrstice ter enake negativne izravnalne vrstice.
+Pred produkcijo je treba pri računovodji oziroma uradnem viru potrditi samo še
+davčno/računovodsko obravnavo tako oblikovanega dokumenta.
 
 ### Garancija in neskladnost
 
@@ -82,11 +83,20 @@ primerom, ko je dejansko treba uporabiti VKR.
 
 ## 5. Odprte izvedbene podrobnosti
 
-- uporabniku vidna oblika lokalne offline oznake servisa;
 - čas veljavnosti lokalnega podpisanega uporabniškega posnetka za offline
-  prijavo;
-- končna retencija servisnih fotografij;
-- natančen uporabniški tok reklamacije;
-- besedilo in postavke računa `0,00 EUR`;
+  prijavo; arhitekturno priporočilo je največ sedem dni od zadnje uspešne
+  centralne prijave, odločitev uporabnika še ni potrjena;
+- podrobnosti uporabniškega toka reklamacije po obvezni izbiri računa;
 - dokončna FURS matrika delovnih postaj in programov.
 
+## 6. Dodatno potrjeno 14. 9. 2026
+
+- ničelni servisni račun vsebuje pozitivne obračunske vrstice in enake negativne
+  izravnalne vrstice; negativne vrstice ne vračajo zaloge;
+- začasna offline oznaka je
+  `MF-OFF-<POSTAJA>-<LETO>-<ZAPOREDJE>`, centralna številka pa se dodeli ob
+  sinhronizaciji;
+- servisne fotografije se hranijo najmanj do poteka najdaljše pripadajoče
+  garancije in dlje samo ob veljavnem zadržanju;
+- reklamacija se vedno odpre iz izdanega računa; račun ohrani povezavo s
+  servisom in, kadar obstaja, garancijskim listom.

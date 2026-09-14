@@ -156,6 +156,7 @@ from mikrofix_attachments import (
 )
 
 APP_DIR = Path(__file__).resolve().parent
+SERVICE_ONLY_APP = "--service-only" in sys.argv
 RUNTIME = load_runtime(APP_DIR)
 DB = RUNTIME.db_path("service")
 AUTH_DB = RUNTIME.db_path("auth")
@@ -530,7 +531,10 @@ def logout_and_lock():
             root.state("zoomed")
         except Exception:
             pass
-        show_start_menu()
+        if SERVICE_ONLY_APP:
+            show_service_application()
+        else:
+            show_start_menu()
 
 
 def note_user_activity(_event=None):
@@ -3202,6 +3206,13 @@ def clear_form(keep_device=True):
 
 def prepare_invoice_for_service(service_id=None):
     """Odpri blagajno iste prijavljene seje z računom iz servisa."""
+    if SERVICE_ONLY_APP:
+        messagebox.showinfo(
+            "MikroFIX Servis",
+            "Osnutek prevzame blagajnik v samostojnem programu MikroFIX Blagajna.",
+            parent=root,
+        )
+        return
     target_id = service_id or last_saved_service_id or selected_service_history_id()
     if not target_id:
         messagebox.showwarning(
@@ -7260,7 +7271,7 @@ def run_login_or_close_safely(*, username_only=None, verify_central=True):
 def on_close():
     if service_time_blocks_application_close():
         return
-    if ACTIVE_SCREEN != "MENU":
+    if not SERVICE_ONLY_APP and ACTIVE_SCREEN != "MENU":
         show_start_menu()
         return
     backup_db("close")
@@ -7708,15 +7719,37 @@ def open_workflow_module(tab, intent):
     )
     for known_tab in all_tabs:
         top_nb.tab(known_tab, state="hidden")
-    visible_tabs = (
-        (tab_device_top, tab_intake_top, tab_service_top, tab_claims_top)
-        if intent == "SERVICE"
-        else (tab_device_top, tab_buyback_top)
-    )
+    if SERVICE_ONLY_APP:
+        visible_tabs = (
+            tab_device_top, tab_intake_top, tab_service_top, tab_buyback_top,
+        )
+    else:
+        visible_tabs = (
+            (tab_device_top, tab_intake_top, tab_service_top, tab_claims_top)
+            if intent == "SERVICE"
+            else (tab_device_top, tab_buyback_top)
+        )
     for visible_tab in visible_tabs:
         top_nb.tab(visible_tab, state="normal")
     update_workflow_lock()
     top_nb.select(tab)
+
+
+def show_service_application():
+    """Enter the standalone Service workspace after its own fresh login."""
+    if not AUTH_SESSION.has_permission(PERMISSION_SERVICE):
+        audit_event("PERMISSION_DENIED", "application", "SERVICE")
+        messagebox.showwarning(
+            "MikroFIX Servis - dostop zavrnjen",
+            "Prijavljeni uporabnik nima dovoljenja za program Servis.",
+            parent=root,
+        )
+        end_application_user_session("PERMISSION_DENIED_EXIT")
+        root.destroy()
+        return False
+    open_workflow_module(tab_service_top, "SERVICE")
+    show_service_history()
+    return True
 
 
 def show_start_menu():
@@ -8017,10 +8050,11 @@ ttk.Button(
     command=logout_and_lock
 ).pack(side="right", padx=(0,8), pady=(6,0))
 
-ttk.Button(
-    brand, text="ZAČETNI MENI",
-    command=show_start_menu,
-).pack(side="right", padx=(0,8), pady=(6,0))
+if not SERVICE_ONLY_APP:
+    ttk.Button(
+        brand, text="ZAČETNI MENI",
+        command=show_start_menu,
+    ).pack(side="right", padx=(0,8), pady=(6,0))
 
 ttk.Button(
     brand, text="SPREMENI PIN",
@@ -9354,11 +9388,12 @@ ttk.Button(
     command=open_service_from_history
 ).pack(side="left", padx=(8,0))
 
-ttk.Button(
-    service_home_actions,
-    text="REKLAMACIJA ZA IZBRANI SERVIS",
-    command=open_claim_for_service_from_history
-).pack(side="left", padx=(8,0))
+if not SERVICE_ONLY_APP:
+    ttk.Button(
+        service_home_actions,
+        text="REKLAMACIJA ZA IZBRANI SERVIS",
+        command=open_claim_for_service_from_history
+    ).pack(side="left", padx=(8,0))
 
 ttk.Button(
     service_home_actions,
@@ -9366,18 +9401,19 @@ ttk.Button(
     command=print_selected_service
 ).pack(side="left", padx=(8,0))
 
-ttk.Button(
-    service_home_actions,
-    text="ODPRI BLAGAJNO ZA IZBRANI SERVIS",
-    command=lambda: prepare_invoice_for_service(selected_service_history_id()),
-    style="Blue.TButton",
-).pack(side="left", padx=(8,0))
+if not SERVICE_ONLY_APP:
+    ttk.Button(
+        service_home_actions,
+        text="ODPRI BLAGAJNO ZA IZBRANI SERVIS",
+        command=lambda: prepare_invoice_for_service(selected_service_history_id()),
+        style="Blue.TButton",
+    ).pack(side="left", padx=(8,0))
 
-ttk.Button(
-    service_home_actions,
-    text="ODPRI BLAGAJNO ZA ZADNJI SERVIS",
-    command=lambda: prepare_invoice_for_service(last_saved_service_id),
-).pack(side="left", padx=(8,0))
+    ttk.Button(
+        service_home_actions,
+        text="ODPRI BLAGAJNO ZA ZADNJI SERVIS",
+        command=lambda: prepare_invoice_for_service(last_saved_service_id),
+    ).pack(side="left", padx=(8,0))
 
 service_custody_actions = tk.Frame(service_home, bg=PANEL)
 service_custody_actions.pack(fill="x", pady=(6, 0))
@@ -9498,11 +9534,12 @@ ttk.Button(
     command=start_service_buyback_offer,
 ).pack(side="left", padx=(8,0))
 
-ttk.Button(
-    service_actions,
-    text="ODPRI BLAGAJNO ZA ZADNJI SERVIS",
-    command=prepare_invoice_for_service,
-).pack(side="right")
+if not SERVICE_ONLY_APP:
+    ttk.Button(
+        service_actions,
+        text="ODPRI BLAGAJNO ZA ZADNJI SERVIS",
+        command=prepare_invoice_for_service,
+    ).pack(side="right")
 
 service_frame = ttk.LabelFrame(
     service_editor, text="NOV SERVISNI LIST", padding=10
@@ -9958,5 +9995,8 @@ elif run_login_or_close_safely():
         root.state("zoomed")
     except Exception:
         pass
-    root.after(180, show_start_menu)
+    root.after(
+        180,
+        show_service_application if SERVICE_ONLY_APP else show_start_menu,
+    )
     root.mainloop()

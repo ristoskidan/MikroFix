@@ -40,6 +40,14 @@ Vsak občutljiv ukaz vsebuje najmanj:
 Pri računu se dodatno shrani registrirana blagajniška/FURS identiteta. Isti
 `operation_id` z isto vsebino vrne isti rezultat; z drugo vsebino se zavrne.
 
+Offline uporabniška seja uporablja strežniško podpisan posnetek identitete,
+vlog in dovoljenj. Posnetek ne nadomesti prijave: ob vsakem zagonu Servisa mora
+uporabnik ponovno vnesti svoje poverilnice. Priporočena začetna veljavnost
+posnetka je največ sedem dni od zadnje uspešne centralne prijave. Po poteku je
+offline prijava blokirana do ponovne centralne prijave. Končna dolžina je še
+poslovna odločitev; odvzem uporabnika ali pravic se na že odklopljeni postaji
+lahko uveljavi najpozneje ob poteku posnetka.
+
 ## 4. Stanja servisa
 
 Stanje se ne tlači v en sam stolpec:
@@ -84,6 +92,8 @@ ponovitev ter nato ustvari zalogovne dogodke in centralni servisni osnutek.
 
 Centralno potrjeni dokumenti in priloge imajo centralno avtoritativno hrambo.
 Offline Servis lahko hrani lokalne delovne kopije do potrjene sinhronizacije.
+Centralna hramba fotografij vsebuje datum poteka hrambe, izračunan iz najdaljše
+pripadajoče garancije, in pravno/poslovno zadržanje, ki avtomatski izbris ustavi.
 
 Varnostne kopije so ločene na:
 
@@ -115,4 +125,3 @@ poslovnega dogodka, ki bi vplival na zamrznjeno stanje.
 - Združljivostni adapter je začasen in ne postane trajna druga poslovna baza.
 - Nov odjemalec se priključi šele, ko so njegovi pogodbeni testi z API-jem
   uspešni.
-

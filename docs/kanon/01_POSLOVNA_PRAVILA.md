@@ -145,8 +145,17 @@ prodaja vedno nastane na ločenem računu.
   nezaračunano obravnavo.
 - Prazno neposredno prodajno košarico je mogoče opustiti. Servisnega obračuna ni
   mogoče opustiti samo zato, ker je znesek `0,00 EUR`.
-- Natančna računovodska in davčna vsebina ničelnega servisnega računa je pred
-  produkcijo še predmet potrditve računovodje oziroma uradnega pojasnila.
+- Ničelni servisni račun ni prazen. Vsebuje prvotne obračunske vrstice in enake
+  izravnalne vrstice z negativno količino. Potrjeni primer je:
+
+  - `Zaslon OLED iPhone 11`, količina `1`, znesek `110,00 EUR`;
+  - `T2`, količina `1`, znesek `30,00 EUR`;
+  - `Zaslon OLED iPhone 11`, količina `-1`, znesek `-110,00 EUR`;
+  - `T2`, količina `-1`, znesek `-30,00 EUR`.
+
+  Skupni znesek je `0,00 EUR`. Negativni vrstici sta sledljiva razloga za
+  izravnavo istega dela in storitve; ne pomenita vračila kosa v zalogo in ne
+  ustvarita pozitivne zaloge.
 
 ## 9. Offline Servis in sinhronizacija
 
@@ -155,6 +164,12 @@ prodaja vedno nastane na ločenem računu.
 - Brez povezave lahko odpre, vodi in tehnično zaključi poljubno število nalogov.
 - Vsak nalog in dogodek imata UUID, identiteto izvorne namestitve in lokalno
   zaporedje.
+- Offline nalog do prve potrjene centralne sinhronizacije uporablja začasno
+  uporabniško oznako `MF-OFF-<POSTAJA>-<LETO>-<ZAPOREDJE>`, na primer
+  `MF-OFF-MFT01-2026-000001`. Oznaka je nespremenljiva lokalna referenca in se
+  hrani tudi po sinhronizaciji. Strežnik ob prvem sprejemu dodeli končno
+  centralno številko `MF-<LETO>-<ZAPOREDJE>`; začasna oznaka se nikoli ne
+  preštevilči ali ponovno uporabi.
 - Dogodki se pošiljajo po vrstnem redu in z isto identiteto operacije.
 - Ponovitev iste operacije ne podvoji naloga, porabe ali osnutka.
 - Če je centralna količina ob sinhronizaciji nezadostna, se nič ne knjiži delno,
@@ -179,6 +194,10 @@ Blagajna in Office v prvi fazi nimata offline zapisovalnega načina.
 ## 11. Fotografije in identifikatorji na dokumentih
 
 - Servisne fotografije niso obvezne.
+- Fotografije posameznega servisa se hranijo sorazmerno z garancijo: najmanj do
+  poteka najdaljše pripadajoče garancije za ta servis. Po poteku se odstranijo v
+  nadzorovanem postopku, če niso predmet odprte reklamacije, spora, zakonske
+  hrambe ali izrecnega zadržanja.
 - Fotografije osebnih dokumentov niso dovoljene.
 - Interna evidenca hrani polne dovoljene identifikatorje.
 - Na garancijskem listu konkretne naprave je prikazan polni IMEI.
@@ -187,7 +206,20 @@ Blagajna in Office v prvi fazi nimata offline zapisovalnega načina.
 - PIN-i, gesla, nabavne cene, marže in interne opombe se ne izpisujejo na javne
   dokumente.
 
-## 12. FURS, poslovni prostori in VKR
+## 12. Reklamacije in povezave dokumentov
+
+- Reklamacija se vedno odpre iz konkretnega izdanega računa in mora hraniti
+  njegovo nespremenljivo identiteto.
+- Če račun izvira iz servisa, je povezan tudi s konkretnim servisnim nalogom.
+- Kadar za predmet računa obstaja garancijski list, je račun povezan tudi s
+  konkretnim garancijskim listom; reklamacija lahko prek računa nedvoumno najde
+  oba dokumenta.
+- Garancijski list brez pripadajočega računa ni samostojna vstopna točka za
+  reklamacijo.
+- Storno ali nadomestni račun ne sme pretrgati revizijske povezave do prvotnega
+  računa, servisa, garancijskega lista in reklamacije.
+
+## 13. FURS, poslovni prostori in VKR
 
 - Ciljna tehnična rešitev centralizira namensko digitalno potrdilo, uradno
   številčenje, podpisovanje zahtevka in komunikacijo s FURS.
@@ -203,7 +235,7 @@ Blagajna in Office v prvi fazi nimata offline zapisovalnega načina.
 - Natančen izredni postopek in roki se pred produkcijo ponovno preverijo pri
   uradnem viru.
 
-## 13. Vidna in notranja stanja servisa
+## 14. Vidna in notranja stanja servisa
 
 Glavno poslovno stanje ostane preprosto:
 
@@ -213,4 +245,3 @@ Glavno poslovno stanje ostane preprosto:
 Tehnična faza in stanje sinhronizacije sta ločena podatka. Zato so
 `Pripravljeno za obračun`, `Čaka sinhronizacijo` in `SYNC_CONFLICT` vidna
 pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
-

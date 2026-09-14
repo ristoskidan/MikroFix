@@ -1,4 +1,4 @@
-"""Production launcher that refuses startup until every release gate passes."""
+"""Production launcher for one explicitly selected MikroFIX application."""
 
 from __future__ import annotations
 
@@ -25,7 +25,17 @@ def prepare_production_environment() -> None:
     os.environ["MIKROFIX_CONFIG"] = str(PRODUCTION_CONFIG)
 
 
-def main() -> int:
+APPLICATION_TARGETS = {
+    "service": ("mikrofix.py", "--service-only"),
+    "servis": ("mikrofix.py", "--service-only"),
+    "office": ("mikrofix_office.py",),
+    "cashier": ("mikrofix_office.py", "--new-invoice"),
+    "blagajna": ("mikrofix_office.py", "--new-invoice"),
+}
+
+
+def launch(application: str) -> int:
+    """Run one application in its own process after all production gates pass."""
     prepare_production_environment()
     try:
         results = collect()
@@ -46,9 +56,21 @@ def main() -> int:
         )
         root.destroy()
         return 1
+    target = APPLICATION_TARGETS.get(str(application or "").strip().lower())
+    if target is None:
+        raise ValueError(f"Neznan program MikroFIX: {application}")
     python = APP_DIR / ".venv/bin/python"
-    os.execv(str(python), [str(python), str(APP_DIR / "mikrofix.py")])
+    script, *arguments = target
+    os.execv(
+        str(python),
+        [str(python), str(APP_DIR / script), *arguments],
+    )
     return 0
+
+
+def main() -> int:
+    application = sys.argv[1] if len(sys.argv) > 1 else "service"
+    return launch(application)
 
 
 if __name__ == "__main__":
