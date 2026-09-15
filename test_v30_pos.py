@@ -829,6 +829,64 @@ class V30PosTests(unittest.TestCase):
         self.assertIn("24.36 EUR", text)
         self.assertNotIn("requested_discount", text)
 
+    def test_zero_balance_central_pdf_keeps_positive_and_negative_lines(self):
+        invoice = {
+            "invoice_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "invoice_number": "MFD-PIS-9", "total_amount": "0.00",
+            "furs_eor": "", "snapshot": {
+                "issued_at": "2026-09-15T10:00:00+02:00",
+                "premise_id": "MFD", "electronic_device_id": "PIS",
+                "billing_customer": {"source": "SERVICE_CUSTOMER", "name": "Test"},
+                "payments": [], "settlement_mode": "ZERO_BALANCE",
+                "tax_note": "",
+                "lines": [
+                    {
+                        "line_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                        "line_kind": "ARTICLE", "description": "Zaslon OLED iPhone 11",
+                        "quantity": "1", "base_unit_price": "110.00",
+                        "applied_discount_percent": "0", "unit_price": "110.00",
+                        "line_total": "110.00",
+                    },
+                    {
+                        "line_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                        "line_kind": "SERVICE", "description": "T2",
+                        "quantity": "1", "base_unit_price": "30.00",
+                        "applied_discount_percent": "0", "unit_price": "30.00",
+                        "line_total": "30.00",
+                    },
+                    {
+                        "line_id": "dddddddd-dddd-dddd-dddd-dddddddddddd",
+                        "line_kind": "ARTICLE", "description": "Zaslon OLED iPhone 11",
+                        "quantity": "-1", "base_unit_price": "110.00",
+                        "applied_discount_percent": "0", "unit_price": "110.00",
+                        "line_total": "-110.00", "adjustment_kind": "ZERO_BALANCE",
+                        "adjustment_of_line_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    },
+                    {
+                        "line_id": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+                        "line_kind": "SERVICE", "description": "T2",
+                        "quantity": "-1", "base_unit_price": "30.00",
+                        "applied_discount_percent": "0", "unit_price": "30.00",
+                        "line_total": "-30.00", "adjustment_kind": "ZERO_BALANCE",
+                        "adjustment_of_line_id": "cccccccc-cccc-cccc-cccc-cccccccccccc",
+                    },
+                ],
+            },
+        }
+        a4, _receipt = generate_central_invoice_pdfs(
+            invoice=invoice, output_dir=Path(self.tmp.name) / "central-zero-pdf",
+            company={"legal_name": "MikroFix"}, test_mode=True,
+        )
+        from pypdf import PdfReader
+        text = "\n".join(
+            page.extract_text() or "" for page in PdfReader(str(a4)).pages
+        )
+        self.assertEqual(text.count("Zaslon OLED iPhone 11"), 2)
+        self.assertEqual(text.count("T2"), 2)
+        self.assertIn("-110.00", text)
+        self.assertIn("-30.00", text)
+        self.assertIn("SKUPAJ: 0.00 EUR", text)
+
     def test_central_reversal_pdf_is_clearly_labelled_and_references_original(self):
         invoice = {
             "invoice_id": "33333333-3333-3333-3333-333333333333",

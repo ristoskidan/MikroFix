@@ -35,6 +35,11 @@ class PaymentMethod(StrEnum):
     BANK_TRANSFER = "BANK_TRANSFER"
 
 
+class ServiceInvoiceMode(StrEnum):
+    STANDARD = "STANDARD"
+    ZERO_BALANCE = "ZERO_BALANCE"
+
+
 class PartnerVerificationSource(StrEnum):
     MANUAL_REVIEW = "MANUAL_REVIEW"
     AJPES_REVIEW = "AJPES_REVIEW"
@@ -732,6 +737,13 @@ class TechnicalCompletionContract:
             raise ContractError("work_summary is required.")
         if not self.billing_lines:
             raise ContractError("billing_lines requires at least one work line.")
+        invoice_line_ids = [
+            line.line_id for line in (*self.billing_lines, *self.parts)
+        ]
+        if len(invoice_line_ids) != len(set(invoice_line_ids)):
+            raise ContractError(
+                "billing_lines and parts must have globally unique line_id values."
+            )
 
     def payload(self) -> dict[str, Any]:
         return asdict(self)
@@ -839,6 +851,7 @@ class IssueServiceInvoiceContract:
     electronic_device_id: str
     billing_customer: BillingCustomerSelectionContract
     payments: tuple[PaymentContract, ...]
+    settlement_mode: str = ServiceInvoiceMode.STANDARD.value
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -858,8 +871,18 @@ class IssueServiceInvoiceContract:
             if not all(character.isalnum() or character in {"-", "_"} for character in cleaned):
                 raise ContractError(f"{field_name} contains unsupported characters.")
             object.__setattr__(self, field_name, cleaned)
-        if not self.payments:
-            raise ContractError("payments requires at least one payment.")
+        try:
+            settlement_mode = ServiceInvoiceMode(
+                str(self.settlement_mode or "").strip().upper()
+            )
+        except ValueError as exc:
+            raise ContractError("settlement_mode is not supported.") from exc
+        object.__setattr__(self, "settlement_mode", settlement_mode.value)
+        if settlement_mode is ServiceInvoiceMode.ZERO_BALANCE:
+            if self.payments:
+                raise ContractError("ZERO_BALANCE must not contain payments.")
+        elif not self.payments:
+            raise ContractError("STANDARD requires at least one payment.")
         methods = [payment.method for payment in self.payments]
         if len(methods) != len(set(methods)):
             raise ContractError("each payment method may occur only once.")
@@ -885,7 +908,7 @@ def validated_issue_service_invoice_payload(
     raw = dict(value)
     allowed = {
         "draft_id", "expected_version", "premise_id",
-        "electronic_device_id", "billing_customer", "payments",
+        "electronic_device_id", "billing_customer", "payments", "settlement_mode",
     }
     unexpected = sorted(set(raw) - allowed)
     if unexpected:

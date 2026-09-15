@@ -120,6 +120,22 @@ class CentralCashierWorkflowTests(unittest.TestCase):
         self.assertEqual(result.invoice["invoice_number"], "MFD-PIS-1")
         self.assertEqual(workflow.unresolved_commands(), [])
 
+    def test_zero_balance_choice_is_durable_and_contains_no_payments_or_lines(self):
+        transport = FakeCashierTransport()
+        workflow = self.workflow(transport)
+        workflow.issue_service_invoice(
+            draft_id=str(uuid4()), premise_id="MFD",
+            electronic_device_id="PIS",
+            billing_customer={"source": "SERVICE_CUSTOMER", "confirmed": True},
+            payments=[], settlement_mode="ZERO_BALANCE",
+        )
+
+        operation = transport.submissions[0]
+        self.assertEqual(operation["operation_type"], "IssueServiceInvoice")
+        self.assertEqual(operation["payload"]["settlement_mode"], "ZERO_BALANCE")
+        self.assertEqual(operation["payload"]["payments"], [])
+        self.assertNotIn("lines", operation["payload"])
+
     def test_uncertain_command_remains_retriable_with_the_same_identity(self):
         transport = FakeCashierTransport("UNCERTAIN")
         workflow = self.workflow(transport)

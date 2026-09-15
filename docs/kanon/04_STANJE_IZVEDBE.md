@@ -1,6 +1,6 @@
 # MikroFIX — stanje izvedbe
 
-Datum dokumenta: 14. 9. 2026
+Datum dokumenta: 15. 9. 2026
 
 ## Namen
 
@@ -79,6 +79,15 @@ stenski zapis; če bi dal negativen rezultat, se izračun izrecno blokira namest
 tihega popravka na nič. Strežniško označevanje nenavadnega razmerja med
 stenskim in izmerjenim časom še ni izvedeno.
 
+Centralna pogodba in strežnik podpirata način `ZERO_BALANCE` samo pri izdaji
+servisnega osnutka v Blagajni. Odjemalec ne pošilja vrstic in ne pošilja
+plačila; strežnik iz zaklenjenih pozitivnih vrstic deterministično izdela
+negativne izravnalne pare. Integracijski test preverja ničelni seštevek,
+nespremenjeno zalogo, obračunski zaključek servisa in identičen rezultat
+ponovitve iste operacije. Uporabniška izbira ter predogled tega načina v
+Blagajni še nista izvedena, zato funkcija skozi uporabniški vmesnik še ni
+dostopna.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:
@@ -103,9 +112,10 @@ testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
 
 ## Lokalna pregledovalca
 
-Za lokalna modela je določen kratek izpeljan kanonski kontekst v
-`06_LOKALNI_AGENTI.md`. Modela sta samo pregledovalca: nimata izvajalnih pravic,
+Lokalna modela ob posvetu prejmeta celoten urejeni kanonski sklop 01–06;
+`06_LOKALNI_AGENTI.md` dodatno določa njune meje. Modela sta samo pregledovalca:
+nimata izvajalnih pravic,
 ne določata poslovnih pravil in njun odgovor ni dokaz izvedbe. Mistral 7B je
-predviden za običajni omejeni tehnični pregled, GPT-OSS 20B pa za občasno drugo
-skeptično mnenje. Codex ostane nadzornik, izbere najmanjši potreben izsek
-konteksta ter sam preveri rezultat.
+predviden za običajni tehnični pregled, GPT-OSS 20B pa za občasno drugo
+skeptično mnenje. Codex ostane nadzornik, doda najmanjši potreben nalogi
+specifičen izsek ter sam preveri rezultat.

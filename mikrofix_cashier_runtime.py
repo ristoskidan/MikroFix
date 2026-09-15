@@ -143,6 +143,7 @@ class CentralCashierWorkflow:
         electronic_device_id: str,
         billing_customer: Mapping[str, Any],
         payments: list[dict[str, Any]],
+        settlement_mode: str = "STANDARD",
         operation_id: str | None = None,
     ) -> CentralInvoiceResult:
         self._assert_command_order(operation_id)
@@ -153,6 +154,7 @@ class CentralCashierWorkflow:
             "electronic_device_id": electronic_device_id,
             "billing_customer": dict(billing_customer),
             "payments": payments,
+            "settlement_mode": settlement_mode,
         }, operation_id=operation_id)
         return self._dispatch_invoice(identity)
 

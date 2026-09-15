@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Connection, delete, func, select, update
@@ -568,7 +568,9 @@ def _invoice_total(draft_payload: dict) -> Decimal:
     return total.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _service_invoice_public_lines(draft_payload: dict) -> list[dict]:
+def _service_invoice_public_lines(
+    draft_payload: dict, *, zero_balance: bool = False,
+) -> list[dict]:
     """Normalize the immutable Service draft for printing without repricing."""
     result = []
     for line in draft_payload.get("billing_lines", ()):
@@ -607,7 +609,22 @@ def _service_invoice_public_lines(draft_payload: dict) -> list[dict]:
                 ".2f",
             ),
         })
-    return result
+    if not zero_balance:
+        return result
+
+    balancing = []
+    for line in result:
+        quantity = Decimal(str(line["quantity"]))
+        line_total = Decimal(str(line["line_total"]))
+        balancing.append({
+            **line,
+            "line_id": str(uuid5(UUID(line["line_id"]), "MIKROFIX-ZERO-BALANCE")),
+            "quantity": format(-quantity, "f"),
+            "line_total": format(-line_total, ".2f"),
+            "adjustment_kind": "ZERO_BALANCE",
+            "adjustment_of_line_id": line["line_id"],
+        })
+    return result + balancing
 
 
 def _billing_customer_snapshot(
@@ -1034,7 +1051,9 @@ def _issue_service_invoice(
         )
 
     draft_payload = dict(draft.payload_json)
-    total = _invoice_total(draft_payload)
+    draft_total = _invoice_total(draft_payload)
+    zero_balance = payload["settlement_mode"] == "ZERO_BALANCE"
+    total = Decimal("0.00") if zero_balance else draft_total
     payments = list(payload["payments"])
     payment_total = sum(
         (Decimal(str(payment["amount"])) for payment in payments), Decimal("0")
@@ -1091,9 +1110,12 @@ def _issue_service_invoice(
         "invoice_number": invoice_number,
         "draft": draft_payload,
         "source_type": "SERVICE",
-        "lines": _service_invoice_public_lines(draft_payload),
+        "lines": _service_invoice_public_lines(
+            draft_payload, zero_balance=zero_balance,
+        ),
         "billing_customer": billing_customer,
         "payments": payments,
+        "settlement_mode": payload["settlement_mode"],
         "total_amount": f"{total:.2f}",
         "currency": "EUR",
         "tax_mode": "NON_VAT",

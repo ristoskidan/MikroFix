@@ -2,9 +2,9 @@
 
 Status: **izpeljan povzetek, ne samostojen vir poslovnih pravil**
 
-Ta kratki dokument se pošlje lokalnemu pregledovalcu ob vsaki nalogi. Ob
-neskladju vedno prevladajo `01_POSLOVNA_PRAVILA.md`, nato
-`02_CILJNA_ARHITEKTURA.md` in izrecna zadnja odločitev uporabnika.
+Ta dokument se lokalnemu pregledovalcu pošlje skupaj s celotnim urejenim
+kanonskim sklopom 01–05. Ob neskladju vedno prevladajo izrecna zadnja odločitev
+uporabnika, `01_POSLOVNA_PRAVILA.md` in nato `02_CILJNA_ARHITEKTURA.md`.
 
 ## Stalna dejstva
 

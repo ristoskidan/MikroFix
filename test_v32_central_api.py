@@ -216,7 +216,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
 
     def issue_operation(
         self, draft_id, *, sequence, method="BANK_TRANSFER", confirmed=False,
-        actor="blagajnik-a", device="POS-PC-A",
+        actor="blagajnik-a", device="POS-PC-A", settlement_mode="STANDARD",
     ):
         return {
             "operation_id": str(uuid4()),
@@ -241,7 +241,8 @@ class CentralApiIntegrationTests(unittest.TestCase):
                     "method": method,
                     "amount": "55",
                     "confirmed": confirmed,
-                }],
+                }] if settlement_mode == "STANDARD" else [],
+                "settlement_mode": settlement_mode,
             },
             "contract_version": 1,
         }
@@ -1598,6 +1599,49 @@ class CentralApiIntegrationTests(unittest.TestCase):
             self.assertEqual(connection.execute(
                 select(func.count()).select_from(invoice_number_sequences)
             ).scalar_one(), 0)
+
+    def test_zero_balance_invoice_is_server_generated_and_does_not_restore_stock(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import inventory_items, invoices, service_orders
+
+        _, draft_id = self.prepared_draft(sequence=95, barcode="ZERO-PART")
+        request = self.issue_operation(
+            draft_id, sequence=97, settlement_mode="ZERO_BALANCE"
+        )
+        response = self.client.post(
+            "/v1/sync/operations", json=request, headers=self.headers
+        ).json()
+        repeated = self.client.post(
+            "/v1/sync/operations", json=request, headers=self.headers
+        ).json()
+
+        self.assertEqual(response["result_code"], "ACCEPTED")
+        self.assertEqual(repeated, response)
+        self.assertEqual(response["result"]["total_amount"], "0.00")
+        with self.engine.connect() as connection:
+            invoice = connection.execute(select(invoices)).one()
+            service_order = connection.execute(select(service_orders)).one()
+            stock = connection.execute(select(
+                inventory_items.c.quantity_on_hand
+            ).where(inventory_items.c.barcode == "ZERO-PART")).scalar_one()
+        snapshot = dict(invoice.snapshot_json)
+        self.assertEqual(snapshot["settlement_mode"], "ZERO_BALANCE")
+        self.assertEqual(snapshot["payments"], [])
+        self.assertEqual(invoice.status, "ISSUED")
+        self.assertEqual(invoice.payment_status, "PAID")
+        self.assertEqual(service_order.payload_json["technical_status"], "BILLING_COMPLETED")
+        self.assertEqual(len(snapshot["lines"]), 4)
+        positive, negative = snapshot["lines"][:2], snapshot["lines"][2:]
+        self.assertEqual([line["quantity"] for line in positive], ["1", "1"])
+        self.assertEqual([line["quantity"] for line in negative], ["-1", "-1"])
+        self.assertEqual([line["line_total"] for line in positive], ["30.00", "25.00"])
+        self.assertEqual([line["line_total"] for line in negative], ["-30.00", "-25.00"])
+        self.assertEqual(
+            [line["adjustment_of_line_id"] for line in negative],
+            [line["line_id"] for line in positive],
+        )
+        self.assertEqual(len({line["line_id"] for line in snapshot["lines"]}), 4)
+        self.assertEqual(stock, Decimal("0"))
 
     def test_uncertain_furs_retry_keeps_one_invoice_and_closes_only_on_confirmation(self):
         from sqlalchemy import func, select

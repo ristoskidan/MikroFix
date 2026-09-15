@@ -17,6 +17,7 @@ from mikrofix_sync_contracts import (
     SettleUnpaidBankInvoiceContract,
     StornoInvoiceContract,
     PaymentContract,
+    ServiceInvoiceMode,
     ServicePartContract,
     ServiceTestContract,
     SyncOperationEnvelope,
@@ -281,6 +282,25 @@ class SyncContractTests(unittest.TestCase):
                 quantity="0", unit_price="1", barcode="BAR-1",
             )
 
+    def test_completion_rejects_line_id_collision_across_labor_and_parts(self):
+        shared_line_id = str(uuid4())
+        with self.assertRaisesRegex(ContractError, "globally unique line_id"):
+            TechnicalCompletionContract(
+                service_order_id=str(uuid4()), expected_version=1,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                billing_disposition="INVOICE_REQUIRED",
+                work_summary="Repair", findings="Test",
+                billing_lines=(BillingLineContract(
+                    line_id=shared_line_id, line_kind="T1", description="Delo",
+                    quantity="1", unit_price="30",
+                ),),
+                parts=(ServicePartContract(
+                    line_id=shared_line_id, article_id=str(uuid4()),
+                    description="Del", quantity="1", unit_price="25",
+                    barcode="PART-1",
+                ),),
+            )
+
     def test_invoice_issue_contract_contains_choices_but_no_invoice_content(self):
         draft_id = str(uuid4())
         issue = IssueServiceInvoiceContract(
@@ -298,6 +318,41 @@ class SyncContractTests(unittest.TestCase):
             validated_issue_service_invoice_payload({
                 **issue.payload(),
                 "discount": "10",
+            })
+
+    def test_zero_balance_service_invoice_has_no_payment_or_client_lines(self):
+        payload = validated_issue_service_invoice_payload({
+            "draft_id": str(uuid4()),
+            "expected_version": 1,
+            "premise_id": "MFD",
+            "electronic_device_id": "PIS",
+            "billing_customer": {
+                "source": "SERVICE_CUSTOMER", "confirmed": True,
+            },
+            "payments": [],
+            "settlement_mode": ServiceInvoiceMode.ZERO_BALANCE.value,
+        })
+        self.assertEqual(payload["settlement_mode"], "ZERO_BALANCE")
+        self.assertEqual(payload["payments"], ())
+        self.assertNotIn("lines", payload)
+
+    def test_standard_and_zero_balance_payment_rules_do_not_mix(self):
+        common = {
+            "draft_id": str(uuid4()), "expected_version": 1,
+            "premise_id": "MFD", "electronic_device_id": "PIS",
+            "billing_customer": {
+                "source": "SERVICE_CUSTOMER", "confirmed": True,
+            },
+        }
+        with self.assertRaisesRegex(ContractError, "STANDARD requires"):
+            validated_issue_service_invoice_payload({**common, "payments": []})
+        with self.assertRaisesRegex(ContractError, "must not contain payments"):
+            validated_issue_service_invoice_payload({
+                **common,
+                "payments": [{
+                    "method": "CASH", "amount": "1", "confirmed": True,
+                }],
+                "settlement_mode": "ZERO_BALANCE",
             })
 
     def test_direct_sale_allows_walk_in_but_server_owns_price_and_lots(self):
