@@ -100,3 +100,12 @@ Kodo je treba primerjati po tem vrstnem redu:
 
 Produkcijska izdaja ostaja blokirana, dokler niso opravljeni kanonični sprejemni
 testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
+
+## Lokalna pregledovalca
+
+Za lokalna modela je določen kratek izpeljan kanonski kontekst v
+`06_LOKALNI_AGENTI.md`. Modela sta samo pregledovalca: nimata izvajalnih pravic,
+ne določata poslovnih pravil in njun odgovor ni dokaz izvedbe. Mistral 7B je
+predviden za običajni omejeni tehnični pregled, GPT-OSS 20B pa za občasno drugo
+skeptično mnenje. Codex ostane nadzornik, izbere najmanjši potreben izsek
+konteksta ter sam preveri rezultat.

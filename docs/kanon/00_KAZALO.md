@@ -36,6 +36,8 @@ dvema dokumentoma, je to odstopanje izvedbe.
   kodi in kaj še ni;
 - [`05_ZGODOVINA_ODLOCITEV.md`](05_ZGODOVINA_ODLOCITEV.md) — izvor, nadomeščene
   odločitve in nerešene pravno-davčne točke.
+- [`06_LOKALNI_AGENTI.md`](06_LOKALNI_AGENTI.md) — kratek, izpeljan kontekst in
+  varnostna pogodba za lokalna pregledovalca; ne določa novih poslovnih pravil.
 
 ## Obvezno pravilo za nadaljnje delo
 
@@ -43,4 +45,3 @@ Pred spremembo kode se določi prizadeto poslovno pravilo in sprejemni test.
 Če pravilo manjka ali sta dva zapisa v konfliktu, se najprej popravi ta
 dokumentacija. Stare oznake `POTRJENO` v zgodovinskem Manifestu same po sebi ne
 prevladajo nad to mapo.
-
