@@ -1135,6 +1135,64 @@ class WorkflowTests(unittest.TestCase):
             60,
         )
 
+    def test_running_timer_uses_monotonic_time_across_application_restart(self) -> None:
+        order_id, _ = create_service_order(self.connection, sample_service_order())
+        wall_start = datetime(2026, 9, 15, 10, 0, 0).astimezone()
+        with (
+            patch("mikrofix_workflows._now_local", return_value=wall_start),
+            patch("mikrofix_workflows._system_boot_id", return_value="boot-a"),
+            patch("mikrofix_workflows.time.monotonic_ns", return_value=1_000_000_000),
+        ):
+            start_service_work_timer(self.connection, order_id)
+
+        with (
+            patch("mikrofix_workflows._system_boot_id", return_value="boot-a"),
+            patch(
+                "mikrofix_workflows.time.monotonic_ns",
+                return_value=66_000_000_000,
+            ),
+        ):
+            snapshot = service_work_timer_snapshot(self.connection, order_id)
+
+        self.assertEqual(snapshot["total_seconds"], 65)
+        self.assertEqual(snapshot["elapsed_minutes"], 2)
+
+        wall_moved_back = datetime(2026, 9, 15, 9, 0, 0).astimezone()
+        with (
+            patch("mikrofix_workflows._now_local", return_value=wall_moved_back),
+            patch("mikrofix_workflows._system_boot_id", return_value="boot-a"),
+            patch(
+                "mikrofix_workflows.time.monotonic_ns",
+                return_value=66_000_000_000,
+            ),
+        ):
+            self.assertEqual(pause_service_work_timer(self.connection, order_id), 2)
+
+        elapsed = self.connection.execute(
+            "SELECT elapsed_seconds FROM service_work_sessions "
+            "WHERE service_order_id=?",
+            (order_id,),
+        ).fetchone()[0]
+        self.assertEqual(elapsed, 65)
+
+    def test_reboot_fallback_rejects_clock_rollback_instead_of_hiding_it(self) -> None:
+        order_id, _ = create_service_order(self.connection, sample_service_order())
+        wall_start = datetime(2026, 9, 15, 10, 0, 0).astimezone()
+        with (
+            patch("mikrofix_workflows._now_local", return_value=wall_start),
+            patch("mikrofix_workflows._system_boot_id", return_value="boot-a"),
+            patch("mikrofix_workflows.time.monotonic_ns", return_value=1_000_000_000),
+        ):
+            start_service_work_timer(self.connection, order_id)
+
+        wall_moved_back = datetime(2026, 9, 15, 9, 59, 0).astimezone()
+        with (
+            patch("mikrofix_workflows._now_local", return_value=wall_moved_back),
+            patch("mikrofix_workflows._system_boot_id", return_value="boot-b"),
+        ):
+            with self.assertRaisesRegex(WorkflowError, "Sistemska ura"):
+                service_work_timer_snapshot(self.connection, order_id)
+
     def test_other_device_uses_confirmed_physical_identity(self) -> None:
         payload = sample_service_order()
         payload.update({

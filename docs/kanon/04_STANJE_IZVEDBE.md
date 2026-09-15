@@ -67,6 +67,15 @@ Blagajne; uporabnik mora program znova zagnati in se ponovno prijaviti. Če se j
 ostane v lokalnem dnevniku za ponovitev po novi prijavi. HTTP 403 aplikacije ne
 odjavi samodejno, ker lahko pomeni zavrnitev posamezne poslovne pravice.
 
+Servisni interval pri dejanskem zagonu shrani stenski začetek, monotoni začetek
+in identiteto zagona operacijskega sistema. Med istim zagonom računalnika se
+trajanje zato meri z monotono uro in ostane pravilno tudi po ponovnem zagonu
+aplikacije ali premiku sistemske ure. Zaključeni interval ohrani izračunane
+sekunde. Po ponovnem zagonu računalnika se za še odprti interval uporabi trajni
+stenski zapis; če bi dal negativen rezultat, se izračun izrecno blokira namesto
+tihega popravka na nič. Strežniško označevanje nenavadnega razmerja med
+stenskim in izmerjenim časom še ni izvedeno.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:

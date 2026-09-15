@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,55 @@ PAYOUT_LABELS = {
     "CASH": "Gotovina (največ 420,00 EUR)",
 }
 CASH_BUYBACK_LIMIT_EUR = 420.0
+
+
+def _now_local() -> datetime:
+    return datetime.now().astimezone()
+
+
+def _system_boot_id() -> str:
+    """Return a stable OS-boot identity where the production platform exposes it."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(
+            encoding="ascii"
+        ).strip()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _wall_elapsed_seconds(started: datetime, ended: datetime) -> int:
+    if started.tzinfo is None and ended.tzinfo is not None:
+        started = started.astimezone()
+    elif started.tzinfo is not None and ended.tzinfo is None:
+        ended = ended.astimezone()
+    seconds = int((ended - started).total_seconds())
+    if seconds < 0:
+        raise WorkflowError(
+            "Sistemska ura je pred začetkom servisnega intervala. "
+            "Časa ni dovoljeno tiho popraviti; preveri uro računalnika."
+        )
+    return seconds
+
+
+def _running_interval_seconds(
+    started_at: str,
+    *,
+    at: datetime | None,
+    monotonic_started_ns: int | None,
+    monotonic_boot_id: str,
+) -> int:
+    started = datetime.fromisoformat(str(started_at))
+    if at is None and monotonic_started_ns is not None:
+        current_boot_id = _system_boot_id()
+        if current_boot_id and current_boot_id == str(monotonic_boot_id or ""):
+            current_ns = time.monotonic_ns()
+            if current_ns < int(monotonic_started_ns):
+                raise WorkflowError(
+                    "Monotona ura servisnega intervala ni veljavna. "
+                    "Časovnik je treba preveriti."
+                )
+            return int((current_ns - int(monotonic_started_ns)) // 1_000_000_000)
+    return _wall_elapsed_seconds(started, at or _now_local())
 
 
 def _label(mapping: dict[str, str], value: Any) -> str:
@@ -195,6 +245,8 @@ def ensure_workflow_schema(connection) -> None:
     for name, ddl in {
         "origin_device_id": "TEXT NOT NULL DEFAULT 'LOCAL-UNREGISTERED'",
         "sync_state": "TEXT NOT NULL DEFAULT 'LOCAL_ONLY'",
+        "monotonic_started_ns": "INTEGER",
+        "monotonic_boot_id": "TEXT",
     }.items():
         if name not in work_session_columns:
             connection.execute(
@@ -719,15 +771,22 @@ def start_service_work_timer(
     ).fetchone()
     if running:
         return datetime.fromisoformat(str(running[0]))
-    started = started_at or datetime.now()
+    started = started_at or _now_local()
+    monotonic_started_ns = None
+    monotonic_boot_id = ""
+    if started_at is None:
+        monotonic_started_ns = time.monotonic_ns()
+        monotonic_boot_id = _system_boot_id()
     connection.execute(
         "INSERT INTO service_work_sessions("
-        "service_order_id,started_at,started_by,interval_uuid,origin_device_id,sync_state"
-        ") VALUES(?,?,?,?,?,?)",
+        "service_order_id,started_at,started_by,interval_uuid,origin_device_id,"
+        "sync_state,monotonic_started_ns,monotonic_boot_id"
+        ") VALUES(?,?,?,?,?,?,?,?)",
         (
             int(order_id), started.isoformat(timespec="seconds"),
             str(operator_code or ""), str(uuid4()),
             str(origin_device_id or "LOCAL-UNREGISTERED"), "LOCAL_ONLY",
+            monotonic_started_ns, monotonic_boot_id,
         ),
     )
     connection.execute(
@@ -753,18 +812,25 @@ def service_work_timer_snapshot(
     if not order:
         raise WorkflowError("Servisnega naročila ni mogoče najti.")
     rows = connection.execute(
-        "SELECT id,started_at,ended_at,COALESCE(elapsed_seconds,0) "
+        "SELECT id,started_at,ended_at,COALESCE(elapsed_seconds,0),"
+        "monotonic_started_ns,COALESCE(monotonic_boot_id,'') "
         "FROM service_work_sessions WHERE service_order_id=? ORDER BY id",
         (int(order_id),),
     ).fetchall()
-    now = at or datetime.now()
     stored_seconds = sum(int(row[3] or 0) for row in rows if row[2])
     running_row = next((row for row in reversed(rows) if not row[2]), None)
     running_seconds = 0
     running_started_at = None
     if running_row:
         running_started_at = datetime.fromisoformat(str(running_row[1]))
-        running_seconds = max(0, int((now - running_started_at).total_seconds()))
+        running_seconds = _running_interval_seconds(
+            str(running_row[1]),
+            at=at,
+            monotonic_started_ns=(
+                int(running_row[4]) if running_row[4] is not None else None
+            ),
+            monotonic_boot_id=str(running_row[5] or ""),
+        )
     total_seconds = stored_seconds + running_seconds
     return {
         "status": str(order[0]),
@@ -794,25 +860,33 @@ def list_running_service_work_sessions(connection) -> list[dict[str, Any]]:
                    WHERE done.service_order_id=s.service_order_id
                      AND done.ended_at IS NOT NULL
                ),0),
-               s.started_by
+               s.started_by,s.monotonic_started_ns,
+               COALESCE(s.monotonic_boot_id,'')
         FROM service_work_sessions s
         JOIN service_orders o ON o.id=s.service_order_id
         WHERE s.ended_at IS NULL
         ORDER BY s.started_at,s.id
         """
     ).fetchall()
-    return [
-        {
+    result = []
+    for row in rows:
+        running_seconds = _running_interval_seconds(
+            str(row[4]),
+            at=None,
+            monotonic_started_ns=(int(row[7]) if row[7] is not None else None),
+            monotonic_boot_id=str(row[8] or ""),
+        )
+        result.append({
             "service_order_id": int(row[0]),
             "order_no": str(row[1] or row[0]),
             "customer_name": str(row[2] or "").strip(),
             "device_model": str(row[3] or "").strip(),
             "started_at": str(row[4] or "").strip(),
             "stored_seconds": int(row[5] or 0),
+            "total_seconds": int(row[5] or 0) + running_seconds,
             "started_by": str(row[6] or "").strip(),
-        }
-        for row in rows
-    ]
+        })
+    return result
 
 
 def pause_service_work_timer(
@@ -823,16 +897,19 @@ def pause_service_work_timer(
     """Zaključi samo tekoči interval in vrni dosedanji seštevek minut."""
     ensure_workflow_schema(connection)
     row = connection.execute(
-        "SELECT id,started_at FROM service_work_sessions "
+        "SELECT id,started_at,monotonic_started_ns,"
+        "COALESCE(monotonic_boot_id,'') FROM service_work_sessions "
         "WHERE service_order_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
         (int(order_id),),
     ).fetchone()
     if row:
-        ended = ended_at or datetime.now()
-        started = datetime.fromisoformat(str(row[1]))
-        seconds = int((ended - started).total_seconds())
-        if seconds < 0:
-            raise WorkflowError("Čas ustavitve je pred časom začetka.")
+        ended = ended_at or _now_local()
+        seconds = _running_interval_seconds(
+            str(row[1]),
+            at=ended_at,
+            monotonic_started_ns=(int(row[2]) if row[2] is not None else None),
+            monotonic_boot_id=str(row[3] or ""),
+        )
         connection.execute(
             "UPDATE service_work_sessions SET ended_at=?,elapsed_seconds=?,"
             "ended_by=?,stop_reason=? WHERE id=? AND ended_at IS NULL",
@@ -883,14 +960,14 @@ def finish_service_work_timer(
     ).fetchone()[0]
     if not sessions:
         raise WorkflowError("Servis nima veljavnega časa začetka.")
-    ended = ended_at or datetime.now()
     elapsed_minutes = pause_service_work_timer(
-        connection, int(order_id), ended_at=ended,
+        connection, int(order_id), ended_at=ended_at,
         operator_code=operator_code, reason="FINISH", commit=False,
         bump_version=False,
     )
     if elapsed_minutes <= 0:
         raise WorkflowError("Servis nima veljavnega izmerjenega časa.")
+    ended = ended_at or _now_local()
     connection.execute(
         "UPDATE service_orders SET work_ended_at=?,work_elapsed_minutes=?,"
         "row_version=row_version+1,sync_state='LOCAL_ONLY' WHERE id=?",

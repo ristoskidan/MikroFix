@@ -299,6 +299,15 @@ Ker PIN ni shranjen za poznejše samodejno prijavljanje, gumb `PRIJAVA / SYNC`
 po povratku omrežja zahteva PIN istega uporabnika, zamenja morebitno pretečeno
 sejo in takoj zahteva sinhronizacijo.
 
+Servisni čas ni izračunan iz strežniške ure. Lokalni interval shrani stenski
+začetek za revizijo ter monotoni začetek in identiteto zagona Linux sistema za
+trajanje. Monotoni podatek je uporaben tudi po nenadzorovanem ponovnem zagonu
+aplikacije, dokler računalnik ni bil ponovno zagnan. Ob drugačni identiteti
+zagona se uporabi stenski zapis; premik ure, ki bi dal negativen čas, je
+blokiran in prikazan kot napaka. Centralni ukaz vedno pošlje že izračunane
+sekunde, strežnik pa jih ne preračuna. Samodejno strežniško opozorilo za zelo
+veliko odstopanje med stenskima časoma in izmerjenim trajanjem je še odprto.
+
 ## Razvojni priklop Blagajne
 
 Skupno odjemalsko jedro `mikrofix_central_identity.py` podpira pravo spletno

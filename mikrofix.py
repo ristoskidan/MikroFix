@@ -5074,6 +5074,8 @@ def _format_elapsed_seconds(value):
 
 
 def _running_session_elapsed_seconds(session, now=None):
+    if "total_seconds" in session:
+        return max(0, int(session.get("total_seconds") or 0))
     now = now or datetime.now()
     try:
         started = datetime.fromisoformat(str(session.get("started_at") or ""))
