@@ -251,6 +251,7 @@ def run(application_type: str) -> int:
 
     handle = None
     closing = False
+    session_expiry_scheduled = False
 
     def close_application():
         nonlocal handle, closing
@@ -268,6 +269,13 @@ def run(application_type: str) -> int:
                 if root.winfo_exists():
                     root.destroy()
 
+    def on_session_expired():
+        nonlocal session_expiry_scheduled
+        if closing or session_expiry_scheduled:
+            return
+        session_expiry_scheduled = True
+        root.after_idle(close_application)
+
     try:
         if configuration.application_type == "OFFICE":
             handle = build_central_office(
@@ -276,6 +284,7 @@ def run(application_type: str) -> int:
                 actor_id=identity.username,
                 device_id=identity.workstation_code,
                 session=identity_manager.session,
+                on_session_expired=on_session_expired,
             )
             open_central_office(
                 root,
@@ -291,6 +300,7 @@ def run(application_type: str) -> int:
                 actor_id=identity.username,
                 device_id=identity.workstation_code,
                 session=identity_manager.session,
+                on_session_expired=on_session_expired,
             )
             pdf_dir = runtime.office_data_dir / "pdf"
             pdf_dir.mkdir(parents=True, exist_ok=True)

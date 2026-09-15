@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from mikrofix_sync_store import (
     acknowledge_operation,
@@ -41,6 +41,10 @@ class SyncTransportError(RuntimeError):
     """The central result is unavailable or cannot be trusted yet."""
 
 
+class CentralSessionExpired(SyncTransportError):
+    """The server rejected a no-longer-valid central bearer session."""
+
+
 @dataclass(frozen=True, slots=True)
 class SyncRunResult:
     sent: int
@@ -52,16 +56,37 @@ class SyncRunResult:
 class RequestsSyncTransport:
     """Small requests-based adapter; no Tkinter or database dependency."""
 
-    def __init__(self, base_url: str, token: str, *, timeout_seconds: float = 15):
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        *,
+        timeout_seconds: float = 15,
+        on_session_expired: Callable[[], None] | None = None,
+    ):
         self.base_url = str(base_url).rstrip("/")
         self.token = str(token)
         self.timeout_seconds = float(timeout_seconds)
+        self.on_session_expired = on_session_expired
+        self._session_expiry_reported = False
 
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
 
     def _json_response(self, response) -> dict[str, Any]:
+        if response.status_code == 401:
+            if not self._session_expiry_reported:
+                self._session_expiry_reported = True
+                if self.on_session_expired is not None:
+                    try:
+                        self.on_session_expired()
+                    except Exception:
+                        pass
+            raise CentralSessionExpired(
+                "Centralna seja je potekla ali je bila preklicana. "
+                "Program se bo zaklenil; za nadaljevanje ga ponovno zaženi."
+            )
         if response.status_code != 200:
             raise SyncTransportError(
                 f"Central API returned HTTP {response.status_code}."

@@ -6,7 +6,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from mikrofix_cashier_client import RequestsCashierTransport
 from mikrofix_cashier_runtime import CentralCashierWorkflow
@@ -30,6 +30,7 @@ def build_central_cashier(
     *, settings: Mapping[str, Any], office_db: Path | str,
     actor_id: str, device_id: str, token: str | None = None,
     session: CentralSession | None = None,
+    on_session_expired: Callable[[], None] | None = None,
 ) -> CentralCashierHandle | None:
     """Return central mode only when it is explicitly and completely configured.
 
@@ -80,7 +81,11 @@ def build_central_cashier(
     try:
         workflow = CentralCashierWorkflow(
             connection,
-            RequestsCashierTransport(server_url, selected_token),
+            RequestsCashierTransport(
+                server_url,
+                selected_token,
+                on_session_expired=on_session_expired,
+            ),
             actor_id=actor,
             device_id=device,
         )

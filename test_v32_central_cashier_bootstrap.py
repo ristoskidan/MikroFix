@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from mikrofix_central_auth_client import CentralSession
@@ -65,6 +65,7 @@ class CentralCashierBootstrapTests(unittest.TestCase):
             )
 
     def test_production_accepts_matching_central_cashier_session(self):
+        expired = Mock()
         session = CentralSession(
             access_token="cashier-session-token", expires_at="2099-01-01T00:00:00Z",
             user_id=str(uuid4()), user_version=1, username="blagajnik",
@@ -79,8 +80,10 @@ class CentralCashierBootstrapTests(unittest.TestCase):
             },
             office_db=":memory:", actor_id="blagajnik", device_id="POS-1",
             session=session,
+            on_session_expired=expired,
         )
         self.assertEqual(handle.workflow.transport.token, "cashier-session-token")
+        self.assertIs(handle.workflow.transport.on_session_expired, expired)
         handle.close()
 
     def test_central_window_refuses_legacy_local_draft_without_mutating_it(self):

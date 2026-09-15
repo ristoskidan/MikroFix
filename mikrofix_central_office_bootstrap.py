@@ -6,7 +6,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from mikrofix_office_client import RequestsOfficeTransport
 from mikrofix_office_runtime import CentralOfficeWorkflow
@@ -30,6 +30,7 @@ def build_central_office(
     *, settings: Mapping[str, Any], office_db: Path | str,
     actor_id: str, device_id: str, token: str | None = None,
     session: CentralSession | None = None,
+    on_session_expired: Callable[[], None] | None = None,
 ) -> CentralOfficeHandle | None:
     """Build central Office only from an explicit complete configuration."""
     server_url = str((settings.get("database") or {}).get("server_url") or "").strip()
@@ -76,7 +77,11 @@ def build_central_office(
     try:
         workflow = CentralOfficeWorkflow(
             connection,
-            RequestsOfficeTransport(server_url, selected_token),
+            RequestsOfficeTransport(
+                server_url,
+                selected_token,
+                on_session_expired=on_session_expired,
+            ),
             actor_id=actor,
             device_id=device,
         )

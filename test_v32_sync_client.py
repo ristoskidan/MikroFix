@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from mikrofix_sync_client import (
+    CentralSessionExpired,
     RequestsSyncTransport,
     SyncTransportError,
     synchronize_once,
@@ -19,6 +20,36 @@ from mikrofix_workflows import create_service_order, ensure_workflow_schema, get
 
 
 DEVICE_ID = "SERVICE-PC-TEST"
+
+
+class RequestsSyncTransportSessionTests(unittest.TestCase):
+    def test_http_401_reports_expiry_once_and_raises_specific_error(self):
+        expired = Mock()
+        response = Mock(status_code=401)
+        transport = RequestsSyncTransport(
+            "https://central.example",
+            "expired-token",
+            on_session_expired=expired,
+        )
+
+        with self.assertRaisesRegex(CentralSessionExpired, "seja je potekla"):
+            transport._json_response(response)
+        with self.assertRaises(CentralSessionExpired):
+            transport._json_response(response)
+
+        expired.assert_called_once_with()
+
+    def test_http_403_does_not_report_session_expiry(self):
+        expired = Mock()
+        response = Mock(status_code=403)
+        transport = RequestsSyncTransport(
+            "https://central.example", "token", on_session_expired=expired
+        )
+
+        with self.assertRaisesRegex(SyncTransportError, "HTTP 403"):
+            transport._json_response(response)
+
+        expired.assert_not_called()
 
 
 class FlakyTransport:

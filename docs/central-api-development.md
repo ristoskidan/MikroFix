@@ -322,8 +322,12 @@ export MIKROFIX_CASHIER_WORKSTATION_SECRET='<skrivnost blagajniške postaje>'
 Vrednosti morajo ustrezati vnaprej registriranima centralnima postajama in se
 ne zapisujejo v nastavitve ali Git. Vsak zagon pokaže novo prijavo, zahteva
 prisilno menjavo prvega PIN-a, če tako določi strežnik, ob zaprtju pa najprej
-pozabi žeton in centralno sejo poskusi preklicati. Še odprta sta ročni
-end-to-end preizkus in uporabniku jasno obvestilo ob poteku seje med delom.
+pozabi žeton in centralno sejo poskusi preklicati. HTTP 401 pomeni poteklo ali
+preklicano sejo: odjemalec ga uporabniku jasno razlikuje od omrežne napake,
+enkrat sproži zapiranje aplikacije in zahteva nov zagon ter prijavo. Že trajno
+pripravljen ukaz pri tem ostane nedokončan in se po novi prijavi ponovi z isto
+identiteto. HTTP 403 ne povzroči samodejne odjave, saj pomeni tudi običajno
+zavrnitev posameznega dovoljenja. Odprt ostaja ročni end-to-end preizkus.
 
 Glavni namizni program odpre centralni tok Blagajne, kadar je nastavljen
 `database.server_url`. Uporabi isto razvojno okoljsko skrivnost

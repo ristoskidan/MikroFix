@@ -60,6 +60,13 @@ zagonske usmeritve, še ne pa s celotnim ročnim preizkusom proti dejansko
 registriranima postajama in nameščenemu centralnemu strežniku. Office in
 Blagajna zato še nista razglašena za produkcijsko pripravljena.
 
+Potekla ali centralno preklicana seja je ločena od poslovne zavrnitve
+dovoljenja. HTTP 401 sproži enkraten zaklep samostojnega Office oziroma
+Blagajne; uporabnik mora program znova zagnati in se ponovno prijaviti. Če se je
+401 zgodil med zapisovalnim ukazom, njegov že shranjeni idempotentni zapis
+ostane v lokalnem dnevniku za ponovitev po novi prijavi. HTTP 403 aplikacije ne
+odjavi samodejno, ker lahko pomeni zavrnitev posamezne poslovne pravice.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:
