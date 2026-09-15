@@ -1193,6 +1193,33 @@ class WorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkflowError, "Sistemska ura"):
                 service_work_timer_snapshot(self.connection, order_id)
 
+    def test_completion_marker_uses_monotonic_duration_with_changed_wall_clock(self):
+        order_id, _ = create_service_order(self.connection, sample_service_order())
+        wall_start = datetime(2026, 9, 15, 10, 0, 0).astimezone()
+        with (
+            patch("mikrofix_workflows._now_local", return_value=wall_start),
+            patch("mikrofix_workflows._system_boot_id", return_value="boot-a"),
+            patch("mikrofix_workflows.time.monotonic_ns", return_value=1_000_000_000),
+        ):
+            start_service_work_timer(self.connection, order_id)
+
+        wall_moved_back = datetime(2026, 9, 15, 9, 0, 0).astimezone()
+        elapsed = finish_service_work_timer(
+            self.connection,
+            order_id,
+            ended_at=wall_moved_back,
+            monotonic_ended_ns=61_000_000_000,
+            ended_boot_id="boot-a",
+        )
+
+        self.assertEqual(elapsed, 1)
+        stored_seconds = self.connection.execute(
+            "SELECT elapsed_seconds FROM service_work_sessions "
+            "WHERE service_order_id=?",
+            (order_id,),
+        ).fetchone()[0]
+        self.assertEqual(stored_seconds, 60)
+
     def test_other_device_uses_confirmed_physical_identity(self) -> None:
         payload = sample_service_order()
         payload.update({

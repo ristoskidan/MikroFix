@@ -305,7 +305,9 @@ trajanje. Monotoni podatek je uporaben tudi po nenadzorovanem ponovnem zagonu
 aplikacije, dokler računalnik ni bil ponovno zagnan. Ob drugačni identiteti
 zagona se uporabi stenski zapis; premik ure, ki bi dal negativen čas, je
 blokiran in prikazan kot napaka. Centralni ukaz vedno pošlje že izračunane
-sekunde, strežnik pa jih ne preračuna. Samodejno strežniško opozorilo za zelo
+sekunde, strežnik pa jih ne preračuna. Tehnični zaključek uporabi monotoni
+marker trenutka klika tudi takrat, ko mora pred transakcijo dokončati varnostno
+kopijo. Samodejno strežniško opozorilo za zelo
 veliko odstopanje med stenskima časoma in izmerjenim trajanjem je še odprto.
 
 ## Razvojni priklop Blagajne

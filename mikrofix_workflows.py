@@ -73,6 +73,11 @@ def _system_boot_id() -> str:
         return ""
 
 
+def service_timer_measurement_marker() -> tuple[datetime, int, str]:
+    """Capture one wall/monotonic marker for an atomic user action."""
+    return _now_local(), time.monotonic_ns(), _system_boot_id()
+
+
 def _wall_elapsed_seconds(started: datetime, ended: datetime) -> int:
     if started.tzinfo is None and ended.tzinfo is not None:
         started = started.astimezone()
@@ -93,12 +98,24 @@ def _running_interval_seconds(
     at: datetime | None,
     monotonic_started_ns: int | None,
     monotonic_boot_id: str,
+    monotonic_ended_ns: int | None = None,
+    ended_boot_id: str = "",
 ) -> int:
     started = datetime.fromisoformat(str(started_at))
-    if at is None and monotonic_started_ns is not None:
-        current_boot_id = _system_boot_id()
+    if monotonic_started_ns is not None and (
+        at is None or monotonic_ended_ns is not None
+    ):
+        current_boot_id = (
+            str(ended_boot_id or "")
+            if monotonic_ended_ns is not None
+            else _system_boot_id()
+        )
         if current_boot_id and current_boot_id == str(monotonic_boot_id or ""):
-            current_ns = time.monotonic_ns()
+            current_ns = (
+                int(monotonic_ended_ns)
+                if monotonic_ended_ns is not None
+                else time.monotonic_ns()
+            )
             if current_ns < int(monotonic_started_ns):
                 raise WorkflowError(
                     "Monotona ura servisnega intervala ni veljavna. "
@@ -892,7 +909,8 @@ def list_running_service_work_sessions(connection) -> list[dict[str, Any]]:
 def pause_service_work_timer(
     connection, order_id: int, *, ended_at: datetime | None = None,
     operator_code: str = "", reason: str = "PAUSE", commit: bool = True,
-    bump_version: bool = True,
+    bump_version: bool = True, monotonic_ended_ns: int | None = None,
+    ended_boot_id: str = "",
 ) -> int:
     """Zaključi samo tekoči interval in vrni dosedanji seštevek minut."""
     ensure_workflow_schema(connection)
@@ -909,6 +927,8 @@ def pause_service_work_timer(
             at=ended_at,
             monotonic_started_ns=(int(row[2]) if row[2] is not None else None),
             monotonic_boot_id=str(row[3] or ""),
+            monotonic_ended_ns=monotonic_ended_ns,
+            ended_boot_id=ended_boot_id,
         )
         connection.execute(
             "UPDATE service_work_sessions SET ended_at=?,elapsed_seconds=?,"
@@ -938,7 +958,8 @@ def pause_service_work_timer(
 
 def finish_service_work_timer(
     connection, order_id: int, *, ended_at: datetime | None = None,
-    operator_code: str = "",
+    operator_code: str = "", monotonic_ended_ns: int | None = None,
+    ended_boot_id: str = "",
     commit: bool = True,
 ) -> int:
     """Zaključi tekoči interval in vrni vsoto vseh dejanskih intervalov."""
@@ -963,7 +984,8 @@ def finish_service_work_timer(
     elapsed_minutes = pause_service_work_timer(
         connection, int(order_id), ended_at=ended_at,
         operator_code=operator_code, reason="FINISH", commit=False,
-        bump_version=False,
+        bump_version=False, monotonic_ended_ns=monotonic_ended_ns,
+        ended_boot_id=ended_boot_id,
     )
     if elapsed_minutes <= 0:
         raise WorkflowError("Servis nima veljavnega izmerjenega časa.")

@@ -71,7 +71,10 @@ Servisni interval pri dejanskem zagonu shrani stenski začetek, monotoni začete
 in identiteto zagona operacijskega sistema. Med istim zagonom računalnika se
 trajanje zato meri z monotono uro in ostane pravilno tudi po ponovnem zagonu
 aplikacije ali premiku sistemske ure. Zaključeni interval ohrani izračunane
-sekunde. Po ponovnem zagonu računalnika se za še odprti interval uporabi trajni
+sekunde. Gumb za tehnični zaključek ob kliku zajame en stenski in monotoni
+marker ter isti marker uporabi za predhodni izračun in končno transakcijo; čas
+zato ne vključuje trajanja varnostne kopije ali potrjevanja zaključka. Po
+ponovnem zagonu računalnika se za še odprti interval uporabi trajni
 stenski zapis; če bi dal negativen rezultat, se izračun izrecno blokira namesto
 tihega popravka na nič. Strežniško označevanje nenavadnega razmerja med
 stenskim in izmerjenim časom še ni izvedeno.

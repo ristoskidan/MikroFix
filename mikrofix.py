@@ -78,6 +78,7 @@ from mikrofix_workflows import (
     delete_service_work_draft,
     save_service_work_draft,
     save_service_order_parts,
+    service_timer_measurement_marker,
     service_work_timer_snapshot,
     start_service_work_timer,
 )
@@ -2844,13 +2845,19 @@ def _save_service():
         return
 
     parts = collect_parts_from_tree()
-    service_end_v = datetime.now()
+    (
+        service_end_v,
+        service_end_monotonic_ns,
+        service_end_boot_id,
+    ) = service_timer_measurement_marker()
     c = connect()
     try:
         order = get_service_order(c, int(active_service_order_id))
         elapsed_minutes_v = finish_service_work_timer(
             c, int(active_service_order_id), ended_at=service_end_v,
             operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
+            monotonic_ended_ns=service_end_monotonic_ns,
+            ended_boot_id=service_end_boot_id,
             commit=False,
         )
         labor = service_labor_from_minutes(
@@ -2946,6 +2953,8 @@ def _save_service():
         elapsed_minutes_v = finish_service_work_timer(
             c, int(active_service_order_id), ended_at=service_end_v,
             operator_code=AUTH_SESSION.username or RUNTIME.operator_code,
+            monotonic_ended_ns=service_end_monotonic_ns,
+            ended_boot_id=service_end_boot_id,
             commit=False,
         )
         no = next_no(c)
