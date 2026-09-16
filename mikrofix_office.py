@@ -8,7 +8,7 @@ import subprocess
 import threading
 from pathlib import Path
 from datetime import date, datetime
-from mikrofix_tk_bootstrap import prepare_tcl_tk
+from mikrofix_tk_bootstrap import maximize_work_window, prepare_tcl_tk
 
 prepare_tcl_tk()
 
@@ -22,14 +22,24 @@ from mikrofix_auth import (
     PERMISSION_MANAGE_INVENTORY,
     PERMISSION_MANAGE_PRICES,
     PERMISSION_MANAGE_USERS,
+    PERMISSION_SERVICE,
+    required_office_entry_permission,
 )
 from mikrofix_user_ui import SessionAuthUI
 from mikrofix_runtime import APP_VERSION, load_runtime
+from mikrofix_platform import open_local_file, protect_private_path
+from mikrofix_printing import (
+    preferred_a4_printer,
+    preferred_receipt_printer,
+    send_pdf_to_printer,
+)
 from mikrofix_invoice_bridge import load_service_invoice_seed
+from mikrofix_ajpes import AjpesError, find_partner_by_tax_number
 from mikrofix_v29_core import (
     V29Error,
     initialize_v29,
     trace_article,
+    validate_document_quantity,
     validate_document_line_price,
 )
 from mikrofix_v30_receipts_ui import build_receipts_tab
@@ -84,14 +94,19 @@ COMPANY_ADDRESS = "Paradiž 73, 2282 Cirkulane"
 COMPANY_PHONE = "+386 40 353 402"
 COMPANY_EMAIL = "mikrofixsi@gmail.com"
 COMPANY_WEB = "mikrofix.si"
+# MikroFIX uporablja Epson TM-T20II z 80-mm rolo. Office ne sme podedovati
+# stare 58-mm nastavitve iz uporabniškega profila ali prenesene konfiguracije.
+OFFICE_RECEIPT_PAPER_WIDTH_MM = 80
 
 TAX_MODE = RUNTIME.tax_mode
 DEFAULT_VAT_RATE = RUNTIME.default_vat_rate
 TAX_INVOICE_NOTE = RUNTIME.tax_invoice_note
 FURS_ENABLED = bool(RUNTIME.settings["furs"].get("enabled", False))
-TEST_NOTICE = (
-    f"TEST • FURS PRODUKCIJA IZKLOPLJENA • "
+ENVIRONMENT_NOTICE = (
+    f"SANDBOX • NI PRODUKCIJA • FURS PRODUKCIJA IZKLOPLJENA • "
     f"{RUNTIME.active_premise}/{RUNTIME.electronic_device}"
+    if RUNTIME.is_test else
+    f"PRODUKCIJA • FURS AKTIVEN • {RUNTIME.active_premise}/{RUNTIME.electronic_device}"
 )
 PRICING_REQUIRES_REVIEW = not bool(
     RUNTIME.settings["pricing"].get("legacy_flat_margin_enabled", False)
@@ -107,6 +122,7 @@ LIGHT_GRAY = "#D8DEE3"
 SUCCESS = "#2C7A4B"
 WARNING = "#A26916"
 DANGER = "#A63A3A"
+ENVIRONMENT_NOTICE_COLOR = DANGER if RUNTIME.is_test else SUCCESS
 
 DOC_TYPES = [
     "DOBAVNICA",
@@ -153,27 +169,12 @@ def requested_open_tab():
 
 
 def protect_file_permissions(path):
-    """Na Windows omeji datoteko na trenutnega uporabnika + SYSTEM."""
+    """Omeji produkcijsko datoteko na trenutnega uporabnika."""
     try:
         p = Path(path)
         if os.environ.get("MIKROFIX_SKIP_FILE_PROTECTION") == "1":
             return
-        if os.name != "nt" or not p.exists():
-            return
-        user = os.environ.get("USERNAME") or os.environ.get("USER")
-        if not user:
-            return
-        subprocess.run(
-            [
-                "icacls", str(p),
-                "/inheritance:r",
-                "/grant:r", f"{user}:(F)",
-                "SYSTEM:(F)"
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        protect_private_path(p)
     except Exception:
         # ACL je dodatna zaščita; napaka ne sme ustaviti servisa.
         pass
@@ -212,6 +213,7 @@ AUTH_SESSION = SessionAuthUI(
 )
 OFFICE_LAUNCHED_FROM_MAIN = False
 OFFICE_EXIT_CODE = 0
+OFFICE_START_SERVICE_ORDER_ID = None
 
 
 def init_auth_db():
@@ -342,11 +344,11 @@ def safe_int(v, default=0):
         return default
 
 
-def ceil_to_5(value):
+def ceil_to_euro(value):
     value = max(0.0, safe_float(value))
     if value == 0:
         return 0.0
-    return math.ceil((value - 1e-9) / 5.0) * 5.0
+    return float(math.ceil(value - 1e-9))
 
 
 def pdf_safe(value):
@@ -776,7 +778,7 @@ def open_partner_editor(partner_id=None, on_saved_callback=None):
 
     win = tk.Toplevel(root)
     win.title("MikroFIX Office - Partner")
-    win.geometry("720x690")
+    maximize_work_window(win, "720x690")
     win.configure(bg=BG)
     win.transient(root)
     win.grab_set()
@@ -818,6 +820,29 @@ def open_partner_editor(partner_id=None, on_saved_callback=None):
     ]
     vars_v = [tk.StringVar(value=v or "") for v in defaults]
 
+    def fill_from_ajpes():
+        try:
+            found = find_partner_by_tax_number(
+                vars_v[4].get(), test_mode=RUNTIME.is_test, timeout=15
+            )
+        except AjpesError as exc:
+            messagebox.showinfo(
+                "MikroFIX – AJPES",
+                f"{exc}\n\nRočni vnos ostaja omogočen; program podatkov ne ugiba.",
+                parent=win,
+            )
+            return
+        vars_v[0].set(found.name)
+        vars_v[1].set(found.address)
+        vars_v[2].set(found.post_city)
+        vars_v[3].set("Slovenija")
+        vars_v[4].set(found.tax_number)
+        vars_v[5].set(found.registration_number)
+        audit_event(
+            "PARTNER_AJPES_LOOKUP", "tax_number", found.tax_number,
+            {"registration_number": found.registration_number},
+        )
+
     for i, (lab, var) in enumerate(zip(names, vars_v)):
         tk.Label(
             card, text=lab, bg=PANEL, fg=GRAY,
@@ -848,6 +873,10 @@ def open_partner_editor(partner_id=None, on_saved_callback=None):
 
     card.grid_columnconfigure(1, weight=1)
     card.grid_rowconfigure(len(names), weight=1)
+
+    ttk.Button(
+        card, text="PREBERI IZ AJPES", command=fill_from_ajpes
+    ).grid(row=4, column=2, sticky="w", padx=(0, 12), pady=6)
 
     def save_partner():
         name_v = vars_v[0].get().strip()
@@ -1037,7 +1066,7 @@ def show_selected_article_trace():
         return
     win = tk.Toplevel(root)
     win.title(f"MikroFIX Office - Sled artikla {values[2]}")
-    win.geometry("1120x700")
+    maximize_work_window(win, "1120x700")
     win.minsize(820, 560)
     win.resizable(True, True)
     page = tk.Frame(win, bg=BG)
@@ -1089,6 +1118,7 @@ def show_selected_article_trace():
 def refresh_all_shared_data(show_message=False):
     refresh_office_articles()
     refresh_doc_article_search()
+    refresh_open_service_orders()
     refresh_service_readonly()
     refresh_claim_combo()
     if show_message:
@@ -1103,6 +1133,83 @@ def refresh_all_shared_data(show_message=False):
 # ----------------------------------------------------------------------
 
 service_claim_map = {}
+
+
+def refresh_open_service_orders(*_args):
+    """Prikaži sprejete naloge, katerih servis še ni zaključen."""
+    if "open_service_order_tree" not in globals():
+        return
+    for iid in open_service_order_tree.get_children():
+        open_service_order_tree.delete(iid)
+    if not SERVICE_DB.exists():
+        open_service_order_status.set("mikrofix.db ni najden.")
+        return
+
+    c = service_connect()
+    if c is None:
+        open_service_order_status.set("Baze servisov ni mogoče odpreti.")
+        return
+    try:
+        rows = c.execute(
+            """
+            SELECT id, order_no, created_at, customer_name, device_model,
+                   work_started_at, customer_request
+            FROM service_orders
+            WHERE status='OPEN'
+            ORDER BY id DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        rows = []
+    c.close()
+
+    for row in rows:
+        started = row[5] or "NI ZAČET"
+        open_service_order_tree.insert(
+            "", "end",
+            values=(
+                row[0], row[1] or "-", row[2] or "-", row[3] or "-",
+                row[4] or "-", started, (row[6] or "")[:160],
+            ),
+        )
+    open_service_order_status.set(f"{len(rows)} odprtih nalogov")
+
+
+def request_start_selected_service_order(_event=None):
+    """Office preda izbrani nalog istemu servisnemu delovnemu zaslonu."""
+    global OFFICE_START_SERVICE_ORDER_ID
+    if not AUTH_SESSION.has_permission(PERMISSION_SERVICE):
+        audit_event("PERMISSION_DENIED", "module", "SERVICE")
+        messagebox.showwarning(
+            "MikroFIX", "Za začetek servisa nimaš dovoljenja.", parent=root
+        )
+        return
+    if not EMBEDDED_IN_MAIN:
+        messagebox.showinfo(
+            "MikroFIX",
+            "Servis odpri iz glavnega programa MikroFix, da se ohrani ista prijavljena seja.",
+            parent=root,
+        )
+        return
+    selected = open_service_order_tree.selection()
+    if not selected:
+        messagebox.showwarning(
+            "MikroFIX", "Izberi odprti servisni nalog.", parent=root
+        )
+        return
+    values = open_service_order_tree.item(selected[0], "values")
+    try:
+        OFFICE_START_SERVICE_ORDER_ID = int(values[0])
+    except (IndexError, TypeError, ValueError):
+        messagebox.showerror(
+            "MikroFIX", "Izbranega servisnega naloga ni mogoče prebrati.", parent=root
+        )
+        return
+    audit_event(
+        "SERVICE_WORKSPACE_REQUESTED", "service_order", OFFICE_START_SERVICE_ORDER_ID
+    )
+    root.destroy()
 
 
 def refresh_service_readonly(*_args):
@@ -1216,7 +1323,7 @@ def open_readonly_service(_event=None):
 
     win = tk.Toplevel(root)
     win.title(f"MikroFIX Office - {row[0]}")
-    win.geometry("760x620")
+    maximize_work_window(win, "760x620")
     win.configure(bg=BG)
 
     outer = tk.Frame(win, bg=BG)
@@ -1503,10 +1610,11 @@ def recalc_doc_lines():
             dshare = 0.0
 
         actual_unit = ((base + dshare) / qty) if qty > 0 else 0.0
-        calc = actual_unit * (1.0 + max(0.0, r["margin"]) / 100.0)
-        recommended = ceil_to_5(calc)
+        margin_ratio = min(0.799999, max(0.0, r["margin"]) / 100.0)
+        calc = actual_unit / (1.0 - margin_ratio)
+        recommended = ceil_to_euro(calc)
 
-        # Če je prodajna cena prazna/0, naj Office uporabi priporočeno /5.
+        # Če je prodajna cena prazna/0, uporabi priporočilo na naslednji cel EUR.
         sell = r["sell"] if r["sell"] > 0 else recommended
 
         vat = base * max(0.0, r["vat"]) / 100.0
@@ -1582,8 +1690,9 @@ def _provisional_doc_line_math(
         (base + delivery_share) / qty
         if qty > 0 else 0.0
     )
-    calculated_price = actual_unit_cost * (1.0 + margin_pct / 100.0)
-    recommended_price = ceil_to_5(calculated_price)
+    margin_ratio = min(0.799999, margin_pct / 100.0)
+    calculated_price = actual_unit_cost / (1.0 - margin_ratio)
+    recommended_price = ceil_to_euro(calculated_price)
     final_sell = sell_price if sell_price > 0 else recommended_price
 
     vat_value = base * vat_pct / 100.0
@@ -1691,7 +1800,7 @@ def open_doc_line_editor(article_values=None, line_iid=None):
         if line_iid is not None
         else "MikroFIX Office - Sprejeti artikel"
     )
-    win.geometry("760x680")
+    maximize_work_window(win, "760x680")
     win.minsize(640, 560)
     win.resizable(True, True)
     win.configure(bg=BG)
@@ -1728,7 +1837,7 @@ def open_doc_line_editor(article_values=None, line_iid=None):
     margin_var = tk.StringVar(value=str(margin_initial))
     sell_var = tk.StringVar(value=str(sell_initial))
 
-    # Prodajna cena privzeto avtomatsko sledi priporočeni ceni /5.
+    # Prodajna cena privzeto sledi priporočilu, zaokroženemu na naslednji cel EUR.
     # Če jo uporabnik ročno spremeni, se avtomatika ustavi za ta artikel.
     sell_price_manual = {"value": False}
     last_auto_sell = {"value": None}
@@ -1808,7 +1917,7 @@ def open_doc_line_editor(article_values=None, line_iid=None):
         margin = max(0.0, safe_float(margin_var.get()))
         sell = max(0.0, safe_float(sell_var.get()))
 
-        # Najprej izračun brez ročne prodajne cene, da dobimo priporočeno /5.
+        # Najprej izračun brez ročne prodajne cene, da dobimo priporočilo.
         auto_math = _provisional_doc_line_math(
             qty, price, discount, vat, margin, 0,
             editing_iid=line_iid
@@ -1838,7 +1947,7 @@ def open_doc_line_editor(article_values=None, line_iid=None):
             f"Delež dostave: {money(m['delivery_share'])}\n"
             f"Dejanska nabavna / kos: {money(m['actual_unit_cost'])}    "
             f"Izračunana cena: {money(m['calculated_price'])}\n"
-            f"Priporočena /5: {money(m['recommended_price'])}    "
+            f"Priporočena cena: {money(m['recommended_price'])}    "
             f"Končna prodajna: {money(m['final_sell'])}\n"
             f"DDV: {money(m['vat_value'])}    "
             f"Skupaj: {money(m['line_total'])}    "
@@ -1865,17 +1974,16 @@ def open_doc_line_editor(article_values=None, line_iid=None):
     sell_var.trace_add("write", on_sell_price_changed)
 
     def validate_and_save():
-        qty = safe_float(qty_var.get(), 0)
-        if qty <= 0 or abs(qty - round(qty)) > 1e-9:
+        try:
+            qty = validate_document_quantity(qty_var.get())
+        except V29Error as exc:
             messagebox.showwarning(
                 "MikroFIX Office",
-                "Količina mora biti celo število večje od 0.",
+                str(exc),
                 parent=win
             )
             _focus_and_select(entries[0])
             return
-
-        qty = int(round(qty))
         unit_price = max(0.0, safe_float(price_var.get()))
         discount = min(100.0, max(0.0, safe_float(discount_var.get())))
         vat = (
@@ -2535,7 +2643,7 @@ def generate_document_pdf(doc_id):
             tax_note=TAX_INVOICE_NOTE,
             premise=RUNTIME.active_premise,
             device=RUNTIME.electronic_device,
-            paper_width_mm=int(RUNTIME.settings["printer"]["paper_width_mm"]),
+            paper_width_mm=OFFICE_RECEIPT_PAPER_WIDTH_MM,
         )
         return a4_path
     try:
@@ -2653,7 +2761,7 @@ def generate_document_pdf(doc_id):
     else:
         rows = [[
             "Artikel", "Kol.", "Cena", "Rabat", "DDV",
-            "Dej. nab.", "Marža", "Prip. /5", "Prod. cena"
+            "Dej. nab.", "Marža", "Priporočena", "Prod. cena"
         ]]
         column_widths = [
             42*mm, 13*mm, 19*mm, 16*mm, 15*mm, 21*mm, 16*mm, 20*mm, 20*mm
@@ -2760,7 +2868,7 @@ def generate_document_receipt_pdf(doc_id):
             tax_note=TAX_INVOICE_NOTE,
             premise=RUNTIME.active_premise,
             device=RUNTIME.electronic_device,
-            paper_width_mm=int(RUNTIME.settings["printer"]["paper_width_mm"]),
+            paper_width_mm=OFFICE_RECEIPT_PAPER_WIDTH_MM,
         )
         return receipt_path
     c = office_connect()
@@ -2779,7 +2887,8 @@ def generate_document_receipt_pdf(doc_id):
     if not doc:
         raise RuntimeError("Dokument ni najden.")
 
-    path = PDF_DIR / f"{doc[0]}_58mm_TEST.pdf"
+    paper_width = OFFICE_RECEIPT_PAPER_WIDTH_MM
+    path = PDF_DIR / f"{doc[0]}_{paper_width}mm_TEST.pdf"
     return generate_test_receipt(
         path,
         company={
@@ -2804,7 +2913,7 @@ def generate_document_receipt_pdf(doc_id):
         premise=RUNTIME.active_premise,
         device=RUNTIME.electronic_device,
         tax_note=TAX_INVOICE_NOTE if TAX_MODE == "NON_VAT" else "",
-        paper_width_mm=int(RUNTIME.settings["printer"]["paper_width_mm"]),
+        paper_width_mm=paper_width,
     )
 
 
@@ -3113,7 +3222,7 @@ def open_document_header_form(doc_type, initial=None, callback=None):
     initial = dict(initial or {})
     win = tk.Toplevel(root)
     win.title(f"MikroFIX Office - {doc_type}")
-    win.geometry("860x690")
+    maximize_work_window(win, "860x690")
     win.minsize(780, 640)
     win.configure(bg=BG)
     win.transient(root)
@@ -3560,7 +3669,7 @@ def open_document_items_window(context, doc_id=None, initial_items=None, status=
     win = tk.Toplevel(root)
     doc_editor_window = win
     win.title("MikroFIX Office - Vnos artiklov")
-    win.geometry("1320x820")
+    maximize_work_window(win, "1320x820")
     win.minsize(1080, 700)
     win.configure(bg=BG)
     win.transient(root)
@@ -3762,7 +3871,7 @@ def open_document_items_window(context, doc_id=None, initial_items=None, status=
         ("actual","Dej.nab.",70),
         ("margin","Mar.%",58),
         ("calc","Izrač.",70),
-        ("recommended","Prip./5",70),
+        ("recommended","Priporočena",85),
         ("sell","Prod.",70),
         ("net","Neto",70),
         ("vatval","DDV €",65),
@@ -3938,7 +4047,7 @@ def print_selected_document_pdf():
                 tax_note=TAX_INVOICE_NOTE,
                 premise=RUNTIME.active_premise,
                 device=RUNTIME.electronic_device,
-                paper_width_mm=int(RUNTIME.settings["printer"]["paper_width_mm"]),
+                paper_width_mm=OFFICE_RECEIPT_PAPER_WIDTH_MM,
                 copy_no=copy_no,
             )
         else:
@@ -3967,13 +4076,13 @@ def print_selected_document_pdf():
 
     ttk.Button(
         card, text="ODPRI A4 PDF",
-        command=lambda: os.startfile(str(p)) if os.name == "nt" else None,
+        command=lambda: open_local_file(p),
         style="Blue.TButton"
     ).pack(fill="x", padx=16, pady=5)
 
     ttk.Button(
-        card, text="ODPRI 58-MM TEST",
-        command=lambda: os.startfile(str(receipt_p)) if os.name == "nt" else None,
+        card, text="ODPRI 80-MM PDF",
+        command=lambda: open_local_file(receipt_p),
         style="Blue.TButton"
     ).pack(fill="x", padx=16, pady=5)
 
@@ -3992,25 +4101,47 @@ def print_selected_document_pdf():
     ).pack(fill="x", padx=16, pady=5)
 
     ttk.Button(
-        card, text="SHRANI 58-MM KOT PDF", command=lambda: save_as(receipt_p)
+        card, text="SHRANI 80-MM KOT PDF", command=lambda: save_as(receipt_p)
     ).pack(fill="x", padx=16, pady=5)
 
-    def print_it():
-        if os.name == "nt":
-            try:
-                os.startfile(str(p), "print")
-            except Exception as e:
-                messagebox.showerror(
-                    "MikroFIX Office", str(e), parent=win
+    def print_it(path_to_print, description, *, receipt=False):
+        try:
+            configured = str(RUNTIME.settings.get("printer", {}).get("name") or "")
+            printer = (
+                preferred_receipt_printer(configured)
+                if receipt else preferred_a4_printer()
+            )
+            if not printer:
+                raise RuntimeError(
+                    "Ni najdenega primernega fizičnega tiskalnika za izbrano velikost. "
+                    "Za A4 pričakujem HP LaserJet, za 80 mm pa Epson TM-T20II."
                 )
+            result = send_pdf_to_printer(path_to_print, printer)
+            messagebox.showinfo(
+                "MikroFIX Office",
+                f"{description} je poslan na {result.printer} (opravilo {result.job_id}).",
+                parent=win,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "MikroFIX Office",
+                "Tisk ni uspel. PDF je ostal varno shranjen in ga lahko odpreš z gumbom "
+                f"zgoraj.\n\nPodrobnost tiskalnika: {e}",
+                parent=win,
+            )
 
     ttk.Button(
-        card, text="TISKAJ A4", command=print_it
+        card, text="TISKAJ A4", command=lambda: print_it(p, "A4 dokument")
+    ).pack(fill="x", padx=16, pady=5)
+
+    ttk.Button(
+        card, text="TISKAJ 80-MM",
+        command=lambda: print_it(receipt_p, "80-mm dokument", receipt=True)
     ).pack(fill="x", padx=16, pady=5)
 
     tk.Label(
         card,
-        text="Izbran je Epson TM-T20II (M267D), 80 mm USB. Neposredni tisk vključimo po namestitvi uradnega gonilnika in fizičnem preizkusu.",
+        text="Epson TM-T20II uporablja 80-mm papir. Če gonilnik zavrne PDF, dokument ostane shranjen in napaka gonilnika je prikazana v celoti.",
         bg=PANEL, fg=GRAY, font=("Segoe UI", 8), wraplength=430,
     ).pack(fill="x", padx=16, pady=(8, 12))
 
@@ -4365,11 +4496,7 @@ weekly_report_busy = False
 
 
 def _open_local_path(path):
-    path = Path(path)
-    if os.name == "nt":
-        os.startfile(str(path))
-    else:
-        subprocess.Popen(["xdg-open", str(path)])
+    open_local_file(path)
 
 
 def refresh_weekly_report_view(*_args):
@@ -4635,10 +4762,7 @@ root.minsize(900, 620)
 root.configure(bg=BG)
 root.withdraw()
 
-try:
-    root.state("zoomed")
-except Exception:
-    pass
+maximize_work_window(root, "1280x760")
 
 style_app()
 
@@ -4670,8 +4794,8 @@ tk.Label(
 ).pack(anchor="center", pady=(0,0))
 
 tk.Label(
-    header, text=TEST_NOTICE,
-    bg=BG, fg=DANGER, font=("Segoe UI", 9, "bold")
+    header, text=ENVIRONMENT_NOTICE,
+    bg=BG, fg=ENVIRONMENT_NOTICE_COLOR, font=("Segoe UI", 9, "bold")
 ).pack(side="left", padx=(24, 0), pady=(12, 0))
 
 ttk.Button(
@@ -5190,7 +5314,7 @@ article_name_search_var.trace_add("write", refresh_office_articles)
 article_barcode_search_var.trace_add("write", refresh_office_articles)
 
 
-# ----- SERVISI READ ONLY
+# ----- ODPRTI SERVISNI NALOGI + ZGODOVINA SERVISOV
 service_top = tk.Frame(tab_services, bg=PANEL)
 service_top.pack(fill="x", padx=10, pady=10)
 
@@ -5212,6 +5336,46 @@ tk.Label(
     service_top, textvariable=service_read_status,
     bg=PANEL, fg=GRAY
 ).pack(side="right")
+
+open_service_order_status = tk.StringVar(value="")
+open_orders_box = ttk.LabelFrame(
+    tab_services, text="Odprti servisni nalogi – čas dela"
+)
+open_orders_box.pack(fill="x", padx=10, pady=(0, 10))
+open_orders_actions = tk.Frame(open_orders_box, bg=PANEL)
+open_orders_actions.pack(fill="x", padx=8, pady=(8, 4))
+ttk.Button(
+    open_orders_actions,
+    text="ZAČNI / NADALJUJ SERVIS",
+    command=request_start_selected_service_order,
+    style="Blue.TButton",
+).pack(side="left")
+ttk.Button(
+    open_orders_actions, text="POSODOBI", command=refresh_open_service_orders
+).pack(side="left", padx=(8, 0))
+tk.Label(
+    open_orders_actions, textvariable=open_service_order_status,
+    bg=PANEL, fg=GRAY,
+).pack(side="right")
+
+open_service_order_tree = ttk.Treeview(
+    open_orders_box,
+    columns=("id", "order", "created", "customer", "device", "started", "request"),
+    show="headings",
+    height=7,
+)
+for col, txt, width in [
+    ("id", "ID", 0), ("order", "Nalog", 130), ("created", "Sprejem", 145),
+    ("customer", "Stranka", 180), ("device", "Naprava", 150),
+    ("started", "Začetek dela", 155), ("request", "Zahteva stranke", 360),
+]:
+    open_service_order_tree.heading(col, text=txt)
+    if col == "id":
+        open_service_order_tree.column(col, width=0, minwidth=0, stretch=False)
+    else:
+        open_service_order_tree.column(col, width=width)
+open_service_order_tree.pack(fill="x", padx=8, pady=(0, 8))
+open_service_order_tree.bind("<Double-1>", request_start_selected_service_order)
 
 service_tree = ttk.Treeview(
     tab_services,
@@ -5252,7 +5416,7 @@ def select_receipt_workspace():
     documents_workspace.select(tab_document_receipts)
 
 document_rail_actions = (
-    ("F1  NOV DOKUMENT", choose_document_type),
+    ("F1  IZDAJ DOKUMENT", choose_document_type),
     ("F2  ODPRI IZBRANI", load_document),
     ("F3  PREJEM BLAGA", select_receipt_workspace),
     ("F4  PDF / TISK", print_selected_document_pdf),
@@ -5450,7 +5614,7 @@ def show_document_context_menu(event):
         documents_tree.selection_set(row_id)
         documents_tree.focus(row_id)
     menu = tk.Menu(documents_tree, tearoff=False)
-    menu.add_command(label="Nov dokument  (F1)", command=choose_document_type)
+    menu.add_command(label="Izdaj dokument  (F1)", command=choose_document_type)
     if row_id:
         menu.add_command(label="Odpri izbrani  (F2)", command=load_document)
         menu.add_command(label="PDF / tisk  (F4)", command=print_selected_document_pdf)
@@ -5501,6 +5665,7 @@ tk.Label(
 refresh_partners()
 refresh_documents()
 refresh_office_articles()
+refresh_open_service_orders()
 refresh_service_readonly()
 refresh_claim_combo()
 if WEEKLY_SETTINGS.get("enabled", False):
@@ -5519,7 +5684,7 @@ def apply_office_permissions():
         nb.tab(tab_stock_control, state="hidden")
     if not AUTH_SESSION.has_permission(PERMISSION_MANAGE_PRICES):
         nb.tab(tab_price_profiles, state="hidden")
-    if not AUTH_SESSION.has_permission(PERMISSION_FURS_PRODUCTION):
+    if not RUNTIME.is_test or not AUTH_SESSION.has_permission(PERMISSION_FURS_PRODUCTION):
         nb.tab(tab_furs_test, state="hidden")
     users_button.configure(
         state=(
@@ -5540,53 +5705,66 @@ elif handoff_provided and not handoff_accepted:
     )
     root.destroy()
 elif handoff_accepted or run_pin_login(root):
-    apply_office_permissions()
     service_invoice_request = requested_service_id()
     pos_requested = bool(requested_new_invoice() or service_invoice_request)
-    if not pos_requested:
-        root.deiconify()
-        try:
-            root.state("zoomed")
-        except Exception:
-            pass
-    if pos_requested:
-        root.after(
-            0,
-            lambda sid=service_invoice_request: open_pos(
-                root,
-                runtime=RUNTIME,
-                office_db=OFFICE_DB,
-                inventory_db=INVENTORY_DB,
-                service_db=SERVICE_DB,
-                pdf_dir=PDF_DIR,
-                operator_code=RUNTIME.operator_code,
-                service_id=sid,
-                service_loader=load_service_invoice_seed,
-                service_finalizer=globals().get("MIKROFIX_FINALIZE_SERVICE_PDF"),
-            ),
+    required_permission = required_office_entry_permission(pos_requested=pos_requested)
+    if not AUTH_SESSION.has_permission(required_permission):
+        denied_module = "CASHIER" if pos_requested else "OFFICE"
+        audit_event("PERMISSION_DENIED", "module", denied_module)
+        messagebox.showwarning(
+            "MikroFIX - dostop zavrnjen",
+            "Prijavljeni uporabnik nima dovoljenja za izbrani modul.",
+            parent=root,
         )
+        root.destroy()
     else:
-        tab_request = requested_open_tab()
-        tab_map = {
-            "receipts": tab_documents,
-            "stock": tab_stock_control,
-            "used": tab_used_devices,
-            "pricing": tab_price_profiles,
-            "documents": tab_documents,
-            "partners": tab_partners,
-            "articles": tab_articles,
-            "reports": tab_reports,
-        }
-        if tab_request in tab_map:
-            root.after(200, lambda tab=tab_map[tab_request]: nb.select(tab))
-            if tab_request == "receipts":
-                root.after(250, lambda: documents_workspace.select(tab_document_receipts))
-    if WEEKLY_SETTINGS.get("enabled", False):
-        root.after(1200, run_monday_weekly_report_if_due)
-    if EMBEDDED_IN_MAIN:
-        MIKROFIX_PARENT.wait_window(root)
-    else:
-        root.mainloop()
+        apply_office_permissions()
+        if pos_requested:
+            root.after(
+                0,
+                lambda sid=service_invoice_request: open_pos(
+                    root,
+                    runtime=RUNTIME,
+                    office_db=OFFICE_DB,
+                    inventory_db=INVENTORY_DB,
+                    service_db=SERVICE_DB,
+                    pdf_dir=PDF_DIR,
+                    operator_code=RUNTIME.operator_code,
+                    authenticated_username=AUTH_SESSION.username,
+                    action_permissions=AUTH_SESSION.permissions,
+                    audit_event=audit_event,
+                    service_id=sid,
+                    service_loader=load_service_invoice_seed,
+                    service_finalizer=globals().get("MIKROFIX_FINALIZE_SERVICE_PDF"),
+                ),
+            )
+        else:
+            root.deiconify()
+            try:
+                root.state("zoomed")
+            except Exception:
+                pass
+            tab_request = requested_open_tab()
+            tab_map = {
+                "receipts": tab_documents,
+                "stock": tab_stock_control,
+                "used": tab_used_devices,
+                "pricing": tab_price_profiles,
+                "documents": tab_documents,
+                "partners": tab_partners,
+                "articles": tab_articles,
+                "reports": tab_reports,
+            }
+            if tab_request in tab_map:
+                root.after(200, lambda tab=tab_map[tab_request]: nb.select(tab))
+                if tab_request == "receipts":
+                    root.after(250, lambda: documents_workspace.select(tab_document_receipts))
+        if WEEKLY_SETTINGS.get("enabled", False):
+            root.after(1200, run_monday_weekly_report_if_due)
+        if EMBEDDED_IN_MAIN:
+            MIKROFIX_PARENT.wait_window(root)
+        else:
+            root.mainloop()
 else:
     root.destroy()
 

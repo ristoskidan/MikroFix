@@ -12,7 +12,12 @@ from pathlib import Path
 
 
 APP_DIR = Path(__file__).resolve().parent
-os.environ["MIKROFIX_CONFIG"] = str(APP_DIR / "mikrofix_settings_e2e_test.json")
+os.environ["MIKROFIX_CONFIG"] = str(
+    Path(
+        os.environ.get("MIKROFIX_CONFIG")
+        or APP_DIR / "mikrofix_settings_e2e_test.json"
+    ).expanduser().resolve()
+)
 os.environ.pop("MIKROFIX_ALLOW_FURS_PRODUCTION", None)
 os.environ["MIKROFIX_E2E_TEST"] = "YES"
 
@@ -104,6 +109,7 @@ def main() -> int:
                 "notes": "[TEST E2E] Preverjanje vseh polj kupca in dolge postavke.",
             },
             operator_code="DR", operator_tax_number="84514841",
+            authenticated_username="daniel",
             premise_id="MFD", electronic_device_id="PIS", labor_floor=22,
             issue_token="E2E-AUTO-LONG",
         )
@@ -164,6 +170,7 @@ def main() -> int:
                 "phone": seed.customer_phone, "email": seed.customer_email,
             },
             operator_code="DR", operator_tax_number="84514841",
+            authenticated_username="daniel",
             premise_id="MFD", electronic_device_id="PIS", labor_floor=22,
             issue_token="E2E-AUTO-SERVICE", linked_service_id=ready_service_id,
         )
@@ -203,6 +210,7 @@ def main() -> int:
             payments={"CASH": Decimal("49"), "BANK_TRANSFER": refurbished_total - Decimal("49")},
             customer=refurbished_customer,
             operator_code="DR", operator_tax_number="84514841",
+            authenticated_username="daniel",
             premise_id="MFT", electronic_device_id="PIS", labor_floor=22,
             issue_token="E2E-AUTO-REFURB", used_goods_12m_signed=True,
             bank_transfer_received=True,

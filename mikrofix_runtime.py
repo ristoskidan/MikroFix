@@ -1,4 +1,4 @@
-"""Skupne nastavitve in podatkovne poti za MikroFIX v30-dev.
+"""Skupne nastavitve in podatkovne poti za MikroFix v30.
 
 Privzeti način je vedno TEST. Produkcijski FURS ostane izključen, dokler ni
 izrecno omogočen v nadzorovanem postopku.
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 
-APP_VERSION = "30.0-dev5"
+APP_VERSION = "30.0"
 SETTINGS_SCHEMA_VERSION = 1
 
 DEFAULT_SETTINGS: dict[str, Any] = {
@@ -26,6 +26,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "backend": "sqlite",
         "data_dir": "MikroFixData_V30_DEV",
         "server_url": "",
+    },
+    "data_encryption": {
+        "enabled": False,
+        "provider": "gocryptfs",
+        "cipher_dir": "",
     },
     "business": {
         "legal_name": "MikroFix, popravilo elektronskih in telekomunikacijskih naprav, Ristoski Daniel s.p.",
@@ -57,13 +62,19 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "test_business_premise_id": "TESTMFD",
         "test_electronic_device_id": "PIS",
         "test_timeout_seconds": 15,
+        "production_timeout_seconds": 15,
+        "production_ca_bundle_path": "certs/furs-test-ca-bundle.pem",
+        "production_response_certificate_path": "certs/DavPotRac.cer",
         "production_requires_explicit_confirmation": True,
+        "production_activation_confirmed": False,
     },
     "printer": {
         "model": "Epson TM-T20II (M267D)",
         "paper_width_mm": 80,
         "connection": "USB",
         "dpi": 203,
+        "printer_name": "",
+        "a4_printer_name": "",
         "windows_printer_name": "",
     },
     "backup": {
@@ -99,8 +110,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "signature_device": "A4_PAPER_WET_SIGNATURE",
         "service_photo_retention_years": 5,
         "no_email_delivery": "SMS_IMMUTABLE_DOWNLOADABLE_PDF",
-        "unclaimed_free_days": 60,
-        "unclaimed_storage_eur_per_day": 1.0,
+        "unclaimed_free_days": 30,
+        "unclaimed_storage_eur_per_30_days": 10.0,
+        "unclaimed_final_notice_days": 90,
         "unclaimed_never_transfers_ownership_automatically": True,
     },
     "used_device_policy": {
@@ -125,6 +137,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "l0_eur": 22.0,
         "legacy_flat_margin_enabled": False,
         "t1_hour_eur": 30.0,
+        "extra_half_hour_eur": 15.0,
+        "tariff_version": "T1T2-v1-2026-09-04",
         "pickup_return_eur": 30.0,
         "pickup_return_mode": "ORGANIZED_ROUTE",
         "pickup_return_max_extra_km_total": 12,
@@ -139,12 +153,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
             "battery_pickup_eur": 15.0,
             "battery_onsite_eur": 60.0,
         },
+        # Potrjena matrika v1. ``max_cost_eur=null`` pomeni zadnji odprti
+        # razred. Marža je prava prodajna marža, ne pribitek na strošek.
         "categories": {
-            "LCD / In-Cell": {"target_margin": 0.35, "hard_margin": 0.15, "min_contribution_eur": 15.0, "consumables_eur": 5.0, "warranty_reserve": 0.05},
-            "Soft OLED": {"target_margin": 0.25, "hard_margin": 0.15, "min_contribution_eur": 15.0, "consumables_eur": 5.0, "warranty_reserve": 0.05},
-            "Refurbished original": {"target_margin": 0.25, "hard_margin": 0.15, "min_contribution_eur": 20.0, "consumables_eur": 5.0, "warranty_reserve": 0.05},
-            "Battery DIAGNOSTIC": {"target_margin": 0.25, "hard_margin": 0.15, "min_contribution_eur": 10.0, "consumables_eur": 5.0, "warranty_reserve": 0.08},
-            "Battery FixPremium": {"target_margin": 0.30, "hard_margin": 0.15, "min_contribution_eur": 10.0, "consumables_eur": 5.0, "warranty_reserve": 0.08},
+            "Battery FixPremium": {"version": 1, "warranty_reserve": 0.08, "tiers": [{"max_cost_eur": 15, "target_margin": 0.35}, {"max_cost_eur": 30, "target_margin": 0.30}, {"max_cost_eur": None, "target_margin": 0.20}]},
+            "Battery DIAGNOSTIC": {"version": 1, "warranty_reserve": 0.08, "tiers": [{"max_cost_eur": 25, "target_margin": 0.30}, {"max_cost_eur": 50, "target_margin": 0.25}, {"max_cost_eur": None, "target_margin": 0.20}]},
+            "LCD / In-Cell": {"version": 1, "warranty_reserve": 0.05, "tiers": [{"max_cost_eur": 30, "target_margin": 0.35}, {"max_cost_eur": 60, "target_margin": 0.30}, {"max_cost_eur": None, "target_margin": 0.25}]},
+            "Soft OLED": {"version": 1, "warranty_reserve": 0.05, "tiers": [{"max_cost_eur": 80, "target_margin": 0.30}, {"max_cost_eur": 140, "target_margin": 0.25}, {"max_cost_eur": None, "target_margin": 0.20}]},
+            "Refurbished original": {"version": 1, "warranty_reserve": 0.05, "tiers": [{"max_cost_eur": 80, "target_margin": 0.30}, {"max_cost_eur": 160, "target_margin": 0.25}, {"max_cost_eur": None, "target_margin": 0.20}]},
+            "Camera / major module": {"version": 1, "warranty_reserve": 0.05, "tiers": [{"max_cost_eur": 20, "target_margin": 0.40}, {"max_cost_eur": 60, "target_margin": 0.30}, {"max_cost_eur": None, "target_margin": 0.20}]},
+            "Connector / small module": {"version": 1, "warranty_reserve": 0.05, "tiers": [{"max_cost_eur": 10, "target_margin": 0.45}, {"max_cost_eur": 30, "target_margin": 0.35}, {"max_cost_eur": None, "target_margin": 0.25}]},
+            "Computer / laptop / console part": {"version": 1, "warranty_reserve": 0.03, "tiers": [{"max_cost_eur": 50, "target_margin": 0.30}, {"max_cost_eur": 150, "target_margin": 0.20}, {"max_cost_eur": None, "target_margin": 0.12}]},
+            "SPLOŠNO": {"version": 1, "warranty_reserve": 0.05, "tiers": [{"max_cost_eur": 20, "target_margin": 0.35}, {"max_cost_eur": 75, "target_margin": 0.25}, {"max_cost_eur": None, "target_margin": 0.15}]},
         },
     },
     "supplier": {
@@ -215,6 +235,12 @@ def _validate_settings(settings: dict[str, Any]) -> None:
     database = settings.get("database", {})
     if database.get("backend") not in {"sqlite", "postgresql"}:
         raise ValueError("Podprta podatkovna načina sta sqlite in postgresql.")
+
+    encryption = settings.get("data_encryption", {})
+    if encryption.get("provider") != "gocryptfs":
+        raise ValueError("Podprt ponudnik šifriranja podatkov je gocryptfs.")
+    if encryption.get("enabled") and not str(encryption.get("cipher_dir") or "").strip():
+        raise ValueError("Pri vključenem šifriranju manjka šifrirana podatkovna mapa.")
 
     business = settings.get("business", {})
     premises = business.get("premises") or []
@@ -306,12 +332,37 @@ def _validate_settings(settings: dict[str, Any]) -> None:
         raise ValueError("Meja dodatnih kilometrov organizirane trase ni veljavna.")
     if pricing.get("t1_review_rule") != "FIRST_FULL_QUARTER_AFTER_PRODUCTION_START":
         raise ValueError("T1 mora biti pregledan po prvem polnem produkcijskem četrtletju.")
+    categories = pricing.get("categories") or {}
+    if len(categories) != 9:
+        raise ValueError("Potrjena cenovna matrika mora vsebovati natanko devet profilov.")
+    for profile_code, rule in categories.items():
+        tiers = list(rule.get("tiers") or [])
+        if len(tiers) != 3:
+            raise ValueError(f"Cenovni profil {profile_code} mora imeti natanko tri razrede.")
+        previous_limit = -1.0
+        for index, tier in enumerate(tiers):
+            margin = float(tier.get("target_margin", -1))
+            if not 0 <= margin < 0.80:
+                raise ValueError(f"Cenovni profil {profile_code} vsebuje neveljavno maržo.")
+            limit = tier.get("max_cost_eur")
+            if index == 2:
+                if limit is not None:
+                    raise ValueError(f"Zadnji razred profila {profile_code} mora biti odprt.")
+            elif limit is None or float(limit) <= previous_limit:
+                raise ValueError(f"Meje profila {profile_code} morajo strogo naraščati.")
+            if limit is not None:
+                previous_limit = float(limit)
+        reserve = float(rule.get("warranty_reserve", -1))
+        if not 0 <= reserve < 1:
+            raise ValueError(f"Cenovni profil {profile_code} vsebuje neveljavno rezervo.")
 
     furs = settings.get("furs", {})
     if furs.get("environment") not in {"TEST", "PRODUCTION"}:
         raise ValueError("FURS okolje mora biti TEST ali PRODUCTION.")
     if int(furs.get("test_timeout_seconds", 15)) not in range(3, 61):
         raise ValueError("Čas FURS TEST povezave mora biti med 3 in 60 sekund.")
+    if int(furs.get("production_timeout_seconds", 15)) not in range(3, 61):
+        raise ValueError("Čas produkcijske FURS povezave mora biti med 3 in 60 sekund.")
     for key, label in (
         ("test_business_premise_id", "Testni poslovni prostor"),
         ("test_electronic_device_id", "Testna elektronska naprava"),
@@ -322,14 +373,18 @@ def _validate_settings(settings: dict[str, Any]) -> None:
     if environment == "TEST" and furs.get("environment") == "PRODUCTION":
         raise ValueError("TEST aplikacija ne sme uporabljati produkcijskega FURS okolja.")
     if (
-        furs.get("enabled")
-        and furs.get("environment") == "PRODUCTION"
-        and os.environ.get("MIKROFIX_ALLOW_FURS_PRODUCTION") != "YES"
+        furs.get("enabled") and furs.get("environment") == "PRODUCTION"
+        and not bool(furs.get("production_activation_confirmed"))
     ):
         raise ValueError(
             "Produkcijski FURS je varnostno zaklenjen. Aktivacija zahteva "
             "poseben potrjen produkcijski postopek."
         )
+    if furs.get("enabled") and furs.get("environment") == "PRODUCTION":
+        if not str(furs.get("certificate_path") or "").strip():
+            raise ValueError("Za produkcijski FURS manjka pot namenskega potrdila.")
+        if environment != "PRODUCTION":
+            raise ValueError("Produkcijski FURS zahteva produkcijski način celotne aplikacije.")
 
     supplier = settings.get("supplier", {}).get("fixshop", {})
     if int(supplier.get("refresh_hours", 0)) < 1:
@@ -368,7 +423,7 @@ class RuntimeContext:
 
     @property
     def version_label(self) -> str:
-        suffix = " TEST" if self.is_test else ""
+        suffix = " SANDBOX" if self.is_test else ""
         return f"v{APP_VERSION}{suffix}"
 
     @property
@@ -411,6 +466,9 @@ class RuntimeContext:
         foreign_keys: bool = False,
         read_only: bool = False,
     ) -> sqlite3.Connection:
+        from mikrofix_data_encryption import require_encrypted_data_ready
+
+        require_encrypted_data_ready(self.settings, self.data_dir)
         backend = self.settings["database"]["backend"]
         if backend != "sqlite":
             raise RuntimeError(
@@ -460,6 +518,10 @@ def load_runtime(app_dir: Path) -> RuntimeContext:
     ).expanduser()
     data_dir = raw_data_dir if raw_data_dir.is_absolute() else app_dir / raw_data_dir
     data_dir = data_dir.resolve()
+
+    from mikrofix_data_encryption import ensure_encrypted_data_mounted
+
+    ensure_encrypted_data_mounted(settings, data_dir)
     db_dir = data_dir / "db"
     service_data_dir = data_dir / "service"
     office_data_dir = data_dir / "office"

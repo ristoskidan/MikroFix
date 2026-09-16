@@ -20,9 +20,9 @@ from pathlib import Path
 
 
 APP_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = APP_DIR / "mikrofix_settings_e2e_test.json"
-EXPECTED_DATA_DIR = APP_DIR / "MikroFixData_V30_E2E_TEST"
-MANIFEST_PATH = EXPECTED_DATA_DIR / "E2E_TEST_MANIFEST.json"
+CONFIG_PATH = Path(
+    os.environ.get("MIKROFIX_CONFIG") or APP_DIR / "mikrofix_settings_e2e_test.json"
+).expanduser().resolve()
 SEED_VERSION = "MFI-E2E-1"
 
 # Konfiguracijo določimo pred uvozom modulov, ki ustvarijo RuntimeContext.
@@ -57,6 +57,8 @@ from mikrofix_workflows import (  # noqa: E402
 
 
 RUNTIME = load_runtime(APP_DIR)
+EXPECTED_DATA_DIR = RUNTIME.data_dir.resolve()
+MANIFEST_PATH = EXPECTED_DATA_DIR / "E2E_TEST_MANIFEST.json"
 CENT = Decimal("0.01")
 
 LONG_ARTICLE_NAME = (
@@ -137,10 +139,10 @@ def guard_isolated_test() -> None:
         problems.append("FURS produkcijsko pošiljanje je vključeno")
     if os.environ.get("MIKROFIX_ALLOW_FURS_PRODUCTION"):
         problems.append("nastavljena so produkcijska FURS vrata")
-    if RUNTIME.data_dir.resolve() != EXPECTED_DATA_DIR.resolve():
+    if RUNTIME.data_dir.resolve() != EXPECTED_DATA_DIR:
         problems.append(f"napačna podatkovna mapa: {RUNTIME.data_dir}")
-    if RUNTIME.data_dir.parent.resolve() != APP_DIR.resolve():
-        problems.append("testna baza ni neposredno v mapi testne izdaje")
+    if EXPECTED_DATA_DIR.name != "MikroFixData_V30_E2E_TEST":
+        problems.append("testna podatkovna mapa nima varnega E2E imena")
     if problems:
         raise RuntimeError("E2E TEST JE VARNOSTNO ZAVRNJEN: " + "; ".join(problems))
 
@@ -149,7 +151,7 @@ def rebuild_recoverably() -> Path | None:
     if not EXPECTED_DATA_DIR.exists():
         return None
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    archive = APP_DIR / f"MikroFixData_V30_E2E_TEST_ARHIV_{stamp}"
+    archive = EXPECTED_DATA_DIR.with_name(f"MikroFixData_V30_E2E_TEST_ARHIV_{stamp}")
     EXPECTED_DATA_DIR.replace(archive)
     for directory in (
         RUNTIME.db_dir,
@@ -325,19 +327,45 @@ def seed_already_present() -> bool:
 
 def make_attachment(path: Path, title: str, lines: list[str]) -> Path:
     from reportlab.lib.pagesizes import A4
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.pdfgen.canvas import Canvas
+
+    # Vgrajeni Helvetica fonti nimajo slovenskih znakov. Pisavo vdelamo v PDF,
+    # da so testne priloge pravilne tudi na računalniku brez lokalnih pisav.
+    font_dir = Path("/usr/share/fonts/truetype/dejavu")
+    regular_name = "MikroFIXDejaVu"
+    bold_name = "MikroFIXDejaVuBold"
+    if regular_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(regular_name, str(font_dir / "DejaVuSans.ttf")))
+    if bold_name not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont(bold_name, str(font_dir / "DejaVuSans-Bold.ttf")))
 
     path.parent.mkdir(parents=True, exist_ok=True)
     canvas = Canvas(str(path), pagesize=A4)
     canvas.setTitle(title)
-    canvas.setFont("Helvetica-Bold", 15)
+    canvas.setFont(bold_name, 15)
     canvas.drawString(45, 800, title)
-    canvas.setFont("Helvetica", 9)
+    canvas.setFont(regular_name, 9)
     y = 775
     for line in lines:
-        canvas.drawString(45, y, str(line)[:110])
-        y -= 15
-    canvas.setFont("Helvetica-Bold", 10)
+        words = str(line).split()
+        wrapped: list[str] = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if current and pdfmetrics.stringWidth(candidate, regular_name, 9) > 505:
+                wrapped.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            wrapped.append(current)
+        for index, visual_line in enumerate(wrapped or [""]):
+            canvas.drawString(45 if index == 0 else 57, y, visual_line)
+            y -= 13
+        y -= 2
+    canvas.setFont(bold_name, 10)
     canvas.drawString(45, 65, "TESTNI DOKUMENT - NI PRAVI RACUN ALI DOBAVNICA")
     canvas.save()
     return path

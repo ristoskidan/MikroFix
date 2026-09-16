@@ -12,7 +12,7 @@ from xml.sax.saxutils import escape as xml_escape
 from pathlib import Path
 from datetime import datetime, timedelta
 
-from mikrofix_tk_bootstrap import prepare_tcl_tk
+from mikrofix_tk_bootstrap import maximize_work_window, prepare_tcl_tk
 
 prepare_tcl_tk()
 
@@ -58,17 +58,26 @@ from mikrofix_workflows import (
     ensure_workflow_schema,
     generate_buyback_pdf,
     generate_service_order_pdf,
+    generate_service_tag_pdf,
     get_buyback,
     get_service_order,
+    finish_service_work_timer,
     latest_open_service_order,
+    list_running_service_work_sessions,
     link_service_result,
+    load_service_order_parts,
+    pause_service_work_timer,
+    save_service_order_parts,
+    service_work_timer_snapshot,
+    start_service_work_timer,
 )
 from mikrofix_backup import backup_sqlite_file
 from mikrofix_printing import (
-    default_windows_printer,
-    list_windows_printers,
-    send_pdf_to_windows_printer,
+    default_printer,
+    list_printers,
+    send_pdf_to_printer,
 )
+from mikrofix_platform import open_local_file, protect_private_path
 from mikrofix_v29_core import (
     initialize_v29,
     register_buyback_device,
@@ -79,6 +88,11 @@ from mikrofix_v30_cash import (
     cash_session_snapshot,record_cash_entry,require_open_cash_session,
 )
 from mikrofix_invoice_bridge import load_service_invoice_seed
+from mikrofix_ajpes import AjpesError, find_partner_by_tax_number
+from mikrofix_v30_pos import (
+    customer_partner_by_id, list_customer_partners, save_customer_partner,
+    service_labor_from_minutes, service_tariff_snapshot,
+)
 from mikrofix_v30_pos_ui import open_pos
 from mikrofix_transactions import complete_buyback_atomic
 from mikrofix_operations import (
@@ -92,6 +106,13 @@ from mikrofix_backup_runtime import (
     external_backup_status,
     save_backup_passphrase,
     update_backup_settings,
+)
+from mikrofix_data_encryption import DataEncryptionError, unmount_encrypted_data
+from mikrofix_attachments import (
+    ServiceImageError,
+    archive_service_image,
+    load_service_image,
+    resolve_service_image_path,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -142,10 +163,13 @@ COMPANY_PHONE = "+386 40 353 402"
 COMPANY_EMAIL = "mikrofixsi@gmail.com"
 COMPANY_WEB = "mikrofix.si"
 FURS_ENABLED = bool(RUNTIME.settings["furs"].get("enabled", False))
-TEST_NOTICE = (
-    f"TEST • FURS PRODUKCIJA IZKLOPLJENA • "
+ENVIRONMENT_NOTICE = (
+    f"SANDBOX • NI PRODUKCIJA • FURS PRODUKCIJA IZKLOPLJENA • "
     f"{RUNTIME.active_premise}/{RUNTIME.electronic_device}"
+    if RUNTIME.is_test else
+    f"PRODUKCIJA • FURS AKTIVEN • {RUNTIME.active_premise}/{RUNTIME.electronic_device}"
 )
+ENVIRONMENT_NOTICE_COLOR = DANGER if RUNTIME.is_test else SUCCESS
 
 TEST_ITEMS = [
     "Face ID / Touch ID",
@@ -195,6 +219,7 @@ active_service_order_id = None
 device_identity_method = ""
 device_type_code = ""
 last_saved_service_id = None
+service_timer_after_id = None
 
 DEVICE_TYPE_LABELS = {
     "TELEFON": "Telefon",
@@ -206,16 +231,15 @@ DEVICE_TYPE_LABELS = {
 }
 
 SERVICE_LINE_KIND_LABELS = {
-    "SERVICE": "Delo / storitev",
-    "DIAGNOSTIC": "Diagnostika",
-    "LOGISTICS": "Logistika",
+    "T1": "T1 – Delo v delavnici",
+    "T2": "T2 – Delo na terenu",
 }
 LABOR_FLOOR_EUR = float(RUNTIME.settings.get("pricing", {}).get("l0_eur", 22.0))
 
 
 
 def protect_file_permissions(path):
-    """Na Windows omeji datoteko na trenutnega uporabnika + SYSTEM."""
+    """Omeji produkcijsko datoteko na trenutnega uporabnika."""
     try:
         p = Path(path)
         # TEST izdaja vsebuje samo umetne podatke. Stroga produkcijska ACL bi
@@ -224,22 +248,7 @@ def protect_file_permissions(path):
             return
         if os.environ.get("MIKROFIX_SKIP_FILE_PROTECTION") == "1":
             return
-        if os.name != "nt" or not p.exists():
-            return
-        user = os.environ.get("USERNAME") or os.environ.get("USER")
-        if not user:
-            return
-        subprocess.run(
-            [
-                "icacls", str(p),
-                "/inheritance:r",
-                "/grant:r", f"{user}:(F)",
-                "SYSTEM:(F)"
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
+        protect_private_path(p)
     except Exception:
         # ACL je dodatna zaščita; napaka ne sme ustaviti servisa.
         pass
@@ -548,6 +557,9 @@ def init_db():
         "office_invoice_id": "INTEGER",
         "resolution_status": "TEXT NOT NULL DEFAULT 'AWAITING_INVOICE'",
         "converted_buyback_id": "INTEGER",
+        "ready_for_pickup_at": "TEXT",
+        "picked_up_at": "TEXT",
+        "final_notice_recorded_at": "TEXT",
     }
     for col, typ in wanted.items():
         if col not in columns:
@@ -571,8 +583,24 @@ def init_db():
         description TEXT NOT NULL,
         quantity REAL NOT NULL,
         unit_price REAL NOT NULL,
+        service_tier TEXT,
+        billable_minutes INTEGER NOT NULL DEFAULT 0,
+        tariff_version TEXT,
+        first_rate REAL NOT NULL DEFAULT 0,
+        extra_half_hour_rate REAL NOT NULL DEFAULT 0,
         FOREIGN KEY(service_id) REFERENCES service(id) ON DELETE CASCADE
     )""")
+
+    manual_columns = {row[1] for row in c.execute("PRAGMA table_info(service_manual_lines)")}
+    for col, typ in {
+        "service_tier": "TEXT",
+        "billable_minutes": "INTEGER NOT NULL DEFAULT 0",
+        "tariff_version": "TEXT",
+        "first_rate": "REAL NOT NULL DEFAULT 0",
+        "extra_half_hour_rate": "REAL NOT NULL DEFAULT 0",
+    }.items():
+        if col not in manual_columns:
+            c.execute(f"ALTER TABLE service_manual_lines ADD COLUMN {col} {typ}")
 
     part_columns = {row[1] for row in c.execute("PRAGMA table_info(service_parts)")}
     if "barcode" not in part_columns:
@@ -687,6 +715,14 @@ def pdf_safe(value):
     return xml_escape(str(value or "-")).replace("\n", "<br/>")
 
 
+def safe_float(value, default=0.0):
+    """Pretvori uporabniški decimalni vnos (sprejme vejico ali piko)."""
+    try:
+        return float(str(value or "").strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return default
+
+
 def mask_identifier(value):
     """Za javni prikaz skrij vse razen zadnjih 4 znakov."""
     value = str(value or "").strip()
@@ -766,7 +802,10 @@ def update_workflow_lock():
     try:
         if ACTIVE_SCREEN == "SERVICE":
             top_nb.tab(tab_intake_top, state="normal" if identified else "disabled")
-            top_nb.tab(tab_service_top, state="normal" if identified else "disabled")
+            # Pregled odprtih sprejemov mora biti dosegljiv tudi brez na novo
+            # priključene naprave. Izbrani nalog sam naloži svojo shranjeno
+            # identiteto, šele nato pa odpre delovni prostor in časovnik.
+            top_nb.tab(tab_service_top, state="normal")
             top_nb.tab(tab_claims_top, state="normal" if identified else "disabled")
             if "tab_buyback_top" in globals():
                 top_nb.tab(tab_buyback_top, state="hidden")
@@ -784,7 +823,7 @@ def update_workflow_lock():
     if not identified:
         try:
             protected_tabs = {
-                str(tab_intake_top), str(tab_service_top), str(tab_claims_top)
+                str(tab_intake_top), str(tab_claims_top)
             }
             if "tab_buyback_top" in globals():
                 protected_tabs.add(str(tab_buyback_top))
@@ -839,6 +878,7 @@ def _detect_success(data):
     imei_display.set(mask_identifier(imei_value))
     device_identity_method = "MICRODETECT"
     device_type_code = "APPLE_MOBILE"
+    set_service_test_tabs_for_device(True)
 
     # Osebni podatki in odprto naročilo nikoli ne smejo ostati pripeti na
     # drugo napravo. Pri ponovni zaznavi iste naprave vnos ostane nedotaknjen.
@@ -990,7 +1030,7 @@ def detect():
     device_type_code = ""
     device_history_count.set("")
     for var in pre_test_vars.values():
-        var.set("OK")
+        var.set("NI TESTIRANO")
 
     status.set("Preverjam iPhone prek USB...")
     connected_state.set("ZAZNAVAM...")
@@ -1024,7 +1064,7 @@ def identify_other_device():
 
     win = tk.Toplevel(root)
     win.title("MikroFIX - Druga naprava")
-    fit_dialog_to_screen(win, 580, 430)
+    maximize_work_window(win, "580x430")
     win.minsize(480, 370)
     win.resizable(True, True)
     win.configure(bg=BG)
@@ -1108,6 +1148,7 @@ def identify_other_device():
         reverse_types = {label: code for code, label in DEVICE_TYPE_LABELS.items()}
         device_type_code = reverse_types.get(type_var.get(), "DRUGO")
         device_identity_method = "MANUAL_OTHER"
+        set_service_test_tabs_for_device(False)
         name.set(model_v)
         model.set(model_v)
         serial.set(serial_v)
@@ -1119,7 +1160,7 @@ def identify_other_device():
         connected_state.set("POVEZAN")
         connected_label.configure(fg=SUCCESS)
         header_connected_label.configure(fg=SUCCESS)
-        set_quick_tests_enabled(True)
+        set_quick_tests_enabled(False)
         status.set(
             "Druga naprava je identificirana s fizičnim prepisom. Odkup ni odklenjen."
         )
@@ -1245,7 +1286,7 @@ def collect_manual_service_lines():
         return rows
     for iid in tree.get_children():
         values = tree.item(iid, "values")
-        if len(values) < 5:
+        if len(values) < 9:
             continue
         shown_kind = str(values[0]).strip()
         reverse_kinds = {label: code for code, label in SERVICE_LINE_KIND_LABELS.items()}
@@ -1255,6 +1296,10 @@ def collect_manual_service_lines():
             float(str(values[2]).replace(",", ".")),
             float(str(values[3]).replace(",", ".")),
             float(str(values[4]).replace(",", ".")),
+            str(values[5]),
+            int(values[6]),
+            float(str(values[7]).replace(",", ".")),
+            float(str(values[8]).replace(",", ".")),
         ))
     return rows
 
@@ -1271,37 +1316,46 @@ def refresh_service_lines_total():
         service_lines_total_var.set(f"Skupaj storitve: {total:.2f} €")
 
 
+def refresh_service_tariff_preview(*_args):
+    try:
+        reverse = {label: code for code, label in SERVICE_LINE_KIND_LABELS.items()}
+        tier = reverse.get(service_line_kind_var.get(), "T1")
+        extra = int(service_line_quantity_var.get().strip())
+        tariff = service_tariff_snapshot(tier, max(0, extra), RUNTIME.settings)
+        service_line_price_var.set(f"{float(tariff['price']):.2f}")
+    except (ValueError, TypeError):
+        service_line_price_var.set("—")
+
+
 def add_manual_service_line():
     description = service_line_description_var.get().strip()
     if not description:
         messagebox.showwarning("MikroFIX", "Vpiši opis servisne postavke.")
         return
     try:
-        quantity = float(service_line_quantity_var.get().strip().replace(",", "."))
-        unit_price = float(service_line_price_var.get().strip().replace(",", "."))
+        extra_half_hours = int(service_line_quantity_var.get().strip())
     except ValueError:
-        messagebox.showwarning("MikroFIX", "Količina in cena morata biti številki.")
+        messagebox.showwarning("MikroFIX", "Število dodatnih 30-minutnih enot mora biti celo število.")
         return
-    if quantity <= 0:
-        messagebox.showwarning("MikroFIX", "Količina mora biti večja od 0.")
+    if extra_half_hours < 0:
+        messagebox.showwarning("MikroFIX", "Število dodatnih enot ne sme biti negativno.")
         return
-    if unit_price < LABOR_FLOOR_EUR:
-        messagebox.showwarning(
-            "MikroFIX - L0",
-            f"Cena storitve mora biti najmanj {LABOR_FLOOR_EUR:.2f} EUR na enoto.",
-        )
-        return
-    total = round(quantity * unit_price, 2)
+    reverse_kinds = {label: code for code, label in SERVICE_LINE_KIND_LABELS.items()}
+    tier = reverse_kinds.get(service_line_kind_var.get(), "T1")
+    tariff = service_tariff_snapshot(tier, extra_half_hours, RUNTIME.settings)
+    total = float(tariff["price"])
     service_lines_tree.insert(
         "", "end",
         values=(
             service_line_kind_var.get(), description,
-            f"{quantity:.2f}", f"{unit_price:.2f}", f"{total:.2f}",
+            "1.00", f"{total:.2f}", f"{total:.2f}",
+            tariff["tariff_version"], tariff["billable_minutes"],
+            f"{tariff['first_rate']:.2f}", f"{tariff['extra_half_hour_rate']:.2f}",
         ),
     )
     service_line_description_var.set("")
-    service_line_quantity_var.set("1")
-    service_line_price_var.set(f"{LABOR_FLOOR_EUR:.2f}")
+    service_line_quantity_var.set("0")
+    service_line_price_var.set(f"{float(service_tariff_snapshot('T1', 0, RUNTIME.settings)['price']):.2f}")
     refresh_service_lines_total()
     service_line_description_entry.focus_set()
 
@@ -1376,7 +1430,7 @@ def add_article_to_service(article):
         )
         return False
 
-    parts_tree.insert(
+    inserted_iid = parts_tree.insert(
         "", "end",
         values=(
             article_id_v,
@@ -1387,6 +1441,9 @@ def add_article_to_service(article):
             format_price(price_v)
         )
     )
+    if not persist_active_service_parts():
+        parts_tree.delete(inserted_iid)
+        return False
     status.set(f"Dodan artikel: {name_v} ({barcode_v})")
     return True
 
@@ -1508,7 +1565,7 @@ def open_inventory_editor(parent=None, article_id=None, on_saved=None):
 
     win = tk.Toplevel(parent or root)
     win.title("MikroFIX - Artikel")
-    fit_dialog_to_screen(win, 760, 660)
+    maximize_work_window(win, "760x660")
     win.minsize(620, 520)
     win.resizable(True, True)
     win.configure(bg=BG)
@@ -1972,13 +2029,17 @@ def start_supplier_refresh(force=False):
         return
     supplier_status_var.set("Preverjam, ali je 24-urno osveževanje FixShop cen potrebno …")
 
-    def progress(done, total):
+    def post_to_ui(callback):
         try:
-            root.after(0, lambda: supplier_status_var.set(
+            root.after(0, callback)
+            return True
+        except (RuntimeError, tk.TclError):
+            return False
+
+    def progress(done, total):
+        post_to_ui(lambda: supplier_status_var.set(
                 f"Osveževanje FixShop: {done}/{total} delov …"
             ))
-        except Exception:
-            pass
 
     def finished(result, error=None):
         if error:
@@ -2001,9 +2062,9 @@ def start_supplier_refresh(force=False):
     def worker():
         try:
             result = SUPPLIER_STORE.refresh_due(force=force, progress=progress)
-            root.after(0, lambda: finished(result))
+            post_to_ui(lambda: finished(result))
         except Exception as exc:
-            root.after(0, lambda error=str(exc): finished({}, error))
+            post_to_ui(lambda error=str(exc): finished({}, error))
 
     supplier_refresh_thread = threading.Thread(
         target=worker, name="MikroFIX-FixShop", daemon=True
@@ -2086,15 +2147,69 @@ def inventory_delete():
 
 
 def remove_selected_part():
+    removed = []
     for iid in parts_tree.selection():
+        removed.append((parts_tree.index(iid), parts_tree.item(iid, "values")))
         parts_tree.delete(iid)
+    if removed and not persist_active_service_parts():
+        for index, values in sorted(removed, key=lambda row: row[0]):
+            parts_tree.insert("", index, values=values)
+
+
+def persist_active_service_parts(*, quiet=False):
+    """Shrani dele odprtega naloga; zaloga se tu še ne odpisuje."""
+    if not active_service_order_id:
+        return True
+    c = connect()
+    try:
+        save_service_order_parts(
+            c, int(active_service_order_id), collect_parts_from_tree()
+        )
+    except Exception as exc:
+        c.close()
+        if not quiet:
+            messagebox.showerror(
+                "MikroFix – shranjevanje artiklov",
+                f"Seznama uporabljenih artiklov ni bilo mogoče shraniti:\n{exc}",
+                parent=root,
+            )
+        return False
+    c.close()
+    return True
+
+
+def restore_active_service_parts():
+    """Napolni prikaz iz trajnega osnutka izbranega odprtega naloga."""
+    if not active_service_order_id:
+        return True
+    c = connect()
+    try:
+        rows = load_service_order_parts(c, int(active_service_order_id))
+    except Exception as exc:
+        c.close()
+        messagebox.showerror(
+            "MikroFix – nalaganje artiklov",
+            f"Shranjeni uporabljeni artikli niso bili naloženi:\n{exc}",
+            parent=root,
+        )
+        return False
+    c.close()
+    for part_name, part_id, barcode_v, article_id_v, lot_v, price_v in rows:
+        parts_tree.insert(
+            "", "end",
+            values=(
+                article_id_v if article_id_v is not None else "",
+                part_name or "", part_id or "", barcode_v or "",
+                lot_v or "", format_price(price_v),
+            ),
+        )
+    return True
 
 def add_photos():
     paths = filedialog.askopenfilenames(
         title="Dodaj fotografije naprave",
         filetypes=[
             ("Slike", "*.jpg *.jpeg *.png *.webp *.bmp"),
-            ("Vse datoteke", "*.*")
         ]
     )
     if not paths:
@@ -2102,6 +2217,16 @@ def add_photos():
     stage = photo_stage.get()
     for p in paths:
         pending_photos.append({"path": p, "stage": stage})
+    refresh_photo_list()
+
+
+def add_approval_evidence():
+    files = filedialog.askopenfilenames(
+        title="Izberi fotografijo podpisa, e-pošte ali SMS odobritve",
+        filetypes=[("Slike", "*.jpg *.jpeg *.png *.webp *.bmp")],
+    )
+    for path in files:
+        pending_photos.append({"path": path, "stage": "ODOBRITEV"})
     refresh_photo_list()
 
 
@@ -2124,36 +2249,41 @@ def remove_selected_photo():
 
 def copy_photos_for_service(service_id, service_no, c):
     if not pending_photos:
-        return
+        return []
     target_dir = PHOTOS_DIR / service_no
     target_dir.mkdir(parents=True, exist_ok=True)
-
-    for idx, item in enumerate(pending_photos, 1):
-        src = Path(item["path"])
-        if not src.exists():
-            continue
-        ext = src.suffix.lower() or ".jpg"
-        safe_name = f"{idx:02d}_{item['stage']}{ext}"
-        dest = target_dir / safe_name
-        counter = 1
-        while dest.exists():
-            dest = target_dir / f"{idx:02d}_{item['stage']}_{counter}{ext}"
-            counter += 1
-        shutil.copy2(src, dest)
-        rel = dest.relative_to(APP_DIR)
-        c.execute(
-            "INSERT INTO service_photos(service_id, stage, rel_path) VALUES(?,?,?)",
-            (service_id, item["stage"], str(rel))
-        )
+    created = []
+    try:
+        for idx, item in enumerate(pending_photos, 1):
+            dest = archive_service_image(
+                Path(item["path"]),
+                target_dir,
+                f"{idx:02d}_{item['stage']}",
+            )
+            created.append(dest)
+            rel = dest.relative_to(RUNTIME.data_dir)
+            c.execute(
+                "INSERT INTO service_photos(service_id, stage, rel_path) VALUES(?,?,?)",
+                (service_id, item["stage"], str(rel)),
+            )
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        raise
+    return created
 
 
 service_save_in_progress = False
 
 
-def save():
+def _save_service():
     global active_service_order_id, last_saved_service_id, service_save_in_progress
 
     if service_save_in_progress:
+        messagebox.showinfo(
+            "MikroFix – zaključek servisa",
+            "Zaključevanje servisa že poteka. Počakaj na potrditev ali prikaz napake.",
+        )
         return
 
     if not active_service_order_id:
@@ -2186,34 +2316,85 @@ def save():
         return
 
     parts = collect_parts_from_tree()
-    manual_lines = collect_manual_service_lines()
-    if not parts and not manual_lines:
-        messagebox.showwarning(
-            "MikroFIX",
-            "Dodaj vsaj eno ročno servisno postavko ali fizični del iz zaloge.",
+    service_end_v = datetime.now()
+    c = connect()
+    try:
+        order = get_service_order(c, int(active_service_order_id))
+        elapsed_minutes_v = finish_service_work_timer(
+            c, int(active_service_order_id), ended_at=service_end_v,
+            operator_code=RUNTIME.operator_code, commit=False
+        )
+        labor = service_labor_from_minutes(
+            order.get("contract_context"), elapsed_minutes_v,
+            RUNTIME.settings, description="Delo",
+        )
+        c.rollback()
+    except Exception as exc:
+        c.rollback()
+        c.close()
+        messagebox.showerror(
+            "MikroFix - zaključek servisa",
+            f"Časa dela ni bilo mogoče izračunati:\n{exc}",
         )
         return
-    for line_kind_v, description_v, qty_v, unit_price_v, _total_v in manual_lines:
-        if not description_v or qty_v <= 0:
-            messagebox.showwarning("MikroFIX", "Servisna postavka ni popolna.")
-            return
-        if unit_price_v < LABOR_FLOOR_EUR:
-            messagebox.showwarning(
-                "MikroFIX - L0",
-                f"Vsaka storitvena postavka mora biti najmanj L0 "
-                f"({LABOR_FLOOR_EUR:.2f} EUR na enoto).",
-            )
-            return
-    labor_price_v = round(sum(row[2] * row[3] for row in manual_lines), 2)
+    c.close()
+    manual_lines = [(
+        labor["tier"], labor["description"], 1.0, float(labor["price"]),
+        float(labor["price"]), labor["tariff_version"],
+        int(labor["billable_minutes"]), float(labor["first_rate"]),
+        float(labor["extra_half_hour_rate"]),
+    )]
+    labor_price_v = float(labor["price"])
+    quoted_total_v = float(order.get("quote_eur") or 0)
+    prepared_total_v = labor_price_v + sum(float(row[5] or 0) for row in parts)
+    approval_required_v = quoted_total_v > 0 and prepared_total_v > quoted_total_v + 0.009
+    approved_limit_v = safe_float(service_approved_limit_var.get(), 0)
+    approval_channel_v = service_approval_channel_var.get().strip()
+    approval_evidence_v = any(
+        item.get("stage") == "ODOBRITEV" for item in pending_photos
+    )
+    if approval_required_v and (
+        approved_limit_v + 0.009 < prepared_total_v
+        or approval_channel_v not in {"PODPIS", "E-POŠTA", "SMS"}
+        or not approval_evidence_v
+    ):
+        messagebox.showwarning(
+            "MikroFix – odobritev dodatnega dela",
+            f"Prvotna ponudba je {quoted_total_v:.2f} EUR, pripravljene postavke pa "
+            f"{prepared_total_v:.2f} EUR.\n\nVpiši odobreni limit, izberi kanal in "
+            "pripni fotografijo podpisa, e-pošte ali SMS odobritve.",
+        )
+        try:
+            service_nb.select(tab_approval)
+        except Exception:
+            pass
+        return
     service_save_in_progress = True
     if "service_save_button" in globals():
         service_save_button.configure(state="disabled", text="SHRANJUJEM...")
-    backup_db("before_save")
+    try:
+        backup_db("before_save")
+    except Exception as exc:
+        service_save_in_progress = False
+        if "service_save_button" in globals():
+            service_save_button.configure(
+                state="normal", text="ZAKLJUČI SERVIS IN PRIPRAVI RAČUN"
+            )
+        messagebox.showerror(
+            "MikroFix – varnostna kopija",
+            f"Servis ni bil zaključen, ker predhodna varnostna kopija ni uspela:\n{exc}",
+        )
+        return
 
     c = connect()
+    created_photo_paths = []
     try:
         c.execute("ATTACH DATABASE ? AS inventorydb", (str(INVENTORY_DB),))
         ensure_lot_schema(c, "inventorydb")
+        elapsed_minutes_v = finish_service_work_timer(
+            c, int(active_service_order_id), ended_at=service_end_v,
+            operator_code=RUNTIME.operator_code, commit=False
+        )
         no = next_no(c)
         now = datetime.now()
         (
@@ -2226,6 +2407,18 @@ def save():
             RUNTIME.settings["warranty"]["installed_parts_months"],
         )
         legacy_part_id = ", ".join([pid for _, pid, _, _, _, _ in parts if pid])
+        c.execute(
+            """
+            UPDATE service_orders
+            SET authorized_limit_eur=?,approval_status=?
+            WHERE id=?
+            """,
+            (
+                approved_limit_v if approval_required_v else quoted_total_v,
+                "APPROVED" if approval_required_v else "NOT_REQUIRED",
+                int(active_service_order_id),
+            ),
+        )
 
         cur = c.execute("""
             INSERT INTO service(
@@ -2260,16 +2453,20 @@ def save():
         ))
         service_id = cur.lastrowid
 
-        for line_kind_v, description_v, qty_v, unit_price_v, _total_v in manual_lines:
+        for line_kind_v, description_v, qty_v, unit_price_v, _total_v, version_v, minutes_v, first_v, extra_v in manual_lines:
             c.execute("""
                 INSERT INTO service_manual_lines(
-                    service_id, line_kind, description, quantity, unit_price
-                ) VALUES(?,?,?,?,?)
+                    service_id, line_kind, description, quantity, unit_price,
+                    service_tier, billable_minutes, tariff_version, first_rate,
+                    extra_half_hour_rate
+                ) VALUES(?,?,?,?,?,?,?,?,?,?)
             """, (
                 service_id, line_kind_v, description_v, qty_v, unit_price_v,
+                line_kind_v, minutes_v, version_v, first_v, extra_v,
             ))
 
-        # Zalogo zmanjšamo šele ob uspešnem shranjevanju servisa.
+        # Ob pripravi servisa se deli rezervirajo. Fizični odpis nastane šele
+        # v isti transakciji kot povezani račun.
         article_counts = {}
         for _pn, _pid, _barcode, article_id_v, _lot, _price in parts:
             if article_id_v is not None:
@@ -2294,45 +2491,48 @@ def save():
                     f"(na voljo {available_stock}, zahtevano {qty_used})."
                 )
 
-        allocated_service_lots = {}
-        for article_id_v, qty_used in article_counts.items():
-            row = c.execute(
-                """
-                SELECT stock_qty, article_name, lot_serial, location
-                FROM inventorydb.inventory_items WHERE id=?
-                """,
-                (article_id_v,),
-            ).fetchone()
-            balance_after = float(row[0] or 0) - qty_used
-            lot_allocations = allocate_fifo(
+        for pn, pid, barcode_v, article_id_v, lot_v, price_v in parts:
+            part_cursor = c.execute("""
+                INSERT INTO service_parts(
+                    service_id, part_name, part_id, barcode, article_id,
+                    lot_serial, unit_price
+                ) VALUES(?,?,?,?,?,?,?)
+            """, (
+                service_id, pn, pid, barcode_v, article_id_v,
+                lot_v, price_v
+            ))
+            service_part_id = int(part_cursor.lastrowid)
+            if article_id_v is None:
+                continue
+            reservation_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            allocations = allocate_fifo(
                 c,
                 schema="inventorydb",
                 article_id=int(article_id_v),
-                quantity=qty_used,
-                allocation_type="SERVICE",
+                quantity=1,
+                allocation_type="SERVICE_RESERVATION",
                 source_id=int(service_id),
-                source_line_id=int(article_id_v),
-                created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                source_line_id=service_part_id,
+                created_at=reservation_time,
             )
-            used_lots = ", ".join(
+            exact_lot = ", ".join(
                 str(entry["lot_serial"])
-                for entry in lot_allocations
-                if entry["lot_serial"]
+                for entry in allocations if entry["lot_serial"]
             )
-            lot_queue = []
-            for entry in lot_allocations:
-                whole_units = int(entry["quantity"])
-                lot_queue.extend([str(entry["lot_serial"] or "")] * whole_units)
-            allocated_service_lots[int(article_id_v)] = lot_queue
-            c.execute("""
-                UPDATE inventorydb.inventory_items
-                SET stock_qty = stock_qty - ?, updated_at=?
-                WHERE id=?
-            """, (
-                qty_used,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                article_id_v
-            ))
+            c.execute(
+                "UPDATE service_parts SET lot_serial=? WHERE id=?",
+                (exact_lot or lot_v, service_part_id),
+            )
+            stock_row = c.execute(
+                "SELECT stock_qty,COALESCE(reserved_qty,0),location "
+                "FROM inventorydb.inventory_items WHERE id=?",
+                (int(article_id_v),),
+            ).fetchone()
+            c.execute(
+                "UPDATE inventorydb.inventory_items "
+                "SET reserved_qty=COALESCE(reserved_qty,0)+1,updated_at=? WHERE id=?",
+                (reservation_time, int(article_id_v)),
+            )
             c.execute("""
                 INSERT INTO inventorydb.stock_movements(
                     movement_no, created_at, article_id, quantity_delta,
@@ -2341,62 +2541,81 @@ def save():
                     reason, operator_code, reversal_of_id
                 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL)
             """, (
-                f"PREM-SRV-{service_id:06d}-{article_id_v}",
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                article_id_v, -qty_used, balance_after,
-                "ISSUE_SERVICE", "SERVICE", service_id, article_id_v,
-                used_lots or row[2] or "", row[3] or "", "STRANKA",
-                f"Poraba pri servisu {no}", "DR",
+                f"REZ-SRV-{service_id:06d}-{service_part_id}", reservation_time,
+                int(article_id_v), 0, float(stock_row[0] or 0),
+                "RESERVE_SERVICE", "SERVICE", int(service_id), service_part_id,
+                exact_lot or lot_v or "", stock_row[2] or "", "SERVIS",
+                f"Rezervacija za servis {no}", "DR",
             ))
 
-        for pn, pid, barcode_v, article_id_v, lot_v, price_v in parts:
-            exact_lot = lot_v
-            if article_id_v is not None:
-                queue_for_article = allocated_service_lots.get(int(article_id_v), [])
-                if queue_for_article:
-                    exact_lot = queue_for_article.pop(0)
-            c.execute("""
-                INSERT INTO service_parts(
-                    service_id, part_name, part_id, barcode, article_id,
-                    lot_serial, unit_price
-                ) VALUES(?,?,?,?,?,?,?)
-            """, (
-                service_id, pn, pid, barcode_v, article_id_v,
-                exact_lot, price_v
-            ))
+        if device_type_code == "APPLE_MOBILE":
+            for stage in ("PRED", "PO"):
+                vals = get_test_values(stage)
+                for test_name, test_status in vals.items():
+                    c.execute("""
+                        INSERT INTO service_tests(service_id, stage, test_name, status)
+                        VALUES(?,?,?,?)
+                    """, (service_id, stage, test_name, test_status))
 
-        for stage in ("PRED", "PO"):
-            vals = get_test_values(stage)
-            for test_name, test_status in vals.items():
-                c.execute("""
-                    INSERT INTO service_tests(service_id, stage, test_name, status)
-                    VALUES(?,?,?,?)
-                """, (service_id, stage, test_name, test_status))
-
-        copy_photos_for_service(service_id, no, c)
+        created_photo_paths = copy_photos_for_service(service_id, no, c)
         link_service_result(
             c, int(active_service_order_id), int(service_id), commit=False
+        )
+        c.execute(
+            "DELETE FROM service_order_parts WHERE service_order_id=?",
+            (int(active_service_order_id),),
         )
         c.commit()
     except Exception as exc:
         c.rollback()
         c.close()
+        for photo_path in created_photo_paths:
+            photo_path.unlink(missing_ok=True)
         service_save_in_progress = False
         if "service_save_button" in globals():
-            service_save_button.configure(state="normal", text="PRIPRAVI SERVIS ZA RAČUN")
+            service_save_button.configure(
+                state="normal", text="ZAKLJUČI SERVIS IN PRIPRAVI RAČUN"
+            )
         messagebox.showerror("MikroFIX", f"Servis ni bil shranjen:\n{exc}")
         return
     c.close()
 
-    audit_event(
-        "SERVICE_CREATED",
-        "service",
-        service_id,
-        {"service_no": no, "parts_count": len(parts)},
-    )
+    # Podatki so od te točke že potrjeni v bazi. Gumb zato vedno sprostimo,
+    # tudi če kasnejši audit, PDF ali osvežitev uporabniškega vmesnika odpove.
+    last_saved_service_id = int(service_id)
+    service_save_in_progress = False
+    if "service_save_button" in globals():
+        service_save_button.configure(
+            state="normal", text="ZAKLJUČI SERVIS IN PRIPRAVI RAČUN"
+        )
 
-    backup_db("after_save")
-    refresh_inventory_table()
+    post_save_warnings = []
+    try:
+        audit_event(
+            "SERVICE_CREATED",
+            "service",
+            service_id,
+            {
+                "service_no": no,
+                "prepared_total_eur": prepared_total_v,
+                "approval_required": approval_required_v,
+                "approval_channel": approval_channel_v if approval_required_v else "",
+                "parts_count": len(parts),
+                "elapsed_minutes": elapsed_minutes_v,
+                "billable_minutes": labor["billable_minutes"],
+                "service_tier": labor["tier"],
+            },
+        )
+    except Exception as exc:
+        post_save_warnings.append(f"audit: {exc}")
+    try:
+        backup_db("after_save")
+    except Exception as exc:
+        post_save_warnings.append(f"varnostna kopija: {exc}")
+    try:
+        refresh_inventory_table()
+    except Exception as exc:
+        post_save_warnings.append(f"osvežitev zaloge: {exc}")
 
     pdf_msg = ""
     try:
@@ -2406,10 +2625,6 @@ def save():
         pdf_msg = f"\nPDF ni bil ustvarjen: {e}"
 
     status.set(f"Servisni list shranjen: {no}")
-    last_saved_service_id = int(service_id)
-    service_save_in_progress = False
-    if "service_save_button" in globals():
-        service_save_button.configure(state="normal", text="PRIPRAVI SERVIS ZA RAČUN")
     warranty_message = (
         f"Tržna garancija na vgrajene dele: {warranty_months_v} mesece, "
         f"do {format_print_date(warranty_until_v)}."
@@ -2418,7 +2633,9 @@ def save():
     )
     open_cashier_now = messagebox.askyesno(
         "MikroFix – servis je pripravljen za račun",
-        f"Servisni list {no} je shranjen.\n{warranty_message}{pdf_msg}\n\n"
+        f"Servisni list {no} je shranjen.\n{warranty_message}{pdf_msg}"
+        + (f"\nOpozorilo: {'; '.join(post_save_warnings)}" if post_save_warnings else "")
+        + "\n\n"
         "Servis še ni dokončno zaključen. Zaključen bo šele, ko blagajna izda "
         "povezani račun.\n\nOdprim blagajno s prenesenimi postavkami zdaj?"
     )
@@ -2429,6 +2646,31 @@ def save():
     show_service_history()
     if open_cashier_now:
         root.after(100, lambda sid=int(service_id): prepare_invoice_for_service(sid))
+
+
+def save():
+    """GUI meja: nobena napaka zaključka servisa ne sme ostati samo v terminalu."""
+    global service_save_in_progress
+    try:
+        return _save_service()
+    except Exception as exc:
+        service_save_in_progress = False
+        if "service_save_button" in globals():
+            try:
+                service_save_button.configure(
+                    state="normal", text="ZAKLJUČI SERVIS IN PRIPRAVI RAČUN"
+                )
+            except Exception:
+                pass
+        try:
+            status.set("Zaključek servisa ni uspel.")
+        except Exception:
+            pass
+        messagebox.showerror(
+            "MikroFix – zaključek servisa",
+            f"Servis ni bil zaključen. Podatki odprtega servisa so ostali shranjeni.\n\n{exc}",
+        )
+        return None
 
 
 def clear_form(keep_device=True):
@@ -2451,8 +2693,12 @@ def clear_form(keep_device=True):
         service_article_barcode_var.set("")
     pending_photos.clear()
     refresh_photo_list()
+    if "service_approved_limit_var" in globals():
+        service_approved_limit_var.set("")
+    if "service_approval_channel_var" in globals():
+        service_approval_channel_var.set("")
     for var in list(pre_test_vars.values()) + list(post_test_vars.values()):
-        var.set("OK")
+        var.set("NI TESTIRANO")
     if not keep_device:
         device_identity_method = ""
         device_type_code = ""
@@ -2493,6 +2739,7 @@ def prepare_invoice_for_service(service_id=None):
 
 
 last_intake_pdf_path = None
+last_intake_tag_path = None
 last_buyback_pdf_path = None
 buyback_save_in_progress = False
 prepared_buyback_id = None
@@ -2631,13 +2878,34 @@ def clear_buyback_form_safely():
 
 
 def save_intake_from_tab():
-    """Shrani prevzem, izdela PDF in odpre isti nalog za nadaljnje delo."""
-    global active_service_order_id, last_intake_pdf_path
+    """Shrani prevzem in PDF brez zagona obračunljivega servisnega časa."""
+    global active_service_order_id, last_intake_pdf_path, last_intake_tag_path
+    global intake_customer_partner_id
 
     if not require_identified_device("servisno naročilo in osebne podatke"):
         return
 
+    # Če je za isto napravo sprejem že odprt, gumb ne sme ustvariti dvojnika
+    # in predvsem ne sme samodejno zagnati njegovega časovnika.
+    c = connect()
+    try:
+        existing_order_id = active_service_order_id or latest_open_service_order(
+            c, serial.get().strip(), imei.get().strip()
+        )
+    finally:
+        c.close()
+    if existing_order_id:
+        active_service_order_id = int(existing_order_id)
+        messagebox.showinfo(
+            "MikroFix – sprejem že obstaja",
+            "Za to napravo je sprejem že shranjen. Čas ni bil zagnan. "
+            "Za dejansko delo uporabi »ODPRI / NADALJUJ ODPRTI SERVIS«.",
+            parent=root,
+        )
+        return
+
     payload = {
+        "customer_partner_id": intake_customer_partner_id,
         "customer_name": intake_customer_name.get(),
         "customer_address": intake_customer_address.get(),
         "customer_phone": intake_customer_phone.get(),
@@ -2679,6 +2947,9 @@ def save_intake_from_tab():
             last_intake_pdf_path = generate_service_order_pdf(
                 record, PDF_DIR, test_mode=RUNTIME.is_test
             )
+            last_intake_tag_path = generate_service_tag_pdf(
+                record, PDF_DIR, test_mode=RUNTIME.is_test
+            )
             c.commit()
         except Exception:
             c.rollback()
@@ -2696,15 +2967,50 @@ def save_intake_from_tab():
         return
 
     intake_order_status.set(
-        f"Odprto naročilo {order_no} | PDF: {last_intake_pdf_path.name}"
+        f"Odprto naročilo {order_no} | PDF + 80-mm oznaka pripravljena"
     )
-    messagebox.showinfo(
-        "MikroFix - servisno naročilo",
-        f"Naročilo {order_no} je shranjeno in PDF ustvarjen.\n\n"
-        "Isti podatki se zdaj prenesejo v končni servisni list."
+    tag_print_ok = False
+    tag_print_notice = ""
+    tag_printer = str(
+        RUNTIME.settings.get("printer", {}).get("printer_name")
+        or RUNTIME.settings.get("printer", {}).get("windows_printer_name")
+        or ""
+    ).strip()
+    try:
+        if not tag_printer:
+            raise RuntimeError("80-mm tiskalnik ni nastavljen.")
+        print_result = send_pdf_to_printer(last_intake_tag_path, tag_printer)
+        tag_print_ok = bool(print_result.completed)
+        tag_print_notice = (
+            f"80-mm QR oznaka je natisnjena na {tag_printer}."
+            if tag_print_ok
+            else f"80-mm QR oznaka je poslana na {tag_printer}: {print_result.detail}"
+        )
+        audit_event(
+            "SERVICE_ORDER_TAG_PRINTED", "service_order", order_id,
+            {"order_no": order_no, "printer": tag_printer, "confirmed": tag_print_ok},
+        )
+    except Exception as exc:
+        tag_print_notice = (
+            f"Samodejni tisk 80-mm oznake ni uspel: {exc} "
+            "Sprejem je varno shranjen; izpis lahko ponoviš z gumbom."
+        )
+        audit_event(
+            "SERVICE_ORDER_TAG_PRINT_FAILED", "service_order", order_id,
+            {"order_no": order_no, "printer": tag_printer, "error": str(exc)},
+        )
+    saved_order_id = int(order_id)
+    active_service_order_id = None
+    clear_intake_form()
+    clear_form(keep_device=False)
+    top_nb.select(tab_device_top)
+    status.set(
+        f"Sprejem {order_no} je shranjen. Pripravljeno za naslednjo napravo."
     )
-    top_nb.select(tab_service_top)
-    start_new_service()
+    show_intake_completion(
+        saved_order_id, order_no, tag_print_ok=tag_print_ok,
+        tag_print_notice=tag_print_notice,
+    )
 
 
 def open_last_intake_pdf():
@@ -2714,8 +3020,113 @@ def open_last_intake_pdf():
         messagebox.showinfo("MikroFix", "V tej seji še ni ustvarjenega servisnega naročila PDF.")
 
 
+def open_last_intake_tag():
+    if last_intake_tag_path and Path(last_intake_tag_path).exists():
+        show_pdf_actions(last_intake_tag_path, "80-mm servisna oznaka", root)
+    else:
+        messagebox.showinfo("MikroFix", "V tej seji še ni ustvarjene 80-mm servisne oznake.")
+
+
+def open_service_order_intake_output(order_id, output_kind, parent=None):
+    """Ponovno pripravi in odpre sprejemni dokument shranjenega naloga."""
+    parent = parent or root
+    c = connect()
+    try:
+        record = get_service_order(c, int(order_id))
+    except Exception as exc:
+        c.close()
+        messagebox.showerror(
+            "MikroFix – dokument sprejema", str(exc), parent=parent
+        )
+        return
+    c.close()
+    try:
+        if output_kind == "A4":
+            path = generate_service_order_pdf(
+                record, PDF_DIR, test_mode=RUNTIME.is_test
+            )
+            label = f"servisno naročilo {record['order_no']}"
+        elif output_kind == "TAG":
+            path = generate_service_tag_pdf(
+                record, PDF_DIR, test_mode=RUNTIME.is_test
+            )
+            label = f"80-mm servisna oznaka {record['order_no']}"
+        else:
+            raise ValueError("Neznana vrsta sprejemnega dokumenta.")
+    except Exception as exc:
+        messagebox.showerror(
+            "MikroFix – dokument sprejema",
+            f"Dokumenta ni bilo mogoče pripraviti:\n{exc}",
+            parent=parent,
+        )
+        return
+    show_pdf_actions(path, label, parent)
+
+
+def show_intake_completion(
+    order_id, order_no, *, tag_print_ok=False, tag_print_notice=""
+):
+    """Po sprejemu ohrani dostop do obeh izpisov in čakalne vrste."""
+    win = tk.Toplevel(root)
+    win.title("MikroFix – sprejem je shranjen")
+    win.geometry("600x430")
+    win.resizable(False, False)
+    win.configure(bg=BG)
+    win.transient(root)
+    win.grab_set()
+
+    card = tk.Frame(
+        win, bg=PANEL, highlightthickness=1, highlightbackground=LIGHT_GRAY
+    )
+    card.pack(fill="both", expand=True, padx=22, pady=22)
+    tk.Label(
+        card, text=f"Sprejem {order_no} je ustvarjen",
+        bg=PANEL, fg=DARK, font=("Segoe UI", 16, "bold"),
+    ).pack(anchor="w", padx=18, pady=(18, 5))
+    tk.Label(
+        card,
+        text=(
+            "A4 servisno naročilo in 80-mm Epson oznaka sta pripravljena. "
+            "Servisni čas še ne teče; začne se šele ob izbiri naloga."
+        ),
+        bg=PANEL, fg=GRAY, font=("Segoe UI", 10),
+        justify="left", wraplength=520,
+    ).pack(anchor="w", padx=18, pady=(0, 16))
+    if tag_print_notice:
+        tk.Label(
+            card, text=tag_print_notice,
+            bg=PANEL, fg=SUCCESS if tag_print_ok else DANGER,
+            font=("Segoe UI", 9, "bold"), justify="left", wraplength=520,
+        ).pack(anchor="w", padx=18, pady=(0, 10))
+    ttk.Button(
+        card, text="A4 PDF / TISK",
+        command=lambda: open_service_order_intake_output(order_id, "A4", win),
+        style="Blue.TButton",
+    ).pack(fill="x", padx=18, pady=5)
+    ttk.Button(
+        card, text="80-mm OZNAKA / TISK",
+        command=lambda: open_service_order_intake_output(order_id, "TAG", win),
+    ).pack(fill="x", padx=18, pady=5)
+
+    def open_queue():
+        win.destroy()
+        open_workflow_module(tab_service_top, "SERVICE")
+        show_service_history()
+        choose_open_service_order()
+
+    ttk.Button(
+        card, text="PREGLEJ ODPRTE SPREJEME",
+        command=open_queue,
+    ).pack(fill="x", padx=18, pady=5)
+    ttk.Button(card, text="ZAPRI", command=win.destroy).pack(
+        fill="x", padx=18, pady=(12, 5)
+    )
+
+
 def clear_intake_form():
     """Počisti osebne in pogodbene podatke, identiteto naprave pa pusti pri miru."""
+    global intake_customer_partner_id
+    intake_customer_partner_id = None
     for variable in (
         intake_customer_name, intake_customer_address, intake_customer_phone,
         intake_customer_email, intake_accessories,
@@ -2731,6 +3142,122 @@ def clear_intake_form():
     for widget in (intake_request_text, intake_condition_text, intake_notes_text):
         widget.delete("1.0", "end")
     intake_order_status.set("Novo servisno naročilo.")
+
+
+def choose_intake_customer():
+    """Izbere obstoječega kupca ali ga ločeno pridobi iz AJPES/ročnega vnosa."""
+    global intake_customer_partner_id
+    dialog = tk.Toplevel(root)
+    dialog.title("MikroFix – stranka servisnega naročila")
+    dialog.transient(root)
+    dialog.grab_set()
+    dialog.geometry("760x520")
+    dialog.minsize(680, 470)
+    partners = list_customer_partners(OFFICE_DB)
+    by_display = {}
+    displays = []
+    for partner in partners:
+        display = (
+            f"{partner['name']} | {partner['tax_number'] or partner['address'] or '-'} "
+            f"| ID {partner['id']}"
+        )
+        displays.append(display)
+        by_display[display] = partner
+    partner_var = tk.StringVar()
+    selected_id = {"value": None}
+    local = {
+        "name": tk.StringVar(value=intake_customer_name.get()),
+        "address": tk.StringVar(value=intake_customer_address.get()),
+        "phone": tk.StringVar(value=intake_customer_phone.get()),
+        "email": tk.StringVar(value=intake_customer_email.get()),
+        "tax_number": tk.StringVar(),
+    }
+    frame = ttk.Frame(dialog, padding=14)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text="Obstoječa stranka").grid(row=0, column=0, sticky="w", pady=5)
+    combo = ttk.Combobox(frame, textvariable=partner_var, values=displays, state="readonly")
+    combo.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(10, 0), pady=5)
+
+    def fill(customer, partner_id=None):
+        for key, variable in local.items():
+            variable.set(str(customer.get(key) or ""))
+        selected_id["value"] = partner_id
+
+    def choose_existing(_event=None):
+        partner = by_display.get(partner_var.get())
+        if partner:
+            fill(partner, partner["id"])
+
+    entries = []
+    for row, (label, key) in enumerate((
+        ("Naziv / ime", "name"), ("Naslov", "address"),
+        ("Telefon", "phone"), ("E-pošta", "email"),
+        ("Davčna številka", "tax_number"),
+    ), start=1):
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=4)
+        entry = ttk.Entry(frame, textvariable=local[key])
+        entry.grid(row=row, column=1, sticky="ew", padx=(10, 6), pady=4)
+        entries.append(entry)
+
+    def manual_mode():
+        partner_var.set("")
+        fill({key: "" for key in local})
+        entries[0].focus_set()
+
+    def ajpes_mode():
+        tax = "".join(ch for ch in local["tax_number"].get() if ch.isdigit())
+        if not tax:
+            tax = simpledialog.askstring(
+                "AJPES – stranka", "Vpiši davčno številko:", parent=dialog
+            ) or ""
+        try:
+            found = find_partner_by_tax_number(
+                tax, test_mode=RUNTIME.is_test, timeout=15
+            )
+        except AjpesError as exc:
+            messagebox.showwarning(
+                "AJPES – stranka", f"{exc}\n\nRočni vnos ostaja omogočen.",
+                parent=dialog,
+            )
+            return
+        fill({
+            "name": found.name,
+            "address": ", ".join(x for x in (found.address, found.post_city) if x),
+            "phone": local["phone"].get(), "email": local["email"].get(),
+            "tax_number": found.tax_number,
+        })
+
+    ttk.Button(frame, text="NOV / ROČNI VNOS", command=manual_mode).grid(row=1, column=2, padx=(4, 0))
+    ttk.Button(frame, text="AJPES PO DAVČNI", command=ajpes_mode).grid(row=5, column=2, padx=(4, 0))
+    combo.bind("<<ComboboxSelected>>", choose_existing)
+    frame.columnconfigure(1, weight=1)
+
+    def save_selection():
+        global intake_customer_partner_id
+        customer_data = {key: variable.get().strip() for key, variable in local.items()}
+        try:
+            partner_id = save_customer_partner(
+                OFFICE_DB, customer_data, preferred_partner_id=selected_id["value"]
+            )
+            saved = customer_partner_by_id(OFFICE_DB, partner_id)
+            if not saved:
+                raise WorkflowError("Stranke po shranjevanju ni mogoče prebrati.")
+        except Exception as exc:
+            messagebox.showerror("Stranka", str(exc), parent=dialog)
+            return
+        intake_customer_partner_id = partner_id
+        intake_customer_name.set(saved["name"])
+        intake_customer_address.set(saved["address"])
+        intake_customer_phone.set(saved["phone"])
+        intake_customer_email.set(saved["email"])
+        intake_order_status.set(f"Izbrana stranka: {saved['name']} (ID {partner_id})")
+        dialog.destroy()
+
+    actions = ttk.Frame(dialog, padding=(14, 0, 14, 14))
+    actions.pack(fill="x")
+    ttk.Button(actions, text="PREKLIČI", command=dialog.destroy).pack(side="left")
+    ttk.Button(actions, text="SHRANI IN IZBERI", command=save_selection).pack(side="right")
+    (combo if displays else entries[0]).focus_set()
 
 
 def reset_buyback_form(*, enable_save=True, status_message=None):
@@ -3677,7 +4204,8 @@ def refresh_service_tab_history():
 
     c = connect()
     rows = c.execute("""
-        SELECT id, service_no, date, customer, invoice_no, warranty_until, work
+        SELECT id, service_no, date, customer, invoice_no, warranty_until, work,
+               ready_for_pickup_at, picked_up_at, final_notice_recorded_at
         FROM service
         WHERE serial = ? OR (imei <> '' AND imei = ?)
         ORDER BY id DESC
@@ -3689,7 +4217,8 @@ def refresh_service_tab_history():
             "", "end",
             values=(
                 row[0], row[1], row[2], row[3] or "-",
-                row[4] or "-", warranty_text(row[5]), row[6] or "-"
+                row[4] or "-", warranty_text(row[5]),
+                unclaimed_device_status(row[7], row[8], row[9]), row[6] or "-"
             )
         )
 
@@ -3749,24 +4278,265 @@ def show_service_history():
     global service_editor_active
     if "service_home" not in globals():
         return
+    if not persist_active_service_parts():
+        return
+    pause_active_service_timer(reason="LEAVE_WORKSPACE", quiet=True)
     service_editor_active = False
     service_editor.pack_forget()
     service_home.pack(fill="both", expand=True)
+    refresh_service_open_orders()
     refresh_service_tab_history()
 
 
-def start_new_service():
-    global service_editor_active, active_service_order_id
+def refresh_service_open_orders(*_args):
+    """Napolni Service čakalno vrsto iz iste baze, ki jo prikazuje Office."""
+    if "service_open_order_tree" not in globals():
+        return
+    for iid in service_open_order_tree.get_children():
+        service_open_order_tree.delete(iid)
+    c = connect()
+    try:
+        rows = c.execute(
+            """
+            SELECT id,order_no,created_at,customer_name,device_model,
+                   device_serial,work_started_at,customer_request
+            FROM service_orders
+            WHERE status='OPEN'
+            ORDER BY id DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    except Exception as exc:
+        c.close()
+        service_open_order_status.set(f"Napaka: {exc}")
+        return
+    c.close()
+    for row in rows:
+        service_open_order_tree.insert(
+            "", "end", iid=str(row[0]),
+            values=(
+                row[0], row[1] or "-", str(row[2] or "").replace("T", " "),
+                row[3] or "-", row[4] or "-", mask_identifier(row[5]),
+                row[6] or "NI ZAČET", (row[7] or "")[:180],
+            ),
+        )
+    service_open_order_status.set(f"{len(rows)} odprtih sprejemov")
 
-    if not require_identified_device("nov servisni nalog in vnos osebnih podatkov"):
+
+def selected_service_open_order_id():
+    selected = service_open_order_tree.selection()
+    if not selected:
+        messagebox.showinfo(
+            "MikroFix – odprti sprejemi", "Izberi odprti sprejem.", parent=root
+        )
+        return None
+    try:
+        return int(service_open_order_tree.item(selected[0], "values")[0])
+    except (IndexError, TypeError, ValueError):
+        messagebox.showerror(
+            "MikroFix – odprti sprejemi",
+            "Izbranega sprejema ni mogoče prebrati.", parent=root,
+        )
+        return None
+
+
+def start_selected_service_open_order(_event=None):
+    order_id = selected_service_open_order_id()
+    if order_id is not None:
+        open_service_order_for_work(order_id)
+
+
+def open_selected_service_intake_output(output_kind):
+    order_id = selected_service_open_order_id()
+    if order_id is not None:
+        open_service_order_intake_output(order_id, output_kind, root)
+
+
+def _format_elapsed_seconds(value):
+    seconds = max(0, int(value or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def refresh_service_timer_display():
+    """Osveži namenski prikaz ure in dejanskega intervalnega časa."""
+    global service_timer_after_id
+    if service_timer_after_id is not None:
+        try:
+            root.after_cancel(service_timer_after_id)
+        except Exception:
+            pass
+        service_timer_after_id = None
+    if not active_service_order_id or not service_editor_active:
+        return
+    c = connect()
+    try:
+        snapshot = service_work_timer_snapshot(c, int(active_service_order_id))
+    except Exception as exc:
+        c.close()
+        service_timer_state_var.set(f"NAPAKA ČASOVNIKA: {exc}")
+        return
+    c.close()
+    service_clock_var.set(datetime.now().strftime("%H:%M:%S"))
+    first = snapshot.get("first_started_at")
+    service_timer_started_var.set(
+        first.strftime("%d. %m. %Y %H:%M:%S") if first else "—"
+    )
+    service_timer_elapsed_var.set(
+        _format_elapsed_seconds(snapshot.get("total_seconds"))
+    )
+    if snapshot.get("running"):
+        service_timer_state_var.set("ČAS TEČE")
+        service_timer_toggle_button.configure(
+            text="USTAVI ČAS", command=pause_active_service_timer,
+            style="Blue.TButton",
+        )
+    else:
+        service_timer_state_var.set("ČAS JE USTAVLJEN")
+        service_timer_toggle_button.configure(
+            text="NADALJUJ ČAS", command=resume_active_service_timer,
+            style="Blue.TButton",
+        )
+    service_timer_after_id = root.after(1000, refresh_service_timer_display)
+
+
+def resume_active_service_timer():
+    if not active_service_order_id:
+        return
+    c = connect()
+    try:
+        start_service_work_timer(
+            c, int(active_service_order_id), operator_code=RUNTIME.operator_code
+        )
+    except Exception as exc:
+        c.close()
+        messagebox.showerror("MikroFix – čas servisa", str(exc), parent=root)
+        return
+    c.close()
+    audit_event("SERVICE_TIMER_STARTED", "service_order", active_service_order_id)
+    refresh_service_timer_display()
+
+
+def pause_active_service_timer(*, reason="MANUAL_PAUSE", quiet=False):
+    if not active_service_order_id:
+        return 0
+    c = connect()
+    try:
+        before = service_work_timer_snapshot(c, int(active_service_order_id))
+        minutes = pause_service_work_timer(
+            c, int(active_service_order_id), operator_code=RUNTIME.operator_code,
+            reason=reason,
+        )
+    except Exception as exc:
+        c.close()
+        if not quiet:
+            messagebox.showerror("MikroFix – čas servisa", str(exc), parent=root)
+        return 0
+    c.close()
+    if before.get("running"):
+        audit_event(
+            "SERVICE_TIMER_PAUSED", "service_order", active_service_order_id,
+            {"minutes": minutes, "reason": reason},
+        )
+    refresh_service_timer_display()
+    return minutes
+
+
+def open_service_order_for_work(order_id):
+    """Odpri isti servisni nalog in začni nov nadzorovani delovni interval."""
+    global service_editor_active, active_service_order_id
+    global device_identity_method, device_type_code
+
+    c = connect()
+    try:
+        order = get_service_order(c, int(order_id))
+        started_at_v = start_service_work_timer(
+            c, order_id, operator_code=RUNTIME.operator_code
+        )
+    except WorkflowError as exc:
+        c.close()
+        messagebox.showerror("MikroFix - začetek servisa", str(exc))
+        return False
+    c.close()
+
+    device_type_code = str(order.get("device_type") or "DRUGO")
+    device_identity_method = str(order.get("identity_method") or "MANUAL_OTHER")
+    model.set(order.get("device_model") or "")
+    name.set(order.get("device_model") or "")
+    serial.set(order.get("device_serial") or "")
+    imei.set(order.get("device_imei") or "")
+    ios.set(order.get("device_os") or "")
+    storage.set(order.get("device_storage") or "")
+    serial_display.set(mask_identifier(serial.get()))
+    imei_display.set(mask_identifier(imei.get()))
+    connected_state.set("POVEZAN")
+    try:
+        connected_label.configure(fg=SUCCESS)
+        header_connected_label.configure(fg=SUCCESS)
+    except Exception:
+        pass
+    clear_form(keep_device=True)
+    if order.get("authorized_limit_eur") is not None:
+        service_approved_limit_var.set(
+            f"{float(order.get('authorized_limit_eur') or 0):.2f}"
+        )
+    is_iphone = device_type_code == "APPLE_MOBILE"
+    set_service_test_tabs_for_device(is_iphone)
+    set_quick_tests_enabled(is_iphone)
+    active_service_order_id = int(order_id)
+    customer.set(order.get("customer_name") or "")
+    customer_address.set(order.get("customer_address") or "")
+    customer_phone.set(order.get("customer_phone") or "")
+    work.insert("1.0", order.get("customer_request") or "")
+    if not restore_active_service_parts():
+        pause_active_service_timer(reason="LOAD_PARTS_FAILED", quiet=True)
+        active_service_order_id = None
+        return False
+
+    service_home.pack_forget()
+    service_editor.pack(fill="both", expand=True)
+    service_editor_active = True
+    status.set(
+        "Čas servisa teče od "
+        + started_at_v.strftime("%d. %m. %Y %H:%M:%S")
+    )
+    refresh_service_timer_display()
+    try:
+        service_nb.select(tab_parts)
+    except Exception:
+        pass
+    update_workflow_lock()
+    return True
+
+
+def open_service_order_from_office(order_id):
+    """Po izboru v Office odpri enak servisni delovni prostor kot gumb v Servisu."""
+    if not AUTH_SESSION.has_permission(PERMISSION_SERVICE):
+        audit_event("PERMISSION_DENIED", "module", "SERVICE")
+        messagebox.showwarning(
+            "MikroFIX", "Za začetek servisa nimaš dovoljenja.", parent=root
+        )
+        show_start_menu()
+        return False
+    open_workflow_module(tab_service_top, "SERVICE")
+    if not open_service_order_for_work(int(order_id)):
+        show_start_menu()
+        return False
+    return True
+
+
+def start_new_service():
+    if not device_is_identified():
+        choose_open_service_order()
         return
 
     c = connect()
     order_id = latest_open_service_order(
         c, serial.get().strip(), imei.get().strip()
     )
+    c.close()
     if order_id is None:
-        c.close()
         top_nb.select(tab_intake_top)
         messagebox.showinfo(
             "MikroFix",
@@ -3774,23 +4544,103 @@ def start_new_service():
             "Podatki se bodo nato prenesli v končni servisni list."
         )
         return
-    order = get_service_order(c, order_id)
-    c.close()
+    open_service_order_for_work(order_id)
 
-    clear_form(keep_device=True)
-    active_service_order_id = order_id
-    customer.set(order["customer_name"] or "")
-    customer_address.set(order["customer_address"] or "")
-    customer_phone.set(order["customer_phone"] or "")
-    work.insert("1.0", order["customer_request"] or "")
 
-    service_home.pack_forget()
-    service_editor.pack(fill="both", expand=True)
-    service_editor_active = True
+def choose_open_service_order():
+    """Izbira odprtega naloga ali varen priklic s servisno QR oznako."""
+    c = connect()
     try:
-        service_nb.select(tab_main)
-    except Exception:
-        pass
+        rows = c.execute(
+            "SELECT id,order_no,created_at,customer_name,device_model,device_serial,device_imei,"
+            "customer_request FROM service_orders WHERE status='OPEN' ORDER BY id DESC"
+        ).fetchall()
+    finally:
+        c.close()
+    if not rows:
+        messagebox.showinfo("MikroFix – odprti nalogi", "Ni odprtih servisnih naročil.", parent=root)
+        return
+    dialog = tk.Toplevel(root)
+    dialog.title("MikroFix – izberi nalog in začni servis")
+    dialog.transient(root)
+    maximize_work_window(dialog, "1120x680")
+    query = tk.StringVar()
+    ttk.Label(
+        dialog,
+        text="Skeniraj 80-mm servisno QR oznako ali išči po nalogu, stranki oziroma napravi.",
+    ).pack(anchor="w", padx=14, pady=(14, 3))
+    search = ttk.Entry(dialog, textvariable=query, font=("Segoe UI", 12))
+    search.pack(fill="x", padx=14, pady=(0, 8))
+    cols=("no","date","customer","device","serial","request")
+    tree=ttk.Treeview(dialog,columns=cols,show="headings",selectmode="browse")
+    for key,label,width in (
+        ("no","Nalog",130),("date","Sprejet",145),("customer","Stranka",180),
+        ("device","Naprava",170),("serial","S/N",110),("request","Zahteva",350),
+    ):
+        tree.heading(key,text=label);tree.column(key,width=width,stretch=key=="request")
+    tree.pack(fill="both",expand=True,padx=14,pady=(0,8))
+    row_map={str(row[0]):row for row in rows}
+
+    def qr_order(value):
+        parts=str(value or "").strip().split("|")
+        return parts[1] if len(parts)>=2 and parts[0]=="MIKROFIX-SERVICE" else ""
+
+    def fill(*_args):
+        raw=query.get().strip();term=(qr_order(raw) or raw).casefold()
+        for iid in tree.get_children():tree.delete(iid)
+        for row in rows:
+            haystack=" ".join(str(value or "") for value in row[1:]).casefold()
+            if term and term not in haystack:continue
+            tree.insert("","end",iid=str(row[0]),values=(
+                row[1],str(row[2]).replace("T"," "),row[3],row[4],mask_identifier(row[5]),row[7],
+            ))
+        children=tree.get_children()
+        if len(children)==1:
+            tree.selection_set(children[0]);tree.focus(children[0])
+
+    def start_selected(_event=None):
+        selected=tree.selection()
+        if not selected:
+            messagebox.showinfo("MikroFix – začetek servisa","Izberi odprti nalog.",parent=dialog);return
+        row=row_map[selected[0]]
+        parts=query.get().strip().split("|")
+        if len(parts)>=4 and parts[0]=="MIKROFIX-SERVICE":
+            if str(parts[1])!=str(row[1]) or str(parts[2])!=str(row[5] or "") or str(parts[3])!=str(row[6] or ""):
+                messagebox.showerror(
+                    "MikroFix – napačna oznaka",
+                    "QR oznaka se ne ujema s shranjeno serijsko številko/IMEI. Servis ni zagnan.",
+                    parent=dialog,
+                );return
+        order_id=int(row[0]);dialog.destroy();open_service_order_for_work(order_id)
+
+    def selected_order_id():
+        selected = tree.selection()
+        if not selected:
+            messagebox.showinfo(
+                "MikroFix – odprti sprejemi", "Izberi odprti nalog.", parent=dialog
+            )
+            return None
+        return int(row_map[selected[0]][0])
+
+    def open_selected_output(output_kind):
+        order_id = selected_order_id()
+        if order_id is not None:
+            open_service_order_intake_output(order_id, output_kind, dialog)
+
+    query.trace_add("write",fill)
+    actions=ttk.Frame(dialog,padding=(14,0,14,14));actions.pack(fill="x")
+    ttk.Button(actions,text="PREKLIČI",command=dialog.destroy).pack(side="left")
+    ttk.Button(
+        actions, text="A4 PDF / TISK",
+        command=lambda: open_selected_output("A4"),
+    ).pack(side="left", padx=(8, 0))
+    ttk.Button(
+        actions, text="80-mm OZNAKA / TISK",
+        command=lambda: open_selected_output("TAG"),
+    ).pack(side="left", padx=(8, 0))
+    ttk.Button(actions,text="ZAČNI / NADALJUJ SERVIS",command=start_selected,style="Blue.TButton").pack(side="right")
+    tree.bind("<Double-1>",start_selected);search.bind("<Return>",start_selected)
+    fill();search.focus_set()
 
 
 def open_claim_for_service_from_history():
@@ -3820,6 +4670,103 @@ def warranty_text(date_value):
         return f"potekla {d.strftime('%d.%m.%Y')}"
     except Exception:
         return str(date_value)
+
+
+def unclaimed_device_status(ready_at, picked_up_at=None, final_notice_at=None, now=None):
+    """Vrni lokalni prikaz hrambe; funkcija ne pošilja nobenega obvestila."""
+    if picked_up_at:
+        return f"PREVZETO {str(picked_up_at)[:10]}"
+    if not ready_at:
+        return "ČAKA NA RAČUN"
+    try:
+        started = datetime.fromisoformat(str(ready_at))
+    except ValueError:
+        return "PRI MIKROFIX – datum ni veljaven"
+    days = max(0, ((now or datetime.now()).date() - started.date()).days)
+    policy = RUNTIME.settings.get("service_policy", {})
+    free_days = int(policy.get("unclaimed_free_days", 30))
+    block_price = float(policy.get("unclaimed_storage_eur_per_30_days", 10))
+    notice_days = int(policy.get("unclaimed_final_notice_days", 90))
+    charged_days = max(0, days - free_days)
+    blocks = int(math.ceil(charged_days / 30.0)) if charged_days else 0
+    fee = blocks * block_price
+    notice = " • KONČNI POZIV EVIDENTIRAJ" if days >= notice_days and not final_notice_at else ""
+    if final_notice_at:
+        notice = f" • poziv {str(final_notice_at)[:10]}"
+    return f"PRI MIKROFIX {days} dni • hramba {fee:.2f} EUR{notice}"
+
+
+def mark_selected_service_picked_up():
+    service_id_v = selected_service_history_id()
+    if service_id_v is None:
+        messagebox.showwarning("MikroFix", "Izberi servis.")
+        return
+    if not messagebox.askyesno(
+        "MikroFix – prevzem naprave",
+        "Potrdi, da je bila naprava dejansko izročena stranki.",
+    ):
+        return
+    stamp = datetime.now().isoformat(timespec="seconds")
+    c = connect()
+    updated = c.execute(
+        "UPDATE service SET picked_up_at=? WHERE id=? "
+        "AND ready_for_pickup_at IS NOT NULL AND picked_up_at IS NULL",
+        (stamp, int(service_id_v)),
+    )
+    c.commit()
+    c.close()
+    if updated.rowcount != 1:
+        messagebox.showwarning(
+            "MikroFix", "Naprava še nima izdanega računa ali je prevzem že evidentiran."
+        )
+        return
+    audit_event("SERVICE_DEVICE_PICKED_UP", "service", service_id_v)
+    refresh_service_tab_history()
+
+
+def record_selected_final_notice():
+    service_id_v = selected_service_history_id()
+    if service_id_v is None:
+        messagebox.showwarning("MikroFix", "Izberi servis.")
+        return
+    c = connect()
+    row = c.execute(
+        "SELECT ready_for_pickup_at,picked_up_at,final_notice_recorded_at "
+        "FROM service WHERE id=?", (int(service_id_v),),
+    ).fetchone()
+    if not row:
+        c.close()
+        return
+    notice_days = int(
+        RUNTIME.settings.get("service_policy", {}).get("unclaimed_final_notice_days", 90)
+    )
+    try:
+        elapsed = (datetime.now().date() - datetime.fromisoformat(str(row[0])).date()).days
+    except (TypeError, ValueError):
+        elapsed = -1
+    if row[1] or row[2] or elapsed < notice_days:
+        status_v = unclaimed_device_status(row[0], row[1], row[2])
+        c.close()
+        messagebox.showwarning(
+            "MikroFix", f"Končnega poziva še ni mogoče evidentirati.\n\n{status_v}"
+        )
+        return
+    if not messagebox.askyesno(
+        "MikroFix – končni poziv",
+        "Potrdi samo, če je bil končni poziv dejansko izročen ali poslan. "
+        "Program ga ne pošlje samodejno.",
+    ):
+        c.close()
+        return
+    stamp = datetime.now().isoformat(timespec="seconds")
+    c.execute(
+        "UPDATE service SET final_notice_recorded_at=? WHERE id=?",
+        (stamp, int(service_id_v)),
+    )
+    c.commit()
+    c.close()
+    audit_event("SERVICE_FINAL_NOTICE_RECORDED", "service", service_id_v)
+    refresh_service_tab_history()
 
 
 def load_service(service_id):
@@ -3871,7 +4818,7 @@ def load_service_warranty_meta(service_id):
 def add_claim(service_id, parent=None):
     win = tk.Toplevel(parent or root)
     win.title("MikroFIX - Nova reklamacija")
-    win.geometry("620x500")
+    maximize_work_window(win, "620x500")
     win.configure(bg=BG)
     win.transient(parent or root)
 
@@ -3931,14 +4878,27 @@ def add_claim(service_id, parent=None):
 
 
 def open_photo(rel_path):
-    p = APP_DIR / rel_path
-    if not p.exists():
-        messagebox.showwarning("MikroFix", f"Fotografija ne obstaja:\n{p}")
-        return
     try:
-        os.startfile(str(p))
-    except AttributeError:
-        subprocess.Popen(["xdg-open", str(p)])
+        p = resolve_service_image_path(
+            rel_path,
+            data_dir=RUNTIME.data_dir,
+            app_dir=APP_DIR,
+        )
+        image = load_service_image(p)
+        image.thumbnail((1100, 760))
+        from PIL import ImageTk
+
+        win = tk.Toplevel(root)
+        win.title(f"Servisna fotografija - {p.name}")
+        win.configure(bg=BG)
+        preview = ImageTk.PhotoImage(image)
+        image.close()
+        label = tk.Label(win, image=preview, bg=BG)
+        label.image = preview
+        label.pack(fill="both", expand=True, padx=12, pady=12)
+        ttk.Button(win, text="ZAPRI", command=win.destroy).pack(pady=(0, 12))
+    except ServiceImageError as exc:
+        messagebox.showwarning("MikroFix", str(exc))
 
 
 def register_pdf_font():
@@ -4468,24 +5428,16 @@ def save_pdf_as(source_path, suggested_name, parent=None):
 
 
 def print_pdf_file(pdf_path, parent=None):
-    if os.name != "nt":
-        messagebox.showwarning(
-            "MikroFIX",
-            "Samodejni tisk je trenutno pripravljen za Windows. PDF lahko shraniš in natisneš ročno.",
-            parent=parent or root
-        )
-        return
-
     parent = parent or root
-    printers = list_windows_printers()
+    printers = list_printers()
     if not printers:
         if messagebox.askyesno(
             "MikroFIX - tiskalnik",
-            "Windows ni vrnil nobenega nameščenega tiskalnika.\n\n"
+            "Operacijski sistem ni vrnil nobenega nameščenega tiskalnika.\n\n"
             "Želiš PDF odpreti in tiskanje izbrati v pregledovalniku?",
             parent=parent,
         ):
-            os.startfile(str(pdf_path))
+            open_local_file(pdf_path)
         return
 
     win = tk.Toplevel(parent)
@@ -4509,9 +5461,11 @@ def print_pdf_file(pdf_path, parent=None):
     ).pack(anchor="w", padx=14, pady=(0,12))
 
     configured = str(
-        RUNTIME.settings.get("printer", {}).get("windows_printer_name") or ""
+        RUNTIME.settings.get("printer", {}).get("printer_name")
+        or RUNTIME.settings.get("printer", {}).get("windows_printer_name")
+        or ""
     ).strip()
-    default_name = default_windows_printer()
+    default_name = default_printer()
     names = [item.name for item in printers]
     selected_name = (
         configured if configured in names
@@ -4545,7 +5499,7 @@ def print_pdf_file(pdf_path, parent=None):
 
     def send_selected():
         try:
-            send_pdf_to_windows_printer(pdf_path, printer_var.get())
+            send_pdf_to_printer(pdf_path, printer_var.get())
         except Exception as exc:
             messagebox.showerror(
                 "MikroFIX - tiskanje",
@@ -4569,7 +5523,7 @@ def print_pdf_file(pdf_path, parent=None):
     ).pack(fill="x", pady=4)
     ttk.Button(
         buttons, text="ODPRI PDF IN NATISNI",
-        command=lambda: os.startfile(str(pdf_path))
+        command=lambda: open_local_file(pdf_path)
     ).pack(fill="x", pady=4)
 
 
@@ -4622,11 +5576,7 @@ def show_pdf_actions(pdf_path, label, parent=None):
     ttk.Button(
         card,
         text="ODPRI PDF",
-        command=lambda: (
-            os.startfile(str(pdf_path))
-            if os.name == "nt"
-            else None
-        )
+        command=lambda: open_local_file(pdf_path)
     ).pack(fill="x", padx=18, pady=5)
 
 
@@ -4800,7 +5750,7 @@ def open_service_detail(service_id):
 
     win = tk.Toplevel(root)
     win.title(f"MikroFix - {service_no_v}")
-    win.geometry("900x760")
+    maximize_work_window(win, "900x760")
     win.minsize(800, 650)
     win.configure(bg=BG)
 
@@ -5078,7 +6028,7 @@ def open_service_browser(mode="all"):
 
     win = tk.Toplevel(root)
     win.title(f"MikroFix - {title}")
-    win.geometry("1320x650")
+    maximize_work_window(win, "1320x650")
     win.configure(bg=BG)
 
     top = tk.Frame(win, bg=BG)
@@ -5139,7 +6089,7 @@ def make_test_tab(parent, vars_dict):
 
     tk.Label(
         inner,
-        text="Vsi moduli so privzeto označeni OK. Označi samo napake oziroma module, ki jih nisi preveril.",
+        text="Vsak modul začne kot NI TESTIRANO. Rezultat spremeni šele po dejanskem preizkusu.",
         bg=PANEL, fg=GRAY, font=("Segoe UI",9)
     ).grid(row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12,8))
 
@@ -5149,7 +6099,7 @@ def make_test_tab(parent, vars_dict):
                      row=r, column=0, sticky="w", padx=12, pady=5)
         var = vars_dict.get(test_name)
         if var is None:
-            var = tk.StringVar(value="OK")
+            var = tk.StringVar(value="NI TESTIRANO")
             vars_dict[test_name] = var
         cb = ttk.Combobox(inner, textvariable=var, values=TEST_STATUSES,
                           state="readonly", width=18)
@@ -5203,14 +6153,69 @@ def style_app():
 
 
 def on_close():
+    c = connect()
+    try:
+        running_sessions = list_running_service_work_sessions(c)
+    except Exception as exc:
+        c.close()
+        messagebox.showerror(
+            "MikroFIX - preverjanje servisnega časa ni uspelo",
+            "Programa ni mogoče varno zapreti, ker stanja servisnih sej ni "
+            f"bilo mogoče preveriti:\n\n{exc}",
+            parent=root,
+        )
+        return
+    c.close()
+    if running_sessions:
+        details = []
+        for session in running_sessions[:5]:
+            description = " – ".join(
+                value for value in (
+                    session["order_no"], session["device_model"],
+                    session["customer_name"],
+                ) if value
+            )
+            details.append(f"• {description}")
+        if len(running_sessions) > 5:
+            details.append(f"• in še {len(running_sessions) - 5}")
+        messagebox.showwarning(
+            "MikroFIX - servisni čas še teče",
+            "Programa ni mogoče zapreti, ker je aktivna servisna seja.\n\n"
+            + "\n".join(details)
+            + "\n\nNajprej odpri navedeni servis ter izberi USTAVI ČAS ali "
+              "zaključi servis.",
+            parent=root,
+        )
+        return
     if ACTIVE_SCREEN != "MENU":
         show_start_menu()
         return
     backup_db("close")
+    if bool(RUNTIME.settings.get("backup", {}).get("enabled")):
+        try:
+            create_due_external_backup(RUNTIME)
+        except Exception as exc:
+            if not messagebox.askyesno(
+                "MikroFIX - varnostna kopija ni uspela",
+                f"Dnevne zunanje varnostne kopije ni bilo mogoče dokončati:\n\n{exc}"
+                "\n\nAli kljub temu zaprem program?",
+                parent=root,
+            ):
+                return
+    if bool(RUNTIME.settings.get("data_encryption", {}).get("enabled")):
+        try:
+            unmount_encrypted_data(RUNTIME.data_dir)
+        except DataEncryptionError as exc:
+            messagebox.showerror(
+                "MikroFIX - zaklep podatkov ni uspel",
+                f"Program ostaja odprt, ker podatkovne mape ni bilo mogoče varno zakleniti:\n\n{exc}",
+                parent=root,
+            )
+            return
     root.destroy()
 
 
-def _restore_after_office(return_code=0):
+def _restore_after_office(return_code=0, service_order_id=None):
     """Po zaprtju Office vrne isto prijavljeno sejo v začetni izbor."""
     root.deiconify()
     try:
@@ -5222,6 +6227,8 @@ def _restore_after_office(return_code=0):
     if return_code == 20:
         # ODJAVA v Office pomeni pravo odjavo tudi v glavnem programu.
         root.after(50, logout_and_lock)
+    elif service_order_id is not None:
+        root.after(80, lambda oid=int(service_order_id): open_service_order_from_office(oid))
     else:
         root.after(80, show_start_menu)
 
@@ -5242,6 +6249,7 @@ def launch_office(*arguments):
         )
         return False
     return_code = 0
+    service_order_id = None
     previous_handoff = os.environ.get("MIKROFIX_SESSION_HANDOFF")
     previous_argv = list(sys.argv)
     try:
@@ -5261,10 +6269,19 @@ def launch_office(*arguments):
             },
         )
         return_code = int(namespace.get("OFFICE_EXIT_CODE") or 0)
+        service_order_id = namespace.get("OFFICE_START_SERVICE_ORDER_ID")
     except SystemExit as exc:
         return_code = int(exc.code or 0) if isinstance(exc.code, int) else 1
     except Exception as exc:
-        messagebox.showerror("MikroFIX", f"Office ni bilo mogoče odpreti:\n{exc}")
+        if os.environ.get("MIKROFIX_SMOKE_TEST") == "1":
+            # Pri avtomatskem zagonskem pregledu ni uporabnika, ki bi videl
+            # grafično opozorilo. Celoten traceback mora zato v terminal, sicer
+            # končni RuntimeError skrije pravi razlog napake v Office modulu.
+            import traceback
+
+            traceback.print_exc()
+        else:
+            messagebox.showerror("MikroFIX", f"Office ni bilo mogoče odpreti:\n{exc}")
         return False
     finally:
         sys.argv = previous_argv
@@ -5272,7 +6289,7 @@ def launch_office(*arguments):
             os.environ.pop("MIKROFIX_SESSION_HANDOFF", None)
         else:
             os.environ["MIKROFIX_SESSION_HANDOFF"] = previous_handoff
-        _restore_after_office(return_code)
+        _restore_after_office(return_code, service_order_id)
     return True
 
 
@@ -5306,6 +6323,9 @@ def launch_pos(service_id=None):
             service_db=DB,
             pdf_dir=PDF_DIR,
             operator_code=RUNTIME.operator_code,
+            authenticated_username=AUTH_SESSION.username,
+            action_permissions=AUTH_SESSION.permissions,
+            audit_event=audit_event,
             service_id=service_id,
             service_loader=load_service_invoice_seed,
             service_finalizer=generate_pdf,
@@ -5324,7 +6344,7 @@ def show_recovery_center(parent):
     """Prikaže nedokončane operacije brez samodejnega posega v poslovne podatke."""
     dialog = tk.Toplevel(parent)
     dialog.title("MikroFIX - obnovitveni center")
-    dialog.geometry("900x500")
+    maximize_work_window(dialog, "900x500")
     dialog.minsize(760, 420)
     dialog.transient(parent)
 
@@ -5414,6 +6434,15 @@ def run_external_backup(*, force=False, notify=False):
 
     external_backup_attempted = True
 
+    def schedule_if_open(callback):
+        # Delovna nit ne sme klicati winfo_* na Tk objektu. Če se je aplikacija
+        # med kopiranjem že zaprla, se pozni UI odziv varno opusti.
+        try:
+            root.after(0, callback)
+            return True
+        except (RuntimeError, tk.TclError):
+            return False
+
     def worker():
         global external_backup_last_message
         try:
@@ -5422,25 +6451,24 @@ def run_external_backup(*, force=False, notify=False):
                 f"Zunanja kopija je preverjena: {path}"
                 if path else "Zunanja kopija je že veljavna in mlajša od 24 ur."
             )
-            if notify and root.winfo_exists():
-                root.after(
-                    0,
+            if notify:
+                schedule_if_open(
                     lambda: messagebox.showinfo(
                         "MikroFIX - varnostna kopija", external_backup_last_message
                     ),
                 )
         except Exception as exc:
             external_backup_last_message = str(exc)
-            if notify and root.winfo_exists():
-                root.after(
-                    0,
+            if notify:
+                schedule_if_open(
                     lambda text=str(exc): messagebox.showerror(
                         "MikroFIX - varnostna kopija", text
                     ),
                 )
         finally:
-            if root.winfo_exists():
-                root.after(0, lambda: show_start_menu() if ACTIVE_SCREEN == "MENU" else None)
+            schedule_if_open(
+                lambda: show_start_menu() if ACTIVE_SCREEN == "MENU" else None
+            )
 
     external_backup_thread = threading.Thread(
         target=worker, name="MikroFixExternalBackup", daemon=True
@@ -5449,6 +6477,28 @@ def run_external_backup(*, force=False, notify=False):
 
 
 def configure_external_backup(parent):
+    if os.name == "nt":
+        initial_dir = "E:\\" if Path("E:\\").exists() else str(Path.home())
+    else:
+        initial_dir = (
+            "/media/mikrofix/KINGSTON"
+            if Path("/media/mikrofix/KINGSTON").is_dir()
+            else str(Path.home())
+        )
+    selected = filedialog.askdirectory(
+        title="Izberi zunanji nosilec za šifrirane varnostne kopije",
+        initialdir=initial_dir,
+        mustexist=True,
+        parent=parent,
+    )
+    if not selected:
+        return
+    selected_path = Path(selected).resolve()
+    target_dir = (
+        selected_path
+        if selected_path.name == "MikroFix_Backup"
+        else selected_path / "MikroFix_Backup"
+    )
     first = simpledialog.askstring(
         "MikroFIX - obnovitveno geslo",
         "Določi obnovitveno geslo (najmanj 12 znakov).\n"
@@ -5470,14 +6520,14 @@ def configure_external_backup(parent):
         save_backup_passphrase(RUNTIME.data_dir, first)
         update_backup_settings(
             RUNTIME.settings_path,
-            target_dir=r"E:\MikroFix_Backup",
+            target_dir=str(target_dir),
             enabled=True,
             passphrase_configured=True,
         )
         RUNTIME.settings["backup"].update(
             {
                 "enabled": True,
-                "target_dir": r"E:\MikroFix_Backup",
+                "target_dir": str(target_dir),
                 "retention_days": 30,
                 "max_age_hours": 24,
                 "require_distinct_volume": True,
@@ -5490,9 +6540,41 @@ def configure_external_backup(parent):
     run_external_backup(force=True, notify=True)
 
 
+def open_workflow_module(tab, intent):
+    """Odpri delovni modul iz menija ali po predaji iz Office."""
+    global ACTIVE_SCREEN, start_workflow_intent
+    ACTIVE_SCREEN = intent
+    start_workflow_intent = intent
+    if main_menu_frame is not None and main_menu_frame.winfo_exists():
+        main_menu_frame.pack_forget()
+    outer.pack(fill="both", expand=True, padx=22, pady=16)
+    root.title(f"MikroFIX {RUNTIME.version_label} - {intent.title()}")
+    all_tabs = (
+        tab_device_top,
+        tab_intake_top,
+        tab_service_top,
+        tab_buyback_top,
+        tab_inventory_top,
+        tab_supplier_top,
+        tab_claims_top,
+    )
+    for known_tab in all_tabs:
+        top_nb.tab(known_tab, state="hidden")
+    visible_tabs = (
+        (tab_device_top, tab_intake_top, tab_service_top, tab_claims_top)
+        if intent == "SERVICE"
+        else (tab_device_top, tab_buyback_top)
+    )
+    for visible_tab in visible_tabs:
+        top_nb.tab(visible_tab, state="normal")
+    update_workflow_lock()
+    top_nb.select(tab)
+
+
 def show_start_menu():
     """Prikaže glavni meni kot zaslon istega aplikacijskega okna."""
     global ACTIVE_SCREEN, main_menu_frame
+    pause_active_service_timer(reason="MAIN_MENU", quiet=True)
     ACTIVE_SCREEN = "MENU"
     root.title(f"MikroFIX {RUNTIME.version_label} - Kaj želiš narediti?")
     root.deiconify()
@@ -5517,7 +6599,7 @@ def show_start_menu():
         font=("Segoe UI", 22, "bold"),
     ).pack(side="left")
     tk.Label(
-        brand_box, text="  v30 DEV", bg=PANEL, fg=DANGER,
+        brand_box, text="  v30.0", bg=PANEL, fg=BLUE_DARK,
         font=("Segoe UI", 9, "bold"),
     ).pack(side="left", pady=(8, 0))
 
@@ -5611,36 +6693,11 @@ def show_start_menu():
     for column in range(3):
         grid.grid_columnconfigure(column, weight=1, uniform="menu")
 
-    def open_legacy_module(tab, intent):
-        global ACTIVE_SCREEN, start_workflow_intent
-        ACTIVE_SCREEN = intent
-        start_workflow_intent = intent
-        main_menu_frame.pack_forget()
-        outer.pack(fill="both", expand=True, padx=22, pady=16)
-        root.title(f"MikroFIX {RUNTIME.version_label} - {intent.title()}")
-        all_tabs = (
-            tab_device_top,
-            tab_intake_top,
-            tab_service_top,
-            tab_buyback_top,
-            tab_inventory_top,
-            tab_supplier_top,
-            tab_claims_top,
-        )
-        for known_tab in all_tabs:
-            top_nb.tab(known_tab, state="hidden")
-        visible_tabs = (
-            (tab_device_top, tab_intake_top, tab_service_top, tab_claims_top)
-            if intent == "SERVICE"
-            else (tab_device_top, tab_buyback_top)
-        )
-        for visible_tab in visible_tabs:
-            top_nb.tab(visible_tab, state="normal")
-        update_workflow_lock()
-        top_nb.select(tab)
-
     def choose_service():
-        open_legacy_module(tab_device_top, "SERVICE")
+        # Servis se odpre na delovni čakalni vrsti. Nova naprava oziroma nov
+        # sprejem sta še vedno dosegljiva z istega zaslona.
+        open_workflow_module(tab_service_top, "SERVICE")
+        show_service_history()
 
     def choose_office(*args):
         global ACTIVE_SCREEN
@@ -5737,13 +6794,7 @@ root.configure(bg=BG)
 root.withdraw()
 
 # Program se na Windows odpre maksimiran.
-try:
-    root.state("zoomed")
-except Exception:
-    try:
-        root.attributes("-zoomed", True)
-    except Exception:
-        pass
+maximize_work_window(root, "1180x760")
 style_app()
 root.protocol("WM_DELETE_WINDOW", on_close)
 for activity_event in ("<Any-KeyPress>", "<Any-Button>", "<MouseWheel>"):
@@ -5779,8 +6830,8 @@ tk.Label(
 ).pack(anchor="center", pady=(0,0))
 
 tk.Label(
-    brand, text=TEST_NOTICE,
-    bg=BG, fg=DANGER, font=("Segoe UI", 9, "bold")
+    brand, text=ENVIRONMENT_NOTICE,
+    bg=BG, fg=ENVIRONMENT_NOTICE_COLOR, font=("Segoe UI", 9, "bold")
 ).pack(side="left", padx=(24, 0), pady=(12, 0))
 
 connected_state = tk.StringVar(value="NI POVEZAVE")
@@ -5862,6 +6913,21 @@ intake_customer_name = tk.StringVar()
 intake_customer_address = tk.StringVar()
 intake_customer_phone = tk.StringVar()
 intake_customer_email = tk.StringVar()
+intake_customer_partner_id = None
+
+def _intake_customer_edited(*_args):
+    global intake_customer_partner_id
+    if intake_customer_partner_id is not None:
+        intake_customer_partner_id = None
+        intake_order_status.set(
+            "Podatki stranke so bili ročno spremenjeni; po potrebi jo ponovno shrani/izberi."
+        )
+
+for _customer_variable in (
+    intake_customer_name, intake_customer_address,
+    intake_customer_phone, intake_customer_email,
+):
+    _customer_variable.trace_add("write", _intake_customer_edited)
 intake_accessories = tk.StringVar()
 intake_quote = tk.StringVar(value="0.00")
 intake_logistics = tk.StringVar(value="0.00")
@@ -5916,11 +6982,11 @@ buyback_notes = tk.StringVar()
 
 # Test PRED je skupen med vhodno stranjo in servisnim listom.
 pre_test_vars = {
-    test_name: tk.StringVar(value="OK")
+    test_name: tk.StringVar(value="NI TESTIRANO")
     for test_name in TEST_ITEMS
 }
 quick_test_widgets = []
-quick_test_summary = tk.StringVar(value=f"{len(TEST_ITEMS)} OK • 0 napak")
+quick_test_summary = tk.StringVar(value=f"0 OK • 0 napak • {len(TEST_ITEMS)} nepreverjenih")
 
 device_page = tk.Frame(tab_device_top, bg=BG)
 device_page.pack(fill="both", expand=True, padx=24, pady=14)
@@ -6048,7 +7114,7 @@ quick_test_summary_label.pack(side="right")
 
 tk.Label(
     quick_test_card,
-    text="Kljukica pomeni OK. Odkljukaj samo modul, ki ne deluje. Rezultat se prenese neposredno v Test PRED servisnega lista.",
+    text="Vsak modul je najprej nepreverjen. Prvi klik ga označi OK, naslednji NE DELA; podroben izbor je v servisnem listu.",
     bg=PANEL, fg=GRAY,
     font=("Segoe UI",9)
 ).pack(anchor="w", padx=20, pady=(0,8))
@@ -6065,9 +7131,12 @@ def update_quick_test_summary(*_args):
         1 for var in pre_test_vars.values()
         if var.get() == "NE DELA"
     )
-    quick_test_summary.set(f"{ok_count} OK • {fail_count} napak")
+    unchecked_count = len(TEST_ITEMS) - ok_count - fail_count
+    quick_test_summary.set(
+        f"{ok_count} OK • {fail_count} napak • {unchecked_count} nepreverjenih"
+    )
     quick_test_summary_label.configure(
-        fg=DANGER if fail_count else SUCCESS
+        fg=DANGER if fail_count else (WARNING if unchecked_count else SUCCESS)
     )
 
 for idx, test_name in enumerate(TEST_ITEMS):
@@ -6187,6 +7256,10 @@ intake_columns.grid_rowconfigure(0, weight=1)
 
 tk.Label(intake_left, text="STRANKA IN DOGOVOR", bg=PANEL, fg=DARK,
          font=("Segoe UI",11,"bold")).grid(row=0,column=0,columnspan=2,sticky="w",padx=12,pady=(10,6))
+ttk.Button(
+    intake_left, text="IZBERI / DODAJ STRANKO",
+    command=choose_intake_customer,
+).grid(row=0, column=1, sticky="e", padx=12, pady=(7, 4))
 for row_i, (label_v, var_v) in enumerate([
     ("Ime in priimek", intake_customer_name),
     ("Naslov", intake_customer_address),
@@ -6247,11 +7320,18 @@ intake_notes_text.pack(fill="both",expand=True,padx=12,pady=(0,10))
 intake_actions = tk.Frame(intake_page, bg=BG)
 intake_actions.pack(fill="x",pady=(10,0))
 ttk.Button(
-    intake_actions, text="SHRANI SPREJEM IN USTVARI PDF",
+    intake_actions, text="USTVARI NOV SPREJEM IN PDF",
     command=save_intake_from_tab, style="Blue.TButton"
 ).pack(side="left")
 ttk.Button(
+    intake_actions, text="ODPRI / NADALJUJ ODPRTI SERVIS",
+    command=start_new_service,
+).pack(side="left", padx=(8,0))
+ttk.Button(
     intake_actions, text="ODPRI ZADNJI PDF", command=open_last_intake_pdf
+).pack(side="left",padx=(8,0))
+ttk.Button(
+    intake_actions, text="80-mm QR OZNAKA", command=open_last_intake_tag
 ).pack(side="left",padx=(8,0))
 
 # Odkup rabljenih naprav - samodejni identifikatorji iz MicroDETECT
@@ -6928,19 +8008,14 @@ def on_top_tab_changed(_event=None):
     except Exception:
         return
 
+    if selected != "Servisni list" and service_editor_active:
+        pause_active_service_timer(reason="MODULE_SWITCH", quiet=True)
+
     if selected == "Reklamacije" and not device_is_identified():
         top_nb.select(tab_device_top)
         messagebox.showwarning(
             "MikroFix",
             "Za reklamacije mora biti naprava najprej identificirana prek USB."
-        )
-        return
-
-    if selected == "Servisni list" and not device_is_identified():
-        top_nb.select(tab_device_top)
-        messagebox.showwarning(
-            "MikroFix",
-            "Najprej odkleni napravo, potrdi povezavo z računalnikom in izvedi MicroDETECT."
         )
         return
 
@@ -6971,7 +8046,7 @@ service_home_head.pack(fill="x", pady=(0,8))
 
 tk.Label(
     service_home_head,
-    text="Zgodovina servisov povezane naprave",
+    text="Servisna čakalna vrsta in zgodovina",
     bg=PANEL, fg=DARK, font=("Segoe UI",15,"bold")
 ).pack(side="left")
 tk.Label(
@@ -6986,6 +8061,53 @@ tk.Label(
     bg=PANEL, fg=GRAY, font=("Segoe UI",9)
 ).pack(anchor="w", pady=(0,8))
 
+service_open_orders_box = ttk.LabelFrame(
+    service_home, text="Odprti sprejemi – čas se začne šele z gumbom ZAČNI SERVIS"
+)
+service_open_orders_box.pack(fill="x", pady=(0, 10))
+service_open_order_actions = tk.Frame(service_open_orders_box, bg=PANEL)
+service_open_order_actions.pack(fill="x", padx=8, pady=(8, 4))
+service_open_order_status = tk.StringVar(value="")
+ttk.Button(
+    service_open_order_actions, text="ZAČNI / NADALJUJ IZBRANI SERVIS",
+    command=start_selected_service_open_order, style="Blue.TButton",
+).pack(side="left")
+ttk.Button(
+    service_open_order_actions, text="A4 PDF / TISK",
+    command=lambda: open_selected_service_intake_output("A4"),
+).pack(side="left", padx=(8, 0))
+ttk.Button(
+    service_open_order_actions, text="80-mm OZNAKA / TISK",
+    command=lambda: open_selected_service_intake_output("TAG"),
+).pack(side="left", padx=(8, 0))
+ttk.Button(
+    service_open_order_actions, text="POSODOBI",
+    command=refresh_service_open_orders,
+).pack(side="left", padx=(8, 0))
+tk.Label(
+    service_open_order_actions, textvariable=service_open_order_status,
+    bg=PANEL, fg=GRAY,
+).pack(side="right")
+
+service_open_order_tree = ttk.Treeview(
+    service_open_orders_box,
+    columns=("id", "order", "created", "customer", "device", "serial", "started", "request"),
+    show="headings", selectmode="browse", height=7,
+)
+for col, label, width in (
+    ("id", "ID", 0), ("order", "Nalog", 125),
+    ("created", "Sprejem", 140), ("customer", "Stranka", 165),
+    ("device", "Naprava", 150), ("serial", "S/N", 105),
+    ("started", "Začetek dela", 145), ("request", "Zahteva", 300),
+):
+    service_open_order_tree.heading(col, text=label)
+    if col == "id":
+        service_open_order_tree.column(col, width=0, minwidth=0, stretch=False)
+    else:
+        service_open_order_tree.column(col, width=width, minwidth=75)
+service_open_order_tree.pack(fill="x", padx=8, pady=(0, 8))
+service_open_order_tree.bind("<Double-1>", start_selected_service_open_order)
+
 service_history_frame = tk.Frame(
     service_home, bg=PANEL,
     highlightthickness=1, highlightbackground=LIGHT_GRAY
@@ -6994,7 +8116,7 @@ service_history_frame.pack(fill="both", expand=True)
 
 service_history_tree = ttk.Treeview(
     service_history_frame,
-    columns=("id","service","date","customer","invoice","warranty","work"),
+    columns=("id","service","date","customer","invoice","warranty","custody","work"),
     show="headings"
 )
 for col, text, width in [
@@ -7004,6 +8126,7 @@ for col, text, width in [
     ("customer","Stranka",180),
     ("invoice","Račun",110),
     ("warranty","Garancija",130),
+    ("custody","Naprava / hramba",255),
     ("work","Opravljeno",430),
 ]:
     service_history_tree.heading(col, text=text)
@@ -7036,7 +8159,7 @@ service_home_actions.pack(fill="x", pady=(10,0))
 
 ttk.Button(
     service_home_actions,
-    text="NADALJUJ ODPRTO NAROČILO",
+    text="ISKANJE / QR KODA ODPRTEGA SPREJEMA",
     command=start_new_service,
     style="Blue.TButton"
 ).pack(side="left")
@@ -7076,6 +8199,20 @@ ttk.Button(
     service_home_actions,
     text="ODPRI BLAGAJNO ZA ZADNJI SERVIS",
     command=lambda: prepare_invoice_for_service(last_saved_service_id),
+).pack(side="left", padx=(8,0))
+
+service_custody_actions = tk.Frame(service_home, bg=PANEL)
+service_custody_actions.pack(fill="x", pady=(6, 0))
+ttk.Button(
+    service_custody_actions,
+    text="POTRDI PREVZEM NAPRAVE",
+    command=mark_selected_service_picked_up,
+).pack(side="left")
+
+ttk.Button(
+    service_custody_actions,
+    text="EVIDENTIRAJ KONČNI POZIV",
+    command=record_selected_final_notice,
 ).pack(side="left", padx=(8,0))
 
 ttk.Button(
@@ -7123,12 +8260,43 @@ service_detect_button = ttk.Button(
 )
 service_detect_button.pack(side="right", padx=10, pady=6)
 
+service_clock_var = tk.StringVar(value="--:--:--")
+service_timer_started_var = tk.StringVar(value="—")
+service_timer_elapsed_var = tk.StringVar(value="00:00:00")
+service_timer_state_var = tk.StringVar(value="ČAS JE USTAVLJEN")
+service_timer_bar = tk.Frame(
+    service_editor, bg="#EAF5EE",
+    highlightthickness=1, highlightbackground="#B7D8C2",
+)
+service_timer_bar.pack(fill="x", padx=8, pady=(7, 0))
+for label_text, variable, width in (
+    ("URA", service_clock_var, 12),
+    ("PRVI ZAČETEK", service_timer_started_var, 23),
+    ("DEJANSKI ČAS", service_timer_elapsed_var, 15),
+    ("STANJE", service_timer_state_var, 20),
+):
+    box = tk.Frame(service_timer_bar, bg="#EAF5EE")
+    box.pack(side="left", padx=(12, 8), pady=7)
+    tk.Label(
+        box, text=label_text, bg="#EAF5EE", fg=GRAY,
+        font=("Segoe UI", 7, "bold"), anchor="w",
+    ).pack(anchor="w")
+    tk.Label(
+        box, textvariable=variable, bg="#EAF5EE", fg=DARK,
+        font=("Segoe UI", 12, "bold"), width=width, anchor="w",
+    ).pack(anchor="w")
+service_timer_toggle_button = ttk.Button(
+    service_timer_bar, text="USTAVI ČAS", command=pause_active_service_timer,
+    style="Blue.TButton",
+)
+service_timer_toggle_button.pack(side="right", padx=12, pady=12)
+
 service_actions = tk.Frame(service_editor, bg=PANEL)
 service_actions.pack(side="bottom", fill="x", padx=10, pady=10)
 
 service_save_button = ttk.Button(
     service_actions,
-    text="PRIPRAVI SERVIS ZA RAČUN",
+    text="ZAKLJUČI SERVIS IN PRIPRAVI RAČUN",
     command=save,
     style="Blue.TButton"
 )
@@ -7192,14 +8360,60 @@ work.grid(row=4, column=1, sticky="nsew", padx=(0,12), pady=6)
 tab_main.grid_columnconfigure(1, weight=1)
 tab_main.grid_rowconfigure(4, weight=1)
 
+# Odobritev je potrebna samo, kadar pripravljene postavke presežejo znesek
+# prvotne ponudbe na servisnem naročilu.
+tab_approval = tk.Frame(service_nb, bg=PANEL)
+service_nb.add(tab_approval, text="Odobritev dodatnega dela")
+service_approved_limit_var = tk.StringVar()
+service_approval_channel_var = tk.StringVar()
+
+approval_card = tk.Frame(
+    tab_approval, bg=PANEL, highlightthickness=1, highlightbackground=LIGHT_GRAY
+)
+approval_card.pack(fill="x", padx=16, pady=16)
+tk.Label(
+    approval_card,
+    text="Izpolni samo, če končni deli in delo presegajo prvotno ponudbo.",
+    bg=PANEL, fg=DARK, font=("Segoe UI", 10, "bold"),
+).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(14, 10))
+tk.Label(
+    approval_card, text="Odobren znesek [EUR]", bg=PANEL, fg=GRAY,
+    font=("Segoe UI", 9, "bold"),
+).grid(row=1, column=0, sticky="w", padx=14, pady=7)
+ttk.Entry(
+    approval_card, textvariable=service_approved_limit_var, width=20
+).grid(row=1, column=1, sticky="w", padx=14, pady=7)
+tk.Label(
+    approval_card, text="Kanal dokazila", bg=PANEL, fg=GRAY,
+    font=("Segoe UI", 9, "bold"),
+).grid(row=2, column=0, sticky="w", padx=14, pady=7)
+ttk.Combobox(
+    approval_card, textvariable=service_approval_channel_var,
+    values=["PODPIS", "E-POŠTA", "SMS"], state="readonly", width=18,
+).grid(row=2, column=1, sticky="w", padx=14, pady=7)
+ttk.Button(
+    approval_card, text="PRIPNI DOKAZILO", command=add_approval_evidence,
+    style="Blue.TButton",
+).grid(row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(10, 14))
+tk.Label(
+    tab_approval,
+    text=(
+        "Dovoljena je fotografija podpisane odobritve ali posnetek prejetega "
+        "e-poštnega/SMS sporočila. Dokazilo se arhivira skupaj s servisom."
+    ),
+    bg=PANEL, fg=GRAY, font=("Segoe UI", 9), justify="left", wraplength=900,
+).pack(anchor="w", padx=18)
+
 # Tab: ročno vnesene storitvene postavke. Program izračuna samo vsoto.
 tab_service_lines = tk.Frame(service_nb, bg=PANEL)
 service_nb.add(tab_service_lines, text="Storitvene postavke")
 
-service_line_kind_var = tk.StringVar(value=SERVICE_LINE_KIND_LABELS["SERVICE"])
+service_line_kind_var = tk.StringVar(value=SERVICE_LINE_KIND_LABELS["T1"])
 service_line_description_var = tk.StringVar()
-service_line_quantity_var = tk.StringVar(value="1")
-service_line_price_var = tk.StringVar(value=f"{LABOR_FLOOR_EUR:.2f}")
+service_line_quantity_var = tk.StringVar(value="0")
+service_line_price_var = tk.StringVar(
+    value=f"{float(service_tariff_snapshot('T1', 0, RUNTIME.settings)['price']):.2f}"
+)
 service_lines_total_var = tk.StringVar(value="Skupaj storitve: 0,00 €")
 
 service_line_form = tk.Frame(
@@ -7209,7 +8423,7 @@ service_line_form = tk.Frame(
 service_line_form.pack(fill="x", padx=12, pady=(12, 8))
 
 for column, (label_v, width_v) in enumerate((
-    ("Vrsta", 20), ("Opis", 46), ("Količina", 10), ("Cena / enoto", 14),
+    ("Tarifa", 20), ("Opis", 46), ("Dodatnih 30 min", 14), ("Izračunana cena", 14),
 )):
     tk.Label(
         service_line_form, text=label_v, bg="#F7F9FA", fg=GRAY,
@@ -7225,12 +8439,15 @@ service_line_description_entry = ttk.Entry(
     service_line_form, textvariable=service_line_description_var, width=46,
 )
 service_line_description_entry.grid(row=1, column=1, sticky="ew", padx=6, pady=(0, 8))
-ttk.Entry(
+service_line_quantity_entry = ttk.Entry(
     service_line_form, textvariable=service_line_quantity_var, width=10,
-).grid(row=1, column=2, sticky="ew", padx=6, pady=(0, 8))
-ttk.Entry(
+)
+service_line_quantity_entry.grid(row=1, column=2, sticky="ew", padx=6, pady=(0, 8))
+service_line_price_entry = ttk.Entry(
     service_line_form, textvariable=service_line_price_var, width=14,
-).grid(row=1, column=3, sticky="ew", padx=6, pady=(0, 8))
+    state="readonly",
+)
+service_line_price_entry.grid(row=1, column=3, sticky="ew", padx=6, pady=(0, 8))
 ttk.Button(
     service_line_form, text="DODAJ POSTAVKO",
     command=add_manual_service_line, style="Blue.TButton",
@@ -7239,7 +8456,10 @@ service_line_form.grid_columnconfigure(1, weight=1)
 
 service_lines_tree = ttk.Treeview(
     tab_service_lines,
-    columns=("kind", "description", "quantity", "unit_price", "total"),
+    columns=(
+        "kind", "description", "quantity", "unit_price", "total",
+        "tariff_version", "billable_minutes", "first_rate", "extra_rate",
+    ),
     show="headings", height=9,
 )
 for column, label_v, width_v in (
@@ -7251,6 +8471,9 @@ for column, label_v, width_v in (
 ):
     service_lines_tree.heading(column, text=label_v)
     service_lines_tree.column(column, width=width_v, anchor="e" if column in {"quantity", "unit_price", "total"} else "w")
+for hidden_column in ("tariff_version", "billable_minutes", "first_rate", "extra_rate"):
+    service_lines_tree.heading(hidden_column, text=hidden_column)
+    service_lines_tree.column(hidden_column, width=0, minwidth=0, stretch=False)
 service_lines_tree.pack(fill="both", expand=True, padx=12, pady=(0, 6))
 
 service_line_actions = tk.Frame(tab_service_lines, bg=PANEL)
@@ -7272,10 +8495,13 @@ tk.Label(
 service_line_description_entry.bind(
     "<Return>", lambda _event: (add_manual_service_line(), "break")[1]
 )
+service_line_kind_combo.bind("<<ComboboxSelected>>", refresh_service_tariff_preview)
+service_line_quantity_var.trace_add("write", refresh_service_tariff_preview)
 
 # Tab: deli
 tab_parts = tk.Frame(service_nb, bg=PANEL)
 service_nb.add(tab_parts, text="Vgrajeni deli")
+service_nb.hide(tab_service_lines)
 
 # Iskanje po istem principu kot v Zalogi delov.
 service_search_panel = tk.Frame(
@@ -7444,6 +8670,26 @@ make_test_tab(tab_post, post_test_vars)
 # Photos tab
 tab_photos = tk.Frame(service_nb, bg=PANEL)
 service_nb.add(tab_photos, text="Fotografije")
+
+
+def set_service_test_tabs_for_device(is_iphone):
+    """Testa PRED/PO sta del standardiziranega postopka samo za iPhone."""
+    if is_iphone:
+        visible = set(service_nb.tabs())
+        if str(tab_pre) not in visible:
+            service_nb.insert(tab_photos, tab_pre, text="Test PRED")
+        visible = set(service_nb.tabs())
+        if str(tab_post) not in visible:
+            service_nb.insert(tab_photos, tab_post, text="Test PO")
+        return
+
+    for variables in (pre_test_vars, post_test_vars):
+        for variable in variables.values():
+            variable.set("N/A")
+    if service_nb.select() in {str(tab_pre), str(tab_post)}:
+        service_nb.select(0)
+    service_nb.hide(tab_pre)
+    service_nb.hide(tab_post)
 photo_top = tk.Frame(tab_photos, bg=PANEL)
 photo_top.pack(fill="x", padx=12, pady=(12,6))
 photo_stage = tk.StringVar(value="PRED")

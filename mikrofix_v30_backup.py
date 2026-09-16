@@ -26,6 +26,10 @@ FORMAT_VERSION = 1
 PBKDF2_ITERATIONS = 600_000
 DAILY_PREFIX = "mikrofix_daily_"
 RESCUE_PREFIX = "mikrofix_rescue_"
+# Namestitveni skripti sem shranijo kopije sistemskih nastavitev (na primer
+# CUPS PPD), ki so lahko namenoma berljive samo uporabniku root. Ne gre za
+# poslovne podatke MikroFIX in ne smejo preprečiti kopije baz ter arhiva.
+EXCLUDED_TOP_LEVEL_DIRS = frozenset({"system-backups"})
 
 
 class BackupError(RuntimeError):
@@ -97,7 +101,12 @@ def _stage_sources(
     data_dir: Path, staging: Path, extra_files: Sequence[Path | str]
 ) -> list[dict]:
     entries: list[dict] = []
-    source_files = [p for p in data_dir.rglob("*") if p.is_file()]
+    source_files = [
+        path
+        for path in data_dir.rglob("*")
+        if path.is_file()
+        and path.relative_to(data_dir).parts[0] not in EXCLUDED_TOP_LEVEL_DIRS
+    ]
     for source in source_files:
         if source.name.endswith(("-wal", "-shm", "-journal")):
             continue
@@ -260,6 +269,7 @@ def create_encrypted_backup(
         existing = sorted(target.glob(f"{DAILY_PREFIX}{date.today().isoformat()}_*.mfbak"))
         if existing:
             inspect_backup(existing[-1], passphrase)
+            existing[-1].chmod(0o600)
             return existing[-1]
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     prefix = DAILY_PREFIX if normalized_kind == "DAILY" else RESCUE_PREFIX
@@ -271,6 +281,7 @@ def create_encrypted_backup(
             schema_version=schema_version, kind=normalized_kind, zip_path=zip_path,
         )
         _encrypt_zip(zip_path, destination, passphrase)
+    destination.chmod(0o600)
     inspect_backup(destination, passphrase)
     if normalized_kind == "DAILY":
         rotate_daily_backups(target, keep=30)

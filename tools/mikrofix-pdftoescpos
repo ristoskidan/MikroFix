@@ -1,0 +1,120 @@
+#!/usr/bin/python3
+"""CUPS filter: PDF strani pretvori v 576-pik Epson ESC/POS raster."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+PAPER_WIDTH_PIXELS = 576
+RENDER_DPI = 203
+
+
+def _skip_space_and_comments(data: bytes, index: int) -> int:
+    while index < len(data):
+        if data[index] in b" \t\r\n":
+            index += 1
+            continue
+        if data[index] == 35:  # '#'
+            end = data.find(b"\n", index)
+            return len(data) if end < 0 else _skip_space_and_comments(data, end + 1)
+        break
+    return index
+
+
+def _read_token(data: bytes, index: int) -> tuple[bytes, int]:
+    index = _skip_space_and_comments(data, index)
+    end = index
+    while end < len(data) and data[end] not in b" \t\r\n#":
+        end += 1
+    if end == index:
+        raise ValueError("Neveljavna PBM glava.")
+    return data[index:end], end
+
+
+def _read_pbm(path: Path) -> tuple[int, int, bytes]:
+    data = path.read_bytes()
+    magic, index = _read_token(data, 0)
+    width_token, index = _read_token(data, index)
+    height_token, index = _read_token(data, index)
+    if magic != b"P4":
+        raise ValueError(f"Pričakovan PBM P4, prejeto {magic!r}.")
+    width = int(width_token)
+    height = int(height_token)
+    if index >= len(data) or data[index] not in b" \t\r\n":
+        raise ValueError("PBM nima ločila pred slikovnimi podatki.")
+    if data[index:index + 2] == b"\r\n":
+        index += 2
+    else:
+        index += 1
+    row_bytes = (width + 7) // 8
+    expected = row_bytes * height
+    bitmap = data[index:index + expected]
+    if len(bitmap) != expected:
+        raise ValueError("PBM slikovni podatki so nepopolni.")
+    return width, height, bitmap
+
+
+def _escpos_page(width: int, height: int, bitmap: bytes) -> bytes:
+    if width != PAPER_WIDTH_PIXELS:
+        raise ValueError(f"Nepričakovana širina rasterja: {width} px.")
+    if height > 65535:
+        raise ValueError("PDF stran je predolga za en Epson raster.")
+    width_bytes = (width + 7) // 8
+    return bytes((
+        0x1D, 0x76, 0x30, 0x00,
+        width_bytes & 0xFF, (width_bytes >> 8) & 0xFF,
+        height & 0xFF, (height >> 8) & 0xFF,
+    )) + bitmap
+
+
+def _input_pdf(arguments: list[str], target: Path) -> Path:
+    if len(arguments) > 6 and arguments[6]:
+        return Path(arguments[6])
+    target.write_bytes(sys.stdin.buffer.read())
+    return target
+
+
+def main(arguments: list[str]) -> int:
+    copies = max(1, int(arguments[4])) if len(arguments) > 4 else 1
+    with tempfile.TemporaryDirectory(prefix="mikrofix-cups-") as raw:
+        work = Path(raw)
+        source = _input_pdf(arguments, work / "input.pdf")
+        prefix = work / "page"
+        completed = subprocess.run(
+            [
+                "/usr/bin/pdftoppm", "-mono", "-r", str(RENDER_DPI),
+                "-scale-to-x", str(PAPER_WIDTH_PIXELS), "-scale-to-y", "-1",
+                str(source), str(prefix),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(completed.stderr.decode("utf-8", "replace").strip())
+        pages = sorted(work.glob("page-*.pbm"))
+        if not pages:
+            raise RuntimeError("PDF ni ustvaril nobene tiskalne strani.")
+
+        output = sys.stdout.buffer
+        output.write(b"\x1b@\x1ba\x01")
+        for _copy in range(copies):
+            for page in pages:
+                output.write(_escpos_page(*_read_pbm(page)))
+                output.write(b"\n")
+        output.write(b"\n\n\n\x1dV\x00")
+        output.flush()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except Exception as error:
+        print(f"mikrofix-pdftoescpos: {error}", file=sys.stderr)
+        raise SystemExit(1)

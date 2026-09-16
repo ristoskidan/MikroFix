@@ -5,7 +5,9 @@ from pathlib import Path
 
 from mikrofix_transactions import complete_buyback_atomic
 from mikrofix_v29_core import ensure_inventory_schema, ensure_service_schema
-from mikrofix_v30_cash import ensure_cash_schema, open_cash_session
+from mikrofix_v30_cash import (
+    close_cash_session, ensure_cash_schema, open_cash_session, record_cash_entry,
+)
 from mikrofix_workflows import (
     begin_service_buyback_offer,
     create_buyback,
@@ -143,13 +145,56 @@ class AtomicBuybackTests(unittest.TestCase):
         self._complete(buyback_id)
         self._complete(buyback_id)
         office = sqlite3.connect(self.office)
+        service = sqlite3.connect(self.service)
         try:
             rows = office.execute(
-                "SELECT amount,balance_after FROM cash_journal_entries_v30"
+                "SELECT id,session_id,amount,balance_after FROM cash_journal_entries_v30"
             ).fetchall()
-            self.assertEqual(rows, [(-50.0, 150.0)])
+            self.assertEqual([(row[2], row[3]) for row in rows], [(-50.0, 150.0)])
+            voucher = service.execute(
+                "SELECT status,cash_session_id,cash_entry_id,booked_at "
+                "FROM cash_disbursements WHERE buyback_id=?",
+                (buyback_id,),
+            ).fetchone()
+            self.assertEqual(voucher[:3], ("BOOKED", rows[0][1], rows[0][0]))
+            self.assertTrue(voucher[3])
         finally:
             office.close()
+            service.close()
+
+    def test_existing_buyback_in_closed_cash_session_needs_no_new_session(self):
+        buyback_id, _number = self._buyback("CASH", 50.0)
+        service = sqlite3.connect(self.service)
+        voucher_no = service.execute(
+            "SELECT voucher_no FROM cash_disbursements WHERE buyback_id=?",
+            (buyback_id,),
+        ).fetchone()[0]
+        service.close()
+        session_id, _ = open_cash_session(
+            self.office, premise_id="MFD", device_id="PIS",
+            operator_code="DR", opening_cash=200,
+        )
+        office = sqlite3.connect(self.office)
+        office.execute("BEGIN IMMEDIATE")
+        entry_id = record_cash_entry(
+            office, session_id=session_id, entry_type="CASH_BUYBACK", amount=-50,
+            reference_type="BUYBACK", reference_id=buyback_id,
+            reference_no=voucher_no, description="Obstoječi gotovinski odkup",
+            operator_code="DR",
+        )
+        office.commit(); office.close()
+        close_cash_session(
+            self.office, premise_id="MFD", device_id="PIS",
+            operator_code="DR", counted_cash=150, note="Zaključeno",
+        )
+        result = self._complete(buyback_id)
+        self.assertEqual(result["cash_entry_id"], entry_id)
+        office = sqlite3.connect(self.office)
+        self.assertEqual(
+            office.execute("SELECT COUNT(*) FROM cash_journal_entries_v30").fetchone()[0],
+            1,
+        )
+        office.close()
 
     def test_service_is_converted_only_with_final_buyback_confirmation(self):
         service = sqlite3.connect(self.service)

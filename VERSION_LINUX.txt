@@ -1,0 +1,9 @@
+MikroFix Linux production: 30.0
+Datum: 2026-09-04
+Cilj: LMDE 7 Gigi / Debian 13 Trixie / Python 3.13 amd64
+Izvorni lokalni commit Windows R9: bcbd73e
+Izvorni GitHub commit R9: 83e0d2e18d9988e51f9c4914ee7a4c2ba1b81fda
+Preverjanje na Windows: compileall uspešen, 127/127 testov uspešnih
+Stanje: DEV/TEST; fizični Linux, Epson, iPhone, keyring in obnova še niso potrjeni
+Produkcijski FURS: izključen
+SI Price: zamrznjen

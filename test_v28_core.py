@@ -4,7 +4,9 @@ import asyncio
 import base64
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,7 +26,9 @@ from mikrofix_supplier import SupplierCatalogStore, parse_fixshop_product_html
 from mikrofix_weekly_report import (
     WeeklyReportError,
     calculate_entry,
+    ensure_inputs as ensure_weekly_inputs,
     generate_pdf as generate_weekly_pdf,
+    load_inputs as load_weekly_inputs,
     parse_fixshop_price as parse_weekly_fixshop_price,
     parse_refurbed_price,
     parse_swappie_prices,
@@ -62,9 +66,14 @@ from mikrofix_workflows import (
     ensure_workflow_schema,
     generate_buyback_pdf,
     generate_service_order_pdf,
+    generate_service_tag_pdf,
     get_buyback,
     get_service_order,
     latest_open_service_order,
+    finish_service_work_timer,
+    pause_service_work_timer,
+    service_work_timer_snapshot,
+    start_service_work_timer,
     validate_buyback,
 )
 from mikrofix_backup import (
@@ -201,7 +210,15 @@ class RuntimeTests(unittest.TestCase):
                 runtime.settings["service_policy"]["price_overrun"],
                 "EXPLICIT_APPROVAL_ONLY",
             )
-            self.assertEqual(runtime.settings["service_policy"]["unclaimed_free_days"], 60)
+            self.assertEqual(runtime.settings["service_policy"]["unclaimed_free_days"], 30)
+            self.assertEqual(
+                runtime.settings["service_policy"]["unclaimed_storage_eur_per_30_days"],
+                10.0,
+            )
+            self.assertEqual(
+                runtime.settings["service_policy"]["unclaimed_final_notice_days"],
+                90,
+            )
             self.assertFalse(runtime.settings["used_device_policy"]["imei_check_required"])
             self.assertEqual(
                 runtime.settings["used_device_policy"]["preferred_payout_method"],
@@ -243,7 +260,7 @@ class RuntimeTests(unittest.TestCase):
             (WARRANTY_SCOPE_NONE, 0, ""),
         )
 
-    def test_production_furs_requires_explicit_gate(self) -> None:
+    def test_production_furs_requires_explicit_activation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             app_dir = Path(raw_dir)
             config_path = app_dir / "production.json"
@@ -259,6 +276,15 @@ class RuntimeTests(unittest.TestCase):
                 os.environ.pop("MIKROFIX_ALLOW_FURS_PRODUCTION", None)
                 with self.assertRaisesRegex(ValueError, "varnostno zaklenjen"):
                     load_runtime(app_dir)
+                config_path.write_text(json.dumps({
+                    "environment": "PRODUCTION",
+                    "furs": {
+                        "enabled": True,
+                        "environment": "PRODUCTION",
+                        "production_activation_confirmed": True,
+                        "certificate_path": "davpotrac.pfx",
+                    },
+                }), encoding="utf-8")
                 os.environ["MIKROFIX_ALLOW_FURS_PRODUCTION"] = "YES"
                 runtime = load_runtime(app_dir)
                 self.assertFalse(runtime.is_test)
@@ -950,6 +976,26 @@ class WeeklyReportTests(unittest.TestCase):
         self.assertEqual(row.status, "N/A")
         self.assertIn("Premalo svežih", row.detail)
 
+    def test_catalog_merge_adds_models_without_overwriting_existing_prices(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_dir:
+            base = Path(raw_dir)
+            current = base / "current.json"
+            seed = base / "seed.json"
+            existing = self._entry()
+            existing["market_offers"][0]["price_eur"] = 333
+            save_weekly_inputs(current, {"schema_version": 1, "entries": [existing]})
+            added = self._entry()
+            added.update({"model": "iPhone 15 Pro", "storage": "128 GB"})
+            save_weekly_inputs(seed, {
+                "schema_version": 1,
+                "entries": [self._entry(), added],
+            })
+            ensure_weekly_inputs(current, seed)
+            merged = load_weekly_inputs(current)
+        self.assertEqual(len(merged["entries"]), 2)
+        self.assertEqual(merged["entries"][0]["market_offers"][0]["price_eur"], 333)
+        self.assertEqual(merged["entries"][1]["model"], "iPhone 15 Pro")
+
     def test_public_source_parsers(self) -> None:
         swappie = """
         <script type="application/ld+json">{
@@ -1018,10 +1064,11 @@ class WorkflowTests(unittest.TestCase):
         self.connection.close()
 
     def test_service_order_is_numbered_persistent_and_completable(self) -> None:
-        order_id, order_no = create_service_order(
-            self.connection, sample_service_order()
-        )
+        payload = sample_service_order()
+        payload["customer_partner_id"] = 42
+        order_id, order_no = create_service_order(self.connection, payload)
         self.assertRegex(order_no, r"^MF-SN-\d{4}-0001$")
+        self.assertEqual(get_service_order(self.connection, order_id)["customer_partner_id"], 42)
         record = get_service_order(self.connection, order_id)
         self.assertEqual(record["device_serial"], "TESTSERIAL001")
         self.assertEqual(
@@ -1038,6 +1085,54 @@ class WorkflowTests(unittest.TestCase):
             latest_open_service_order(
                 self.connection, "TESTSERIAL001", "000000000000001"
             )
+        )
+
+    def test_service_timer_keeps_first_start_and_rounds_real_elapsed_minutes(self) -> None:
+        order_id, _ = create_service_order(self.connection, sample_service_order())
+        first = datetime(2026, 9, 5, 8, 0, 0)
+        self.assertEqual(
+            start_service_work_timer(self.connection, order_id, started_at=first),
+            first,
+        )
+        self.assertEqual(
+            start_service_work_timer(
+                self.connection,
+                order_id,
+                started_at=datetime(2026, 9, 5, 9, 0, 0),
+            ),
+            first,
+        )
+        self.assertEqual(
+            finish_service_work_timer(
+                self.connection,
+                order_id,
+                ended_at=datetime(2026, 9, 5, 9, 0, 1),
+            ),
+            61,
+        )
+
+    def test_service_timer_sums_only_active_intervals(self) -> None:
+        order_id, _ = create_service_order(self.connection, sample_service_order())
+        start_service_work_timer(
+            self.connection, order_id, started_at=datetime(2026, 9, 5, 8, 0, 0)
+        )
+        pause_service_work_timer(
+            self.connection, order_id, ended_at=datetime(2026, 9, 5, 8, 20, 0)
+        )
+        paused = service_work_timer_snapshot(
+            self.connection, order_id, at=datetime(2026, 9, 5, 12, 0, 0)
+        )
+        self.assertFalse(paused["running"])
+        self.assertEqual(paused["total_seconds"], 20 * 60)
+        start_service_work_timer(
+            self.connection, order_id, started_at=datetime(2026, 9, 5, 13, 0, 0)
+        )
+        self.assertEqual(
+            finish_service_work_timer(
+                self.connection, order_id,
+                ended_at=datetime(2026, 9, 5, 13, 40, 0),
+            ),
+            60,
         )
 
     def test_other_device_uses_confirmed_physical_identity(self) -> None:
@@ -1123,12 +1218,40 @@ class WorkflowTests(unittest.TestCase):
                 output_dir,
                 test_mode=True,
             )
+            service_tag = generate_service_tag_pdf(
+                get_service_order(self.connection, order_id), output_dir,
+                test_mode=True,
+            )
             buyback_pdf = generate_buyback_pdf(
                 get_buyback(self.connection, buyback_id),
                 output_dir,
                 test_mode=True,
             )
             self.assertGreater(service_pdf.stat().st_size, 5_000)
+            self.assertGreater(service_tag.stat().st_size, 2_000)
+            from pypdf import PdfReader
+            tag_reader = PdfReader(str(service_tag))
+            self.assertEqual(len(tag_reader.pages), 1)
+            tag_text = tag_reader.pages[0].extract_text() or ""
+            for expected_text in (
+                "MikroFix", "TEST Stranka", "Testna 1", "040000000",
+                "test@example.invalid", "iPhone 11 Pro", "TESTSERIAL001",
+            ):
+                self.assertIn(expected_text, tag_text)
+            if shutil.which("pdftoppm") and shutil.which("zbarimg"):
+                image = output_dir / "service_tag"
+                subprocess.run(
+                    ["pdftoppm", "-png", "-r", "300", "-singlefile", str(service_tag), str(image)],
+                    check=True, capture_output=True,
+                )
+                decoded = subprocess.run(
+                    ["zbarimg", "--raw", str(image.with_suffix(".png"))],
+                    check=True, capture_output=True,
+                ).stdout.decode("utf-8").strip()
+                self.assertEqual(
+                    decoded,
+                    "MIKROFIX-SERVICE|MF-SN-2026-0001|TESTSERIAL001|000000000000001",
+                )
             self.assertGreater(buyback_pdf.stat().st_size, 5_000)
 
     def test_buyback_can_roll_back_before_pdf_is_committed(self) -> None:

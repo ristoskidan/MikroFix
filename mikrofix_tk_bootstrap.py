@@ -124,3 +124,21 @@ def prepare_tcl_tk() -> bool:
     # DLL mora ostati naložen do uvoza _tkinterja.
     _TCL_RUNTIME = runtime
     return True
+
+
+def maximize_work_window(window, fallback_geometry: str = "1280x760") -> None:
+    """Maksimira glavno/delovno okno; modalna vprašanja tega ne kličejo."""
+    try:
+        window.state("zoomed")
+        return
+    except Exception:
+        pass
+    try:
+        window.attributes("-zoomed", True)
+        return
+    except Exception:
+        pass
+    try:
+        window.geometry(fallback_geometry)
+    except Exception:
+        pass

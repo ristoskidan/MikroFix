@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+for host in /sys/class/scsi_host/host*; do
+    [ -r "$host/proc_name" ] || continue
+    [ -w "$host/link_power_management_policy" ] || continue
+    [ "$(cat "$host/proc_name")" = "ahci" ] || continue
+
+    has_disk=false
+    for block_dir in "$host"/device/target*/*/block; do
+        if [ -d "$block_dir" ]; then
+            has_disk=true
+            break
+        fi
+    done
+    [ "$has_disk" = true ] || continue
+
+    printf '%s\n' max_performance > "$host/link_power_management_policy"
+done

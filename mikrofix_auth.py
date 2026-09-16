@@ -63,6 +63,11 @@ ROLE_DEFAULT_PERMISSIONS = {
 }
 
 
+def required_office_entry_permission(*, pos_requested: bool) -> str:
+    """Vrne obvezno dovoljenje tudi pri neposrednem zagonu Office/POS."""
+    return PERMISSION_CASHIER if pos_requested else PERMISSION_OFFICE
+
+
 def now_text() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 

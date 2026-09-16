@@ -7,18 +7,21 @@ lahko avtomatsko preizkusijo in jih ni mogoče obiti z drugim zaslonom.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import sqlite3
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from mikrofix_v30_lots import ensure_lot_schema
+from mikrofix_v30_lots import ensure_lot_schema, receive_lot
 
 
 SCHEMA_VERSION = 1
 PART_FLOOR_FACTOR = 1.05
+MAX_DOCUMENT_QUANTITY = 1_000_000
 
 
 class V29Error(ValueError):
@@ -32,6 +35,16 @@ def now_text() -> str:
 def _money(value: Any) -> float:
     try:
         result = round(float(str(value or "0").replace(",", ".")), 2)
+    except (TypeError, ValueError) as exc:
+        raise V29Error("Vrednost mora biti številka.") from exc
+    if result < 0:
+        raise V29Error("Vrednost ne sme biti negativna.")
+    return result
+
+
+def _cost4(value: Any) -> float:
+    try:
+        result = round(float(str(value or "0").replace(",", ".")), 4)
     except (TypeError, ValueError) as exc:
         raise V29Error("Vrednost mora biti številka.") from exc
     if result < 0:
@@ -58,6 +71,9 @@ class PriceRecommendation:
     recommended_price: float
     hard_floor: float
     profile_code: str
+    target_margin: float = 0.0
+    warranty_reserve: float = 0.0
+    profile_version: int = 1
 
 
 @dataclass(frozen=True)
@@ -72,11 +88,78 @@ class ReceiptLine:
 
 @dataclass(frozen=True)
 class HarvestPart:
-    article_id: int
+    article_id: int | None = None
     condition_grade: str = "RABLJEN_TESTIRAN"
     test_result: str = "OK"
     lot_serial: str = ""
     location: str = ""
+    module_code: str = ""
+    module_name: str = ""
+    device_model: str = ""
+    recommended_sale_price: float = 0
+    price_source_kind: str = ""
+    price_source_url: str = ""
+    price_observed_on: str = ""
+
+
+PULLED_MODULES: tuple[tuple[str, str], ...] = (
+    ("DISPLAY", "zaslon"),
+    ("BATTERY", "baterija"),
+    ("REAR_CAMERA", "zadnja kamera"),
+    ("FRONT_CAMERA", "sprednja kamera / Face ID sklop"),
+    ("EARPIECE", "slušalka in senzorski sklop"),
+    ("CHARGING_PORT", "polnilni priključek"),
+    ("LOUDSPEAKER", "zvočnik"),
+    ("TAPTIC", "vibracijski motor"),
+    ("HOUSING", "ohišje"),
+    ("LOGIC_BOARD", "matična plošča"),
+    ("WIRELESS_CHARGING", "brezžično polnjenje"),
+)
+
+
+def pulled_module_catalog(_model: str) -> list[tuple[str, str]]:
+    """Vrne telefonske module; model ostane del identitete artikla."""
+    return list(PULLED_MODULES)
+
+
+def _pulled_internal_code(model: str, module_code: str) -> str:
+    digest = hashlib.sha1(
+        f"{model.strip().casefold()}|{module_code.strip().upper()}".encode("utf-8")
+    ).hexdigest()[:12].upper()
+    return f"PP-{digest}"
+
+
+def _ensure_pulled_part_article(
+    connection: sqlite3.Connection, *, model: str, module_code: str,
+    module_name: str, recommended_sale_price: Any,
+) -> int:
+    internal_code = _pulled_internal_code(model, module_code)
+    row = connection.execute(
+        "SELECT id FROM inventory_items WHERE internal_code=?", (internal_code,)
+    ).fetchone()
+    price = _money(recommended_sale_price)
+    if row:
+        # Zunanji vir spremeni priporočilo za novo pridobljeni kos in razdelitev
+        # donorjevega stroška, nikoli pa samodejno ne prepiše aktivnega cenika.
+        return int(row[0])
+    if price <= 0:
+        raise V29Error(
+            f"Za uporabni modul »{module_name}« manjka preverjena priporočena prodajna cena."
+        )
+    stamp = now_text()
+    public_name = f"Rabljeni izvlečeni del – {module_name} za {model}"
+    cursor = connection.execute(
+        """
+        INSERT INTO inventory_items(
+            barcode,article_name,internal_code,stock_qty,price,created_at,updated_at,
+            article_kind,category,track_mode,condition_grade,location,
+            price_status,source_kind,active
+        ) VALUES(?,?,?,0,?,?,?,'PART','RABLJENI IZVLEČENI DELI','UNIQUE',
+                 'RABLJEN_TESTIRAN','KARANTENA-DELI','POTRJENA','DONOR_DEVICE',1)
+        """,
+        (f"{internal_code}-MASTER", public_name, internal_code, price, stamp, stamp),
+    )
+    return int(cursor.lastrowid)
 
 
 @dataclass(frozen=True)
@@ -92,30 +175,47 @@ def recommend_price(
     *,
     profile_code: str = "SPLOŠNO",
 ) -> PriceRecommendation:
-    """Obstoječa dinamična logika kot priporočilo, nikoli kot samodejna cena."""
-    cost = _money(acquisition_cost)
-    consumables = _money(profile.get("consumables_eur", 0))
+    """Potrjena tristopenjska maržna formula; rezultat ostane priporočilo."""
+    try:
+        cost = round(float(str(acquisition_cost or "0").replace(",", ".")), 4)
+    except (TypeError, ValueError) as exc:
+        raise V29Error("Nabavna vrednost mora biti številka.") from exc
+    if cost < 0:
+        raise V29Error("Nabavna vrednost ne sme biti negativna.")
     reserve = max(0.0, float(profile.get("warranty_reserve", 0)))
-    target_margin = max(0.0, min(0.95, float(profile.get("target_margin", 0))))
-    hard_margin = max(0.0, min(0.95, float(profile.get("hard_margin", 0))))
-    contribution = _money(profile.get("min_contribution_eur", 0))
-    step = max(0.01, float(profile.get("round_step_eur", 5.0)))
+    tiers = list(profile.get("tiers") or [])
+    if tiers:
+        if len(tiers) != 3:
+            raise V29Error("Cenovni profil mora imeti natanko tri stroškovne razrede.")
+        selected = next(
+            (
+                tier for tier in tiers
+                if tier.get("max_cost_eur") is None
+                or cost <= float(tier["max_cost_eur"])
+            ),
+            None,
+        )
+        if selected is None:
+            raise V29Error("Cenovni profil nima odprtega zadnjega razreda.")
+        target_margin = float(selected.get("target_margin", -1))
+    else:
+        # Združljivost pri uvozu stare baze: uporablja se samo zapisana ciljna
+        # marža. Stari pavšal, minimalni prispevek in hard_margin se ignorirajo.
+        target_margin = float(profile.get("target_margin", 0))
+    if not 0 <= target_margin < 0.80:
+        raise V29Error("Ciljna marža mora biti med 0 in manj kot 80 %.")
 
-    landed = round(cost + consumables + cost * reserve, 2)
-    target = max(
-        landed / (1.0 - target_margin) if target_margin < 1 else landed,
-        landed + contribution,
-    )
-    floor = max(
-        landed / (1.0 - hard_margin) if hard_margin < 1 else landed,
-        landed + contribution,
-        cost * PART_FLOOR_FACTOR,
-    )
+    landed = round(cost * (1.0 + reserve), 4)
+    target = landed / (1.0 - target_margin)
+    floor = round(cost * PART_FLOOR_FACTOR, 2)
     return PriceRecommendation(
         landed_cost=landed,
-        recommended_price=round_up(target, step),
-        hard_floor=round(floor, 2),
+        recommended_price=round_up(target, 1.0),
+        hard_floor=floor,
         profile_code=profile_code,
+        target_margin=target_margin,
+        warranty_reserve=reserve,
+        profile_version=int(profile.get("version") or profile.get("version_no") or 1),
     )
 
 
@@ -153,6 +253,23 @@ def validate_document_line_price(
     else:
         raise V29Error("Neveljavna vrsta postavke.")
     return final
+
+
+def validate_document_quantity(value: Any) -> int:
+    """Reject malformed or implausibly large Office document quantities."""
+    try:
+        quantity = float(str(value or "").strip().replace(",", "."))
+    except (TypeError, ValueError) as exc:
+        raise V29Error("Količina mora biti celo število večje od 0.") from exc
+    if not math.isfinite(quantity) or quantity <= 0 or abs(quantity - round(quantity)) > 1e-9:
+        raise V29Error("Količina mora biti celo število večje od 0.")
+    quantity = int(round(quantity))
+    if quantity > MAX_DOCUMENT_QUANTITY:
+        raise V29Error(
+            f"Količina je previsoka. Največja dovoljena količina je {MAX_DOCUMENT_QUANTITY:,}."
+            .replace(",", ".")
+        )
+    return quantity
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -228,6 +345,18 @@ def ensure_inventory_schema(inventory_db: Path | str, pricing: dict[str, Any]) -
             active INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS price_profile_versions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL,
+            label TEXT NOT NULL,
+            version_no INTEGER NOT NULL,
+            tiers_json TEXT NOT NULL,
+            warranty_reserve REAL NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            created_by TEXT NOT NULL DEFAULT 'SYSTEM',
+            UNIQUE(code, version_no)
         );
         CREATE TABLE IF NOT EXISTS price_history(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,6 +449,23 @@ def ensure_inventory_schema(inventory_db: Path | str, pricing: dict[str, Any]) -
             FOREIGN KEY(article_id) REFERENCES inventory_items(id),
             FOREIGN KEY(stock_movement_id) REFERENCES stock_movements(id)
         );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_donor_part_piece_barcode
+            ON donor_parts(lot_serial) WHERE lot_serial IS NOT NULL AND lot_serial<>'';
+        CREATE TABLE IF NOT EXISTS donor_waste_records_v30(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            harvest_id INTEGER NOT NULL,
+            device_id INTEGER NOT NULL,
+            waste_type TEXT NOT NULL,
+            description TEXT NOT NULL,
+            quantity REAL NOT NULL DEFAULT 1,
+            unit TEXT NOT NULL DEFAULT 'kos',
+            status TEXT NOT NULL DEFAULT 'AWAITING_HANDOFF',
+            collector_document_path TEXT,
+            created_at TEXT NOT NULL,
+            handed_over_at TEXT,
+            FOREIGN KEY(harvest_id) REFERENCES donor_harvests(id),
+            FOREIGN KEY(device_id) REFERENCES used_devices(id)
+        );
         CREATE TABLE IF NOT EXISTS inventory_exception_documents(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             document_no TEXT NOT NULL UNIQUE,
@@ -360,20 +506,69 @@ def ensure_inventory_schema(inventory_db: Path | str, pricing: dict[str, Any]) -
         "used_devices",
         {"inventory_article_id": "INTEGER"},
     )
-
-    profiles = dict(pricing.get("categories", {}))
-    profiles.setdefault(
-        "SPLOŠNO",
+    _add_columns(
+        connection,
+        "donor_harvests",
         {
-            "target_margin": 0.30,
-            "hard_margin": 0.05,
-            "min_contribution_eur": 0.0,
-            "consumables_eur": 0.0,
-            "warranty_reserve": 0.0,
+            "acquisition_cost": "REAL NOT NULL DEFAULT 0",
+            "t1_cost": "REAL NOT NULL DEFAULT 0",
+            "direct_costs": "REAL NOT NULL DEFAULT 0",
+            "total_cost": "REAL NOT NULL DEFAULT 0",
+            "allocation_basis_json": "TEXT NOT NULL DEFAULT '{}'",
+            "reversed_at": "TEXT",
+            "reversed_by": "TEXT",
+            "reversal_reason": "TEXT",
         },
     )
+    _add_columns(
+        connection,
+        "donor_parts",
+        {
+            "module_code": "TEXT NOT NULL DEFAULT ''",
+            "recommended_sale_value": "REAL NOT NULL DEFAULT 0",
+            "price_source_kind": "TEXT NOT NULL DEFAULT ''",
+            "price_source_url": "TEXT NOT NULL DEFAULT ''",
+            "price_observed_on": "TEXT NOT NULL DEFAULT ''",
+        },
+    )
+    _add_columns(
+        connection,
+        "price_history",
+        {
+            "profile_version": "INTEGER NOT NULL DEFAULT 1",
+            "target_margin_snapshot": "REAL NOT NULL DEFAULT 0",
+            "warranty_reserve_snapshot": "REAL NOT NULL DEFAULT 0",
+            "actual_margin": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+
+    profiles = dict(pricing.get("categories", {}))
     stamp = now_text()
     for code, rule in profiles.items():
+        tiers = list(rule.get("tiers") or [])
+        if not tiers:
+            tiers = [
+                {"max_cost_eur": 0, "target_margin": float(rule.get("target_margin", 0))},
+                {"max_cost_eur": 0, "target_margin": float(rule.get("target_margin", 0))},
+                {"max_cost_eur": None, "target_margin": float(rule.get("target_margin", 0))},
+            ]
+        version_no = int(rule.get("version") or 1)
+        tiers_json = json.dumps(tiers, ensure_ascii=False, separators=(",", ":"))
+        # Potrjena sistemska različica v1 namensko nadomesti stare razvojne
+        # profile. Poznejših uporabniških različic inicializacija ne prepiše.
+        connection.execute(
+            "UPDATE price_profile_versions SET active=0 WHERE code=? AND version_no<?",
+            (code, version_no),
+        )
+        connection.execute(
+            """
+            INSERT INTO price_profile_versions(
+                code,label,version_no,tiers_json,warranty_reserve,active,created_at,created_by
+            ) VALUES(?,?,?,?,?,1,?,'SYSTEM')
+            ON CONFLICT(code,version_no) DO NOTHING
+            """,
+            (code, code, version_no, tiers_json, float(rule.get("warranty_reserve", 0)), stamp),
+        )
         connection.execute(
             """
             INSERT INTO price_profiles(
@@ -386,12 +581,12 @@ def ensure_inventory_schema(inventory_db: Path | str, pricing: dict[str, Any]) -
             (
                 code,
                 code,
-                float(rule.get("target_margin", 0)),
-                float(rule.get("hard_margin", 0.05)),
-                float(rule.get("min_contribution_eur", 0)),
-                float(rule.get("consumables_eur", 0)),
+                float(tiers[0].get("target_margin", 0)),
+                0.0,
+                0.0,
+                0.0,
                 float(rule.get("warranty_reserve", 0)),
-                float(rule.get("round_step_eur", 5)),
+                1.0,
                 stamp,
                 stamp,
             ),
@@ -695,6 +890,38 @@ def _insert_movement(
 def _profile(connection: sqlite3.Connection, code: str) -> dict[str, Any]:
     row = connection.execute(
         """
+        SELECT code, version_no, tiers_json, warranty_reserve
+        FROM price_profile_versions
+        WHERE code=? AND active=1
+        ORDER BY version_no DESC LIMIT 1
+        """,
+        (code,),
+    ).fetchone()
+    if not row and code != "SPLOŠNO":
+        row = connection.execute(
+            """
+            SELECT code, version_no, tiers_json, warranty_reserve
+            FROM price_profile_versions
+            WHERE code='SPLOŠNO' AND active=1
+            ORDER BY version_no DESC LIMIT 1
+            """
+        ).fetchone()
+    if row:
+        try:
+            tiers = json.loads(row[2])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise V29Error("Shranjena cenovna matrika je poškodovana.") from exc
+        return {
+            "code": str(row[0]),
+            "version": int(row[1]),
+            "tiers": tiers,
+            "warranty_reserve": float(row[3]),
+            "round_step_eur": 1.0,
+        }
+
+    # Samo migracijski izhod za zelo stare baze brez različic profilov.
+    row = connection.execute(
+        """
         SELECT target_margin, hard_margin, min_contribution_eur,
                consumables_eur, warranty_reserve, round_step_eur
         FROM price_profiles WHERE code=? AND active=1
@@ -717,6 +944,7 @@ def _profile(connection: sqlite3.Connection, code: str) -> dict[str, Any]:
         "target_margin": row[0], "hard_margin": row[1],
         "min_contribution_eur": row[2], "consumables_eur": row[3],
         "warranty_reserve": row[4], "round_step_eur": row[5],
+        "version": 1,
     }
 
 
@@ -731,7 +959,8 @@ def confirm_article_price(
         profile = _profile(connection, profile_code)
         rec = recommend_price(acquisition_cost, profile, profile_code=profile["code"])
         confirmed = _money(confirmed_price)
-        minimum = round(_money(acquisition_cost) * PART_FLOOR_FACTOR, 2)
+        acquisition = _cost4(acquisition_cost)
+        minimum = round(acquisition * PART_FLOOR_FACTOR, 2)
         if confirmed + 1e-9 < minimum:
             raise V29Error(
                 f"Potrjena cena ne sme biti nižja od nabavne vrednosti + 5 % ({minimum:.2f} EUR)."
@@ -744,7 +973,7 @@ def confirm_article_price(
                 price_status='POTRJENA', updated_at=?
             WHERE id=? AND active=1
             """,
-            (_money(acquisition_cost), confirmed, rec.profile_code, stamp, article_id),
+            (acquisition, confirmed, rec.profile_code, stamp, article_id),
         )
         if connection.total_changes == 0:
             raise V29Error("Artikla ni mogoče najti.")
@@ -753,13 +982,16 @@ def confirm_article_price(
             INSERT INTO price_history(
                 article_id, active_from, acquisition_cost, recommended_price,
                 confirmed_price, profile_code, reason, source_type, source_id,
-                operator_code, created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                operator_code, created_at, profile_version,
+                target_margin_snapshot, warranty_reserve_snapshot, actual_margin
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                article_id, stamp, _money(acquisition_cost), rec.recommended_price,
+                article_id, stamp, acquisition, rec.recommended_price,
                 confirmed, rec.profile_code, reason, source_type, source_id,
-                operator_code, stamp,
+                operator_code, stamp, rec.profile_version, rec.target_margin,
+                rec.warranty_reserve,
+                round(1.0 - rec.landed_cost / confirmed, 6) if confirmed else 0.0,
             ),
         )
         connection.commit()
@@ -1134,45 +1366,85 @@ def sync_completed_buybacks_to_inventory(
 
 def update_price_profile(
     inventory_db: Path | str, *, code: str, label: str,
-    target_margin: Any, hard_margin: Any, min_contribution_eur: Any,
-    consumables_eur: Any, warranty_reserve: Any, round_step_eur: Any,
+    target_margin: Any = 0, hard_margin: Any = 0, min_contribution_eur: Any = 0,
+    consumables_eur: Any = 0, warranty_reserve: Any = 0, round_step_eur: Any = 1,
+    tiers: Sequence[dict[str, Any]] | None = None,
+    operator_code: str = "DR",
 ) -> None:
     target = float(str(target_margin).replace(",", "."))
-    hard = float(str(hard_margin).replace(",", "."))
     reserve = float(str(warranty_reserve).replace(",", "."))
-    step = float(str(round_step_eur).replace(",", "."))
-    if not 0 <= hard < 1 or not 0 <= target < 1 or hard > target:
-        raise V29Error("Marži morata biti med 0 in 100 %, trdi minimum pa ne sme presegati ciljne marže.")
+    if tiers is None:
+        tiers = (
+            {"max_cost_eur": 0, "target_margin": target},
+            {"max_cost_eur": 0, "target_margin": target},
+            {"max_cost_eur": None, "target_margin": target},
+        )
+    tiers = [dict(tier) for tier in tiers]
+    if len(tiers) != 3:
+        raise V29Error("Cenovni profil mora imeti natanko tri stroškovne razrede.")
+    previous = -1.0
+    for index, tier in enumerate(tiers):
+        margin = float(str(tier.get("target_margin", "")).replace(",", "."))
+        if not 0 <= margin < 0.80:
+            raise V29Error("Vsaka ciljna marža mora biti med 0 in manj kot 80 %.")
+        tier["target_margin"] = margin
+        limit = tier.get("max_cost_eur")
+        if index == 2:
+            if limit is not None:
+                raise V29Error("Tretji cenovni razred mora biti odprt.")
+        else:
+            limit = float(str(limit).replace(",", "."))
+            if limit < previous:
+                raise V29Error("Stroškovne meje morajo naraščati.")
+            tier["max_cost_eur"] = limit
+            previous = limit
     if not 0 <= reserve < 1:
         raise V29Error("Garancijska rezerva mora biti med 0 in 100 %.")
-    if step <= 0:
-        raise V29Error("Korak zaokroževanja mora biti večji od 0.")
+    code = code.strip()
+    if not code:
+        raise V29Error("Koda cenovnega profila je obvezna.")
     connection = connect(inventory_db)
     stamp = now_text()
-    connection.execute(
-        """
-        INSERT INTO price_profiles(
-            code, label, target_margin, hard_margin, min_contribution_eur,
-            consumables_eur, warranty_reserve, round_step_eur,
-            needs_review, active, created_at, updated_at
-        ) VALUES(?,?,?,?,?,?,?,?,1,1,?,?)
-        ON CONFLICT(code) DO UPDATE SET
-            label=excluded.label, target_margin=excluded.target_margin,
-            hard_margin=excluded.hard_margin,
-            min_contribution_eur=excluded.min_contribution_eur,
-            consumables_eur=excluded.consumables_eur,
-            warranty_reserve=excluded.warranty_reserve,
-            round_step_eur=excluded.round_step_eur,
-            needs_review=1, active=1, updated_at=excluded.updated_at
-        """,
-        (
-            code.strip(), label.strip() or code.strip(), target, hard,
-            _money(min_contribution_eur), _money(consumables_eur), reserve,
-            step, stamp, stamp,
-        ),
-    )
-    connection.commit()
-    connection.close()
+    try:
+        row = connection.execute(
+            "SELECT COALESCE(MAX(version_no),0) FROM price_profile_versions WHERE code=?",
+            (code,),
+        ).fetchone()
+        version_no = int(row[0] or 0) + 1
+        connection.execute("UPDATE price_profile_versions SET active=0 WHERE code=?", (code,))
+        connection.execute(
+            """
+            INSERT INTO price_profile_versions(
+                code,label,version_no,tiers_json,warranty_reserve,active,created_at,created_by
+            ) VALUES(?,?,?,?,?,1,?,?)
+            """,
+            (
+                code, label.strip() or code, version_no,
+                json.dumps(tiers, ensure_ascii=False, separators=(",", ":")),
+                reserve, stamp, str(operator_code or "DR"),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO price_profiles(
+                code,label,target_margin,hard_margin,min_contribution_eur,
+                consumables_eur,warranty_reserve,round_step_eur,
+                needs_review,active,created_at,updated_at
+            ) VALUES(?,?,?,0,0,0,?,1,0,1,?,?)
+            ON CONFLICT(code) DO UPDATE SET
+                label=excluded.label,target_margin=excluded.target_margin,
+                hard_margin=0,min_contribution_eur=0,consumables_eur=0,
+                warranty_reserve=excluded.warranty_reserve,round_step_eur=1,
+                needs_review=0,active=1,updated_at=excluded.updated_at
+            """,
+            (code, label.strip() or code, tiers[0]["target_margin"], reserve, stamp, stamp),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def create_inventory_exception(
@@ -1449,15 +1721,15 @@ def complete_refurbishment(
 
 def harvest_donor_device(
     *, inventory_db: Path | str, device_id: int, parts: Sequence[HarvestPart],
-    notes: str = "", operator_code: str = "DR",
+    notes: str = "", operator_code: str = "DR", t1_hour_eur: Any = 30,
+    direct_costs_eur: Any = 0, full_writeoff_confirmed: bool = False,
+    waste_modules: Sequence[tuple[str, str]] = (),
 ) -> tuple[int, str, float]:
-    if not parts:
-        raise V29Error("Zapisnik razstavljanja nima uporabnih testiranih delov.")
     connection = connect(inventory_db)
     try:
         device = connection.execute(
             """
-            SELECT inventory_code, status, purpose, acquisition_cost
+            SELECT inventory_code, status, purpose, acquisition_cost, model
             FROM used_devices WHERE id=?
             """,
             (device_id,),
@@ -1468,40 +1740,146 @@ def harvest_donor_device(
             raise V29Error("Naprava v trenutnem statusu ni na voljo za razstavljanje.")
         if any(str(p.test_result).upper() != "OK" for p in parts):
             raise V29Error("V zalogo se lahko prenesejo samo uspešno testirani deli.")
-        allocated = round(float(device[3] or 0) / len(parts), 2)
+        acquisition_cost = _cost4(device[3] or 0)
+        t1_cost = _money(t1_hour_eur)
+        direct_costs = _cost4(direct_costs_eur)
+        total_cost = round(acquisition_cost + t1_cost + direct_costs, 2)
+        if not parts:
+            if not full_writeoff_confirmed:
+                raise V29Error(
+                    "Razstavljanja brez uporabnih delov ni mogoče zaključiti brez "
+                    "izrecne potrditve POPOLNEGA ODPISA."
+                )
+            harvest_no = _next_number(connection, "donor_harvests", "harvest_no", "RAZ")
+            stamp = now_text()
+            cursor = connection.execute(
+                """
+                INSERT INTO donor_harvests(
+                    device_id,harvest_no,status,usable_parts,allocated_unit_cost,
+                    notes,operator_code,created_at,completed_at,acquisition_cost,
+                    t1_cost,direct_costs,total_cost,allocation_basis_json
+                ) VALUES(?,?,'FULL_WRITEOFF',0,0,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    device_id, harvest_no, notes.strip(), operator_code, stamp, stamp,
+                    acquisition_cost, t1_cost, direct_costs, total_cost,
+                    json.dumps({"method": "FULL_WRITEOFF"}, separators=(",", ":")),
+                ),
+            )
+            connection.execute(
+                "UPDATE used_devices SET purpose='PARTS',status='WRITTEN_OFF',"
+                "allocated_cost=?,updated_at=? WHERE id=?",
+                (total_cost, stamp, device_id),
+            )
+            for waste_type, description in (
+                ("BATTERY", f"Baterija – popolni odpis {device[4]}"),
+                ("ELECTRONIC", f"Preostanek naprave – popolni odpis {device[4]}"),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO donor_waste_records_v30(
+                        harvest_id,device_id,waste_type,description,created_at
+                    ) VALUES(?,?,?,?,?)
+                    """,
+                    (int(cursor.lastrowid), device_id, waste_type, description, stamp),
+                )
+            connection.commit()
+            return int(cursor.lastrowid), harvest_no, 0.0
+        article_rows: list[tuple[HarvestPart, int, float]] = []
+        for part in parts:
+            article_id = part.article_id
+            if part.module_code:
+                source_url = str(part.price_source_url or "").strip()
+                source = urllib.parse.urlparse(source_url)
+                allowed_price_hosts = {
+                    "www.ifixit.com", "ifixit.com", "fixshop.si", "www.fixshop.si",
+                }
+                if source.scheme != "https" or source.hostname not in allowed_price_hosts:
+                    raise V29Error(
+                        f"Za modul »{part.module_name}« manjka dovoljen spletni vir cene."
+                    )
+                try:
+                    observed = datetime.strptime(
+                        str(part.price_observed_on or ""), "%Y-%m-%d"
+                    ).date()
+                except ValueError as exc:
+                    raise V29Error(
+                        f"Za modul »{part.module_name}« manjka veljaven datum spletne cene."
+                    ) from exc
+                age_days = (datetime.now().date() - observed).days
+                if age_days < 0 or age_days > 8:
+                    raise V29Error(
+                        f"Spletna cena za modul »{part.module_name}« ni dovolj sveža."
+                    )
+            if article_id is None:
+                if not part.module_code or not part.module_name:
+                    raise V29Error("Uporabni del nima določene vrste modula.")
+                article_id = _ensure_pulled_part_article(
+                    connection,
+                    model=part.device_model or str(device[4]),
+                    module_code=part.module_code,
+                    module_name=part.module_name,
+                    recommended_sale_price=part.recommended_sale_price,
+                )
+            article = connection.execute(
+                "SELECT price FROM inventory_items WHERE id=? AND active=1",
+                (int(article_id),),
+            ).fetchone()
+            if not article:
+                raise V29Error(f"Artikel ID {article_id} ne obstaja.")
+            current_recommendation = _money(part.recommended_sale_price)
+            article_rows.append((
+                part, int(article_id),
+                current_recommendation
+                if current_recommendation > 0 else max(0.0, float(article[0] or 0)),
+            ))
+        basis_total = sum(value for _part, _article_id, value in article_rows)
+        if basis_total <= 0:
+            weights = [1.0 / len(article_rows)] * len(article_rows)
+        else:
+            weights = [value / basis_total for _part, _article_id, value in article_rows]
+        allocations: list[float] = []
+        allocated_total = 0.0
+        for index, weight in enumerate(weights, start=1):
+            part_cost = round(total_cost * weight, 2)
+            if index == len(weights):
+                part_cost = round(total_cost - allocated_total, 2)
+            allocations.append(part_cost)
+            allocated_total = round(allocated_total + part_cost, 2)
+        average_allocated = round(total_cost / len(parts), 2)
         harvest_no = _next_number(connection, "donor_harvests", "harvest_no", "RAZ")
         stamp = now_text()
         cursor = connection.execute(
             """
             INSERT INTO donor_harvests(
                 device_id, harvest_no, status, usable_parts, allocated_unit_cost,
-                notes, operator_code, created_at, completed_at
-            ) VALUES(?,?, 'COMPLETED', ?,?,?,?,?,?)
+                notes, operator_code, created_at, completed_at,
+                acquisition_cost,t1_cost,direct_costs,total_cost,allocation_basis_json
+            ) VALUES(?,?, 'COMPLETED', ?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                device_id, harvest_no, len(parts), allocated, notes.strip(),
-                operator_code, stamp, stamp,
+                device_id, harvest_no, len(parts), average_allocated, notes.strip(),
+                operator_code, stamp, stamp, acquisition_cost, t1_cost, direct_costs,
+                total_cost,
+                json.dumps(
+                    {
+                        "method": "PROPORTIONAL_RECOMMENDED_SALE_VALUE",
+                        "values": [v for _p, _article_id, v in article_rows],
+                    },
+                    ensure_ascii=False, separators=(",", ":"),
+                ),
             ),
         )
         harvest_id = int(cursor.lastrowid)
-        allocated_total = 0.0
-        for index, part in enumerate(parts, start=1):
-            # Zadnja postavka dobi centno razliko, da je vsota natančno enaka odkupu.
-            part_cost = allocated
-            if index == len(parts):
-                part_cost = round(float(device[3] or 0) - allocated_total, 2)
-            allocated_total += part_cost
-            article = connection.execute(
-                "SELECT price, price_profile_code FROM inventory_items WHERE id=? AND active=1",
-                (int(part.article_id),),
-            ).fetchone()
-            if not article:
-                raise V29Error(f"Artikel ID {part.article_id} ne obstaja.")
+        for index, ((part, article_id, recommended_value), part_cost) in enumerate(
+            zip(article_rows, allocations), start=1
+        ):
+            unique_lot = part.lot_serial.strip() or f"PP{harvest_id:06d}{index:02d}"
             movement_id = _insert_movement(
-                connection, article_id=int(part.article_id), quantity_delta=1,
+                connection, article_id=int(article_id), quantity_delta=1,
                 movement_type="DONOR_PART_IN", source_type="DONOR_HARVEST",
                 source_id=harvest_id, source_line_id=index,
-                lot_serial=part.lot_serial.strip(), location_to=part.location.strip(),
+                lot_serial=unique_lot, location_to=part.location.strip(),
                 reason=f"Pridobljeno iz donorske naprave {device[0]}",
                 operator_code=operator_code,
             )
@@ -1509,13 +1887,18 @@ def harvest_donor_device(
                 """
                 INSERT INTO donor_parts(
                     harvest_id, article_id, allocated_cost, condition_grade,
-                    test_result, lot_serial, location, stock_movement_id, created_at
-                ) VALUES(?,?,?,?,?,?,?,?,?)
+                    test_result, lot_serial, location, stock_movement_id, created_at,
+                    module_code,recommended_sale_value,price_source_url,price_observed_on
+                    ,price_source_kind
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
-                    harvest_id, int(part.article_id), part_cost,
+                    harvest_id, int(article_id), part_cost,
                     part.condition_grade, part.test_result,
-                    part.lot_serial.strip(), part.location.strip(), movement_id, stamp,
+                    unique_lot, part.location.strip(), movement_id, stamp,
+                    part.module_code, recommended_value,
+                    part.price_source_url, part.price_observed_on,
+                    part.price_source_kind,
                 ),
             )
             # Obstoječa aktivna prodajna cena ostane; spremeni se samo sled izvora.
@@ -1526,7 +1909,31 @@ def harvest_donor_device(
                     updated_at=?
                 WHERE id=?
                 """,
-                (device_id, part.condition_grade, stamp, int(part.article_id)),
+                (device_id, part.condition_grade, stamp, int(article_id)),
+            )
+            receive_lot(
+                connection, schema="main", article_id=int(article_id),
+                source_type="DONOR_HARVEST", source_id=harvest_id,
+                source_line_id=index, lot_serial=unique_lot, quantity=1,
+                acquisition_cost=part_cost, sale_price=recommended_value,
+                location=part.location.strip() or "KARANTENA-DELI",
+                received_at=stamp,
+            )
+        recorded_waste = list(waste_modules)
+        recorded_waste.append(
+            ("ELECTRONIC", f"Preostanek donorske naprave {device[4]}")
+        )
+        for waste_type, description in recorded_waste:
+            waste_type = str(waste_type or "ELECTRONIC").strip().upper()
+            if waste_type not in {"BATTERY", "ELECTRONIC"}:
+                raise V29Error("Vrsta odpadka mora biti BATTERY ali ELECTRONIC.")
+            connection.execute(
+                """
+                INSERT INTO donor_waste_records_v30(
+                    harvest_id,device_id,waste_type,description,created_at
+                ) VALUES(?,?,?,?,?)
+                """,
+                (harvest_id, device_id, waste_type, str(description).strip(), stamp),
             )
         connection.execute(
             """
@@ -1534,10 +1941,82 @@ def harvest_donor_device(
             SET purpose='PARTS', status='HARVESTED', allocated_cost=?, updated_at=?
             WHERE id=?
             """,
-            (round(allocated_total, 2), stamp, device_id),
+            (total_cost, stamp, device_id),
         )
         connection.commit()
-        return harvest_id, harvest_no, allocated
+        return harvest_id, harvest_no, average_allocated
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def reverse_full_writeoff(
+    *, inventory_db: Path | str, device_id: int, operator_code: str = "DR",
+    reason: str = "Napačno potrjen popolni odpis",
+) -> str:
+    """Stornira popolni odpis brez brisanja revizijske sledi.
+
+    Dovoljen je samo odpis brez ustvarjenih delov in brez že oddanega odpada.
+    Naprava se vrne v karanteno, prvotni zapis pa ostane v bazi kot STORNIRAN.
+    """
+    connection = connect(inventory_db)
+    try:
+        device = connection.execute(
+            "SELECT status FROM used_devices WHERE id=?", (int(device_id),)
+        ).fetchone()
+        if not device:
+            raise V29Error("Donorske naprave ni mogoče najti.")
+        if str(device[0]) != "WRITTEN_OFF":
+            raise V29Error("Stornirati je mogoče samo napravo v statusu WRITTEN_OFF.")
+        harvest = connection.execute(
+            """
+            SELECT id,harvest_no,status FROM donor_harvests
+            WHERE device_id=? ORDER BY id DESC LIMIT 1
+            """,
+            (int(device_id),),
+        ).fetchone()
+        if not harvest or str(harvest[2]) != "FULL_WRITEOFF":
+            raise V29Error("Za napravo ni aktivnega popolnega odpisa za storno.")
+        harvest_id = int(harvest[0])
+        if connection.execute(
+            "SELECT 1 FROM donor_parts WHERE harvest_id=? LIMIT 1", (harvest_id,)
+        ).fetchone():
+            raise V29Error("Odpisa ni mogoče stornirati, ker so bili že ustvarjeni deli.")
+        handed_over = connection.execute(
+            """
+            SELECT 1 FROM donor_waste_records_v30
+            WHERE harvest_id=? AND (handed_over_at IS NOT NULL OR status<>'AWAITING_HANDOFF')
+            LIMIT 1
+            """,
+            (harvest_id,),
+        ).fetchone()
+        if handed_over:
+            raise V29Error("Odpisa ni mogoče stornirati, ker je bil odpad že obdelan.")
+        stamp = now_text()
+        connection.execute(
+            """
+            UPDATE donor_harvests
+            SET status='STORNIRAN',reversed_at=?,reversed_by=?,reversal_reason=?
+            WHERE id=?
+            """,
+            (stamp, str(operator_code).strip(), str(reason).strip(), harvest_id),
+        )
+        connection.execute(
+            "UPDATE donor_waste_records_v30 SET status='CANCELLED' WHERE harvest_id=?",
+            (harvest_id,),
+        )
+        connection.execute(
+            """
+            UPDATE used_devices
+            SET purpose='PARTS',status='QUARANTINE',allocated_cost=0,updated_at=?
+            WHERE id=?
+            """,
+            (stamp, int(device_id)),
+        )
+        connection.commit()
+        return str(harvest[1])
     except Exception:
         connection.rollback()
         raise

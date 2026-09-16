@@ -294,7 +294,30 @@ def save_inputs(path: Path, payload: dict[str, Any]) -> Path:
 def ensure_inputs(path: Path, seed_path: Path) -> Path:
     path = Path(path)
     if path.exists():
-        load_inputs(path)
+        payload = load_inputs(path)
+        seed = load_inputs(seed_path)
+        existing = {
+            (
+                str(entry.get("model") or "").strip().casefold(),
+                str(entry.get("storage") or "").strip().casefold(),
+            )
+            for entry in payload["entries"]
+        }
+        additions = [
+            entry for entry in seed["entries"]
+            if (
+                str(entry.get("model") or "").strip().casefold(),
+                str(entry.get("storage") or "").strip().casefold(),
+            ) not in existing
+        ]
+        if additions:
+            # Novi modeli iz kataloga se dodajo, že osvežene oziroma ročno
+            # preverjene cene uporabnika pa se nikoli ne prepišejo.
+            payload["entries"].extend(additions)
+            payload["catalog_merged_at"] = datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+            save_inputs(path, payload)
         return path
     payload = load_inputs(seed_path)
     return save_inputs(path, payload)

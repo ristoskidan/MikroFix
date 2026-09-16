@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep internal AHCI links at maximum performance
+After=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mikrofix-sata-max-performance
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

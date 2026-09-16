@@ -124,6 +124,10 @@ def printer_status(configured_name: str) -> tuple[bool, str]:
 
 
 def main() -> int:
+    if sys.platform.startswith("linux"):
+        from preveri_produkcijo_linux import main as linux_production_main
+
+        return linux_production_main()
     print(f"MikroFIX v{APP_VERSION} - pregled Windows okolja")
     print("=" * 51)
 

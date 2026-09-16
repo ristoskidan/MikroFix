@@ -75,8 +75,8 @@ def generate_test_receipt(
         "ReceiptCenter",
         parent=styles["BodyText"],
         fontName=font,
-        fontSize=7.5,
-        leading=9.5,
+        fontSize=9,
+        leading=11,
         alignment=1,
     )
     body = ParagraphStyle(
@@ -87,14 +87,14 @@ def generate_test_receipt(
     small = ParagraphStyle(
         "ReceiptSmall",
         parent=center,
-        fontSize=6.5,
-        leading=8,
+        fontSize=7.8,
+        leading=9.5,
     )
     warning = ParagraphStyle(
         "ReceiptWarning",
         parent=center,
-        fontSize=8,
-        leading=10,
+        fontSize=9.5,
+        leading=11.5,
         textColor=colors.HexColor("#A63A3A"),
     )
 
@@ -137,7 +137,7 @@ def generate_test_receipt(
     item_table = Table(rows, colWidths=[29 * mm, 7 * mm, 14 * mm], repeatRows=1)
     item_table.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), font),
-        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
         ("ALIGN", (1, 0), (-1, -1), "RIGHT"),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LINEBELOW", (0, 0), (-1, 0), 0.5, colors.black),
@@ -157,7 +157,7 @@ def generate_test_receipt(
     ], colWidths=[27 * mm, 23 * mm])
     totals.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, -1), font),
-        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("ALIGN", (1, 0), (1, -1), "RIGHT"),
         ("LINEABOVE", (0, -1), (-1, -1), 0.7, colors.black),
         ("TOPPADDING", (0, 0), (-1, -1), 3),

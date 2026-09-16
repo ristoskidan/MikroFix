@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+import urllib.parse
+from datetime import date
 from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
@@ -12,6 +14,8 @@ from mikrofix_v29_core import (
     V29Error,
     complete_refurbishment,
     harvest_donor_device,
+    pulled_module_catalog,
+    reverse_full_writeoff,
     start_refurbishment,
     update_price_profile,
 )
@@ -19,6 +23,21 @@ from mikrofix_v30_inventory import (
     InventoryExceptionLine,
     create_inventory_exception,
     storno_inventory_exception,
+)
+from mikrofix_ifixit import (
+    disconnect_pro_session,
+    fetch_module_prices,
+    fetch_pro_module_prices,
+    launch_pro_login,
+    pro_profile_path,
+    pro_session_connected,
+)
+from mikrofix_fixshop import (
+    disconnect_pro_session as disconnect_fixshop_pro_session,
+    fetch_module_prices as fetch_fixshop_module_prices,
+    launch_pro_login as launch_fixshop_pro_login,
+    pro_profile_path as fixshop_pro_profile_path,
+    pro_session_connected as fixshop_pro_session_connected,
 )
 
 
@@ -60,14 +79,13 @@ class PriceProfilesPanel:
         ).pack(side="right", padx=10, pady=7)
         self.tree = ttk.Treeview(
             page,
-            columns=("code", "target", "hard", "contribution", "consumables", "reserve", "round", "review"),
+            columns=("code", "low", "middle", "high", "reserve", "version"),
             show="headings",
         )
         for col, text, width in (
-            ("code", "Profil", 230), ("target", "Ciljna marža", 105),
-            ("hard", "Trdi minimum", 105), ("contribution", "Min. prispevek", 115),
-            ("consumables", "Potrošni material", 120), ("reserve", "Garancijska rezerva", 125),
-            ("round", "Zaokrožanje", 100), ("review", "Revizija", 90),
+            ("code", "Profil", 230), ("low", "Nizki razred", 145),
+            ("middle", "Srednji razred", 155), ("high", "Visoki razred", 125),
+            ("reserve", "Garancijska rezerva", 130), ("version", "Različica", 80),
         ):
             self.tree.heading(col, text=text)
             self.tree.column(col, width=width)
@@ -88,17 +106,21 @@ class PriceProfilesPanel:
         connection = _connect(self.inventory_db)
         rows = connection.execute(
             """
-            SELECT code, label, target_margin, hard_margin, min_contribution_eur,
-                   consumables_eur, warranty_reserve, round_step_eur, needs_review
-            FROM price_profiles WHERE active=1 ORDER BY code
+            SELECT code,label,version_no,tiers_json,warranty_reserve
+            FROM price_profile_versions WHERE active=1 ORDER BY code,version_no DESC
             """
         ).fetchall()
         connection.close()
         for row in rows:
+            import json
+            tiers = json.loads(row[3])
+            low, middle, high = tiers
             self.tree.insert("", "end", values=(
-                f"{row[0]} — {row[1]}", f"{row[2]*100:.1f} %", f"{row[3]*100:.1f} %",
-                f"{row[4]:.2f} €", f"{row[5]:.2f} €", f"{row[6]*100:.1f} %",
-                f"{row[7]:.2f} €", "ZA PREGLED" if row[8] else "POTRJENO",
+                f"{row[0]} — {row[1]}",
+                f"≤ {low['max_cost_eur']:g} € → {low['target_margin']*100:.1f} %",
+                f"≤ {middle['max_cost_eur']:g} € → {middle['target_margin']*100:.1f} %",
+                f"> {middle['max_cost_eur']:g} € → {high['target_margin']*100:.1f} %",
+                f"{row[4]*100:.1f} %", f"v{row[2]}",
             ), tags=(str(row[0]),))
 
     def edit(self):
@@ -110,9 +132,9 @@ class PriceProfilesPanel:
         connection = _connect(self.inventory_db)
         row = connection.execute(
             """
-            SELECT code, label, target_margin, hard_margin, min_contribution_eur,
-                   consumables_eur, warranty_reserve, round_step_eur
-            FROM price_profiles WHERE code=?
+            SELECT code,label,version_no,tiers_json,warranty_reserve
+            FROM price_profile_versions WHERE code=? AND active=1
+            ORDER BY version_no DESC LIMIT 1
             """, (code,),
         ).fetchone()
         connection.close()
@@ -121,12 +143,22 @@ class PriceProfilesPanel:
         _fit(win, 620, 560)
         card = tk.Frame(win, bg=self.colors["panel"])
         card.pack(fill="both", expand=True, padx=18, pady=18)
-        variables = [tk.StringVar(value=str(value)) for value in row]
+        import json
+        tiers = json.loads(row[3])
+        variables = [
+            tk.StringVar(value=str(row[0])), tk.StringVar(value=str(row[1])),
+            tk.StringVar(value=str(tiers[0]["max_cost_eur"])),
+            tk.StringVar(value=str(tiers[0]["target_margin"])),
+            tk.StringVar(value=str(tiers[1]["max_cost_eur"])),
+            tk.StringVar(value=str(tiers[1]["target_margin"])),
+            tk.StringVar(value=str(tiers[2]["target_margin"])),
+            tk.StringVar(value=str(row[4])),
+        ]
         fields = (
-            ("Koda", 0), ("Naziv", 1), ("Ciljna marža (0,30 = 30 %)", 2),
-            ("Trdi minimum marže", 3), ("Minimalni prispevek €", 4),
-            ("Potrošni material €", 5), ("Garancijska rezerva", 6),
-            ("Korak zaokroževanja €", 7),
+            ("Koda", 0), ("Naziv", 1), ("Meja nizkega razreda €", 2),
+            ("Marža nizkega razreda (0,35 = 35 %)", 3),
+            ("Meja srednjega razreda €", 4), ("Marža srednjega razreda", 5),
+            ("Marža visokega razreda", 6), ("Garancijska rezerva", 7),
         )
         for index, (label, var_index) in enumerate(fields):
             tk.Label(card, text=label, bg=self.colors["panel"], fg=self.colors["gray"]).grid(
@@ -142,9 +174,12 @@ class PriceProfilesPanel:
             try:
                 update_price_profile(
                     self.inventory_db, code=variables[0].get(), label=variables[1].get(),
-                    target_margin=variables[2].get(), hard_margin=variables[3].get(),
-                    min_contribution_eur=variables[4].get(), consumables_eur=variables[5].get(),
-                    warranty_reserve=variables[6].get(), round_step_eur=variables[7].get(),
+                    warranty_reserve=variables[7].get(),
+                    tiers=[
+                        {"max_cost_eur": variables[2].get(), "target_margin": variables[3].get()},
+                        {"max_cost_eur": variables[4].get(), "target_margin": variables[5].get()},
+                        {"max_cost_eur": None, "target_margin": variables[6].get()},
+                    ],
                 )
             except Exception as exc:
                 messagebox.showerror("MikroFIX Office", str(exc), parent=win)
@@ -377,6 +412,10 @@ class UsedDevicesPanel:
         self.operator_code = operator_code
         self.colors = colors
         self.on_changed = on_changed
+        self.ifixit_login_process = None
+        self.ifixit_pro_profile = pro_profile_path(self.inventory_db)
+        self.fixshop_login_process = None
+        self.fixshop_pro_profile = fixshop_pro_profile_path(self.inventory_db)
         self._build(parent)
         self.refresh()
 
@@ -390,6 +429,8 @@ class UsedDevicesPanel:
         ttk.Button(actions, text="ZAČNI OBNOVO", command=self.start_refurb, style="Blue.TButton").pack(side="left", padx=5)
         ttk.Button(actions, text="ZAKLJUČI OBNOVO", command=self.complete_refurb).pack(side="left", padx=5)
         ttk.Button(actions, text="RAZSTAVI ZA DELE", command=self.harvest).pack(side="left", padx=5)
+        ttk.Button(actions, text="POVEŽI IFIXIT PRO", command=self.connect_ifixit_pro).pack(side="left", padx=5)
+        ttk.Button(actions, text="POVEŽI FIXSHOP PRO", command=self.connect_fixshop_pro).pack(side="left", padx=5)
         ttk.Button(actions, text="OSVEŽI", command=self.refresh).pack(side="left", padx=5)
         self.tree = ttk.Treeview(
             page, columns=("id", "code", "buyback", "model", "serial", "imei", "purpose", "status", "cost", "sale"), show="headings",
@@ -514,20 +555,136 @@ class UsedDevicesPanel:
         values = self.selected()
         if not values:
             return
+        if str(values[7]) == "WRITTEN_OFF":
+            if not messagebox.askyesno(
+                "Storno popolnega odpisa",
+                "Ta naprava je bila pomotoma zaključena kot POPOLN ODPIS.\n\n"
+                "Naj ohranim prvotni zapis kot storniran, prekličem neoddane "
+                "odpadne postavke in napravo vrnem v karanteno za razstavljanje?",
+                parent=self.tree,
+            ):
+                return
+            try:
+                number = reverse_full_writeoff(
+                    inventory_db=self.inventory_db,
+                    device_id=int(values[0]),
+                    operator_code=self.operator_code,
+                )
+            except Exception as exc:
+                messagebox.showerror("MikroFIX Office", str(exc), parent=self.tree)
+                return
+            messagebox.showinfo(
+                "MikroFIX Office",
+                f"Odpis {number} je storniran. Naprava je znova v karanteni.",
+                parent=self.tree,
+            )
+            self.refresh()
         DonorDialog(self, int(values[0]), str(values[1]))
+
+    def connect_ifixit_pro(self):
+        if pro_session_connected(self.ifixit_pro_profile, timeout=6):
+            messagebox.showinfo(
+                "iFixit Pro", "Namenska iFixit seja je že prijavljena.",
+                parent=self.tree,
+            )
+            return
+        if self.ifixit_login_process is not None and self.ifixit_login_process.poll() is None:
+            messagebox.showinfo(
+                "iFixit Pro", "Prijavno okno je že odprto.", parent=self.tree
+            )
+            return
+        try:
+            self.ifixit_login_process = launch_pro_login(self.ifixit_pro_profile)
+        except Exception as exc:
+            messagebox.showerror("iFixit Pro", str(exc), parent=self.tree)
+            return
+        messagebox.showinfo(
+            "iFixit Pro",
+            "Prijavi se neposredno na iFixit in nato zapri namensko okno Firefox. "
+            "MikroFix bo povezavo preveril sam.",
+            parent=self.tree,
+        )
+        self.tree.after(800, self._wait_for_ifixit_login)
+
+    def _wait_for_ifixit_login(self):
+        if self.ifixit_login_process is None:
+            return
+        if self.ifixit_login_process.poll() is None:
+            self.tree.after(800, self._wait_for_ifixit_login)
+            return
+        self.ifixit_login_process = None
+        if pro_session_connected(self.ifixit_pro_profile, timeout=6):
+            messagebox.showinfo(
+                "iFixit Pro",
+                "Povezava je uspešna. Razstavljanje bo uporabljalo prijavljene cene.",
+                parent=self.tree,
+            )
+        else:
+            messagebox.showwarning(
+                "iFixit Pro",
+                "Prijava ni bila zaznana. Javni iFixit EU cenik ostaja aktiven.",
+                parent=self.tree,
+            )
+
+    def connect_fixshop_pro(self):
+        if fixshop_pro_session_connected(self.fixshop_pro_profile, timeout=6):
+            messagebox.showinfo(
+                "FixShop Pro", "Namenska FixShop seja je že prijavljena.",
+                parent=self.tree,
+            )
+            return
+        if self.fixshop_login_process is not None and self.fixshop_login_process.poll() is None:
+            messagebox.showinfo(
+                "FixShop Pro", "Prijavno okno je že odprto.", parent=self.tree
+            )
+            return
+        try:
+            self.fixshop_login_process = launch_fixshop_pro_login(
+                self.fixshop_pro_profile
+            )
+        except Exception as exc:
+            messagebox.showerror("FixShop Pro", str(exc), parent=self.tree)
+            return
+        messagebox.showinfo(
+            "FixShop Pro",
+            "Prijavi se neposredno na FixShop in nato zapri namensko okno Firefox. "
+            "MikroFix bo povezavo preveril sam.", parent=self.tree,
+        )
+        self.tree.after(800, self._wait_for_fixshop_login)
+
+    def _wait_for_fixshop_login(self):
+        if self.fixshop_login_process is None:
+            return
+        if self.fixshop_login_process.poll() is None:
+            self.tree.after(800, self._wait_for_fixshop_login)
+            return
+        self.fixshop_login_process = None
+        if fixshop_pro_session_connected(self.fixshop_pro_profile, timeout=6):
+            messagebox.showinfo(
+                "FixShop Pro",
+                "Povezava je uspešna. Manjkajoče iFixit primerjave bodo uporabile FixShop Pro cenik.",
+                parent=self.tree,
+            )
+        else:
+            messagebox.showwarning(
+                "FixShop Pro",
+                "Prijava ni bila zaznana. Kot rezerva ostaja javni FixShop cenik.",
+                parent=self.tree,
+            )
 
 
 class DonorDialog:
     def __init__(self, panel: UsedDevicesPanel, device_id: int, device_code: str):
         self.panel, self.device_id, self.device_code = panel, device_id, device_code
-        self.parts = []
-        self.article_map = {}
+        self.rows = {}
+        self.login_process = None
+        self.pro_profile = pro_profile_path(panel.inventory_db)
+        self.fixshop_login_process = None
+        self.fixshop_profile = fixshop_pro_profile_path(panel.inventory_db)
         self.window = tk.Toplevel(panel.tree)
         self.window.title(f"Razstavljanje {device_code}")
-        _fit(self.window, 900, 650)
-        self.article = tk.StringVar()
+        _fit(self.window, 1040, 720)
         self.grade = tk.StringVar(value="B")
-        self.lot = tk.StringVar()
         self.location = tk.StringVar(value="KARANTENA-DELI")
         self._build()
         self._load()
@@ -538,58 +695,313 @@ class DonorDialog:
         actions = tk.Frame(page, bg=self.panel.colors["bg"])
         actions.pack(fill="x", pady=(0, 8))
         ttk.Button(actions, text="ZAKLJUČI RAZSTAVLJANJE", command=self.finish, style="Blue.TButton").pack(side="left")
+        ttk.Button(actions, text="POVEŽI IFIXIT PRO", command=self.connect_ifixit_pro).pack(side="left", padx=(8, 4))
+        ttk.Button(actions, text="ODKLOPI IFIXIT PRO", command=self.disconnect_ifixit_pro).pack(side="left", padx=4)
+        ttk.Button(actions, text="POVEŽI FIXSHOP PRO", command=self.connect_fixshop_pro).pack(side="left", padx=4)
         ttk.Button(actions, text="PREKLIČI", command=self.window.destroy).pack(side="right")
+        self.price_status = tk.StringVar(value="iFixit EU: nalagam cene …")
+        tk.Label(
+            actions, textvariable=self.price_status, bg=self.panel.colors["bg"],
+            fg=self.panel.colors["gray"], font=("Segoe UI", 9, "bold"),
+        ).pack(side="right", padx=14)
         form = tk.Frame(page, bg=self.panel.colors["panel"])
         form.pack(fill="x", pady=(0, 8))
-        self.combo = ttk.Combobox(form, textvariable=self.article, state="readonly", width=55)
-        self.combo.pack(side="left", fill="x", expand=True, padx=8, pady=8)
+        tk.Label(form, text="Razred uporabnega dela", bg=self.panel.colors["panel"]).pack(side="left", padx=(8, 4), pady=8)
         ttk.Combobox(form, textvariable=self.grade, values=["A", "B", "C"], state="readonly", width=6).pack(side="left", padx=5)
-        ttk.Entry(form, textvariable=self.lot, width=18).pack(side="left", padx=5)
-        ttk.Entry(form, textvariable=self.location, width=18).pack(side="left", padx=5)
-        ttk.Button(form, text="DODAJ TESTIRAN DEL", command=self.add).pack(side="left", padx=8)
-        self.tree = ttk.Treeview(page, columns=("id", "article", "grade", "test", "lot", "location"), show="headings")
+        tk.Label(form, text="Lokacija", bg=self.panel.colors["panel"]).pack(side="left", padx=(14, 4))
+        ttk.Entry(form, textvariable=self.location, width=20).pack(side="left", padx=5)
+        ttk.Button(form, text="UPORABEN / PULLED", command=self.mark_pulled, style="Blue.TButton").pack(side="left", padx=(18, 5))
+        ttk.Button(form, text="NI IZVLEČEN", command=lambda: self.mark_waste("NOT_PULLED")).pack(side="left", padx=5)
+        ttk.Button(form, text="NEUPORABEN / ODPAD", command=lambda: self.mark_waste("UNUSABLE")).pack(side="left", padx=5)
+        self.tree = ttk.Treeview(
+            page,
+            columns=("code", "module", "status", "grade", "price", "source"),
+            show="headings", selectmode="extended",
+        )
         for col, text, width in (
-            ("id", "ID", 0), ("article", "Artikel", 350), ("grade", "Razred", 80),
-            ("test", "Test", 90), ("lot", "LOT / serijska", 150), ("location", "Lokacija", 140),
+            ("code", "Modul", 130), ("module", "Naziv", 280),
+            ("status", "Odločitev", 155), ("grade", "Razred", 75),
+            ("price", "Priporočena cena", 125), ("source", "Vir cene", 250),
         ):
             self.tree.heading(col, text=text)
-            self.tree.column(col, width=width, minwidth=0 if col == "id" else 60)
+            self.tree.column(col, width=width, minwidth=60)
         self.tree.pack(fill="both", expand=True)
-        ttk.Button(page, text="ODSTRANI IZBRANO", command=self.remove).pack(anchor="w", pady=(8, 0))
-        tk.Label(page, text="V zalogo se prenesejo samo deli z opravljenim testom OK. Odkupna cena se enakomerno razdeli med vse dodane uporabne dele.", bg=self.panel.colors["bg"], fg=self.panel.colors["gray"], font=("Segoe UI", 9)).pack(anchor="w", pady=(8, 0))
+        tk.Label(
+            page,
+            text=("Vsak modul označi kot uporaben, neizvlečen ali neuporaben. Uporaben del dobi "
+                  "samodejno unikatno črtno kodo; strošek naprave + 1 ura T1 se razdeli "
+                  "sorazmerno glede na priporočene prodajne vrednosti. Odpadek se evidentira."),
+            bg=self.panel.colors["bg"], fg=self.panel.colors["gray"],
+            font=("Segoe UI", 9), wraplength=980, justify="left",
+        ).pack(anchor="w", pady=(8, 0))
 
     def _load(self):
         connection = _connect(self.panel.inventory_db)
-        rows = connection.execute("SELECT id, barcode, article_name FROM inventory_items WHERE active=1 ORDER BY article_name").fetchall()
+        device = connection.execute(
+            "SELECT model FROM used_devices WHERE id=?", (self.device_id,)
+        ).fetchone()
+        self.model = str(device[0] if device else "Neznan model")
         connection.close()
-        for row in rows:
-            display = f"{row[2]} | {row[1]}"
-            self.article_map[display] = row
-        self.combo.configure(values=list(self.article_map))
+        price_catalog = self._load_price_catalog()
+        for code, name in pulled_module_catalog(self.model):
+            public_name = f"Rabljeni izvlečeni del – {name} za {self.model}"
+            connection = _connect(self.panel.inventory_db)
+            existing = connection.execute(
+                "SELECT id,price FROM inventory_items WHERE article_name=? AND active=1",
+                (public_name,),
+            ).fetchone()
+            connection.close()
+            priced = price_catalog.get(code)
+            offer, price_source = priced if priced else (None, "NI SPLETNE PRIMERJAVE")
+            data = {
+                "code": code, "name": name, "status": "NEPREGLEDAN",
+                "grade": "", "price": float(offer.price_eur) if offer else 0.0,
+                "source": price_source,
+                "source_url": offer.url if offer else "",
+                "observed_on": date.today().isoformat() if offer else "",
+                "article_id": int(existing[0]) if existing else None,
+            }
+            iid = self.tree.insert(
+                "", "end", values=(code, name, "NEPREGLEDAN", "", "-", "-"),
+            )
+            self.rows[iid] = data
+            self._render(iid)
 
-    def add(self):
-        row = self.article_map.get(self.article.get())
-        if not row:
-            messagebox.showwarning("MikroFIX Office", "Izberi artikel.", parent=self.window)
+    def _load_price_catalog(self):
+        catalog = {}
+        messages = []
+        try:
+            if pro_session_connected(self.pro_profile, timeout=4):
+                _url, prices = fetch_pro_module_prices(
+                    self.model, self.pro_profile, timeout=10
+                )
+                source = "iFixit Pro cenik"
+            else:
+                _url, prices = fetch_module_prices(self.model, timeout=10)
+                source = "SPLETNI CENIK – iFixit"
+            catalog.update({code: (offer, source) for code, offer in prices.items()})
+            messages.append(f"iFixit {len(prices)}")
+        except Exception as exc:
+            messages.append(f"iFixit napaka: {str(exc)[:45]}")
+        try:
+            fixshop_pro = fixshop_pro_session_connected(
+                self.fixshop_profile, timeout=4
+            )
+            _url, fixshop_prices = fetch_fixshop_module_prices(
+                self.model,
+                profile_path=self.fixshop_profile if fixshop_pro else None,
+                timeout=10,
+            )
+            source = (
+                "FixShop Pro cenik" if fixshop_pro
+                else "SPLETNI CENIK – FixShop"
+            )
+            added = 0
+            for code, offer in fixshop_prices.items():
+                if code not in catalog:
+                    catalog[code] = (offer, source)
+                    added += 1
+            messages.append(f"FixShop +{added}")
+        except Exception as exc:
+            messages.append(f"FixShop napaka: {str(exc)[:45]}")
+        self.price_status.set(
+            " • ".join(messages) + f" • {date.today().isoformat()}"
+        )
+        return catalog
+
+    def _refresh_price_rows(self):
+        prices = self._load_price_catalog()
+        for iid, row in self.rows.items():
+            priced = prices.get(row["code"])
+            offer, source = priced if priced else (None, "NI SPLETNE PRIMERJAVE")
+            row.update({
+                "price": float(offer.price_eur) if offer else 0.0,
+                "source": source,
+                "source_url": offer.url if offer else "",
+                "observed_on": date.today().isoformat() if offer else "",
+            })
+            if row["status"] == "PULLED_OK" and not offer:
+                row.update({"status": "NEPREGLEDAN", "grade": ""})
+            self._render(iid)
+
+    def connect_ifixit_pro(self):
+        if self.login_process is not None and self.login_process.poll() is None:
+            messagebox.showinfo(
+                "iFixit Pro", "Prijavno okno je že odprto.", parent=self.window
+            )
             return
-        part = HarvestPart(int(row[0]), self.grade.get(), "OK", self.lot.get().strip(), self.location.get().strip())
-        self.parts.append(part)
-        self.tree.insert("", "end", values=(row[0], row[2], part.condition_grade, "OK", part.lot_serial, part.location))
-        self.lot.set("")
+        try:
+            self.login_process = launch_pro_login(self.pro_profile)
+        except Exception as exc:
+            messagebox.showerror("iFixit Pro", str(exc), parent=self.window)
+            return
+        self.price_status.set(
+            "iFixit Pro: prijavi se v Firefoxu in nato zapri namensko okno …"
+        )
+        self.window.after(800, self._wait_for_pro_login)
 
-    def remove(self):
-        selected = list(self.tree.selection())
-        indices = sorted((self.tree.index(iid) for iid in selected), reverse=True)
-        for index in indices:
-            del self.parts[index]
-        for iid in selected:
-            self.tree.delete(iid)
+    def _wait_for_pro_login(self):
+        if not self.window.winfo_exists() or self.login_process is None:
+            return
+        if self.login_process.poll() is None:
+            self.window.after(800, self._wait_for_pro_login)
+            return
+        self.login_process = None
+        self._refresh_price_rows()
+        if pro_session_connected(self.pro_profile, timeout=6):
+            messagebox.showinfo(
+                "iFixit Pro",
+                "Povezava je uspešna. Prikazane so prijavljene iFixit Pro cene.",
+                parent=self.window,
+            )
+        else:
+            messagebox.showwarning(
+                "iFixit Pro",
+                "Prijava ni bila potrjena. Uporabljene ostajajo javne iFixit EU cene.",
+                parent=self.window,
+            )
+
+    def disconnect_ifixit_pro(self):
+        if self.login_process is not None and self.login_process.poll() is None:
+            messagebox.showwarning(
+                "iFixit Pro", "Najprej zapri namensko prijavno okno Firefox.",
+                parent=self.window,
+            )
+            return
+        if not messagebox.askyesno(
+            "Odklopi iFixit Pro",
+            "Odstranim samo iFixit prijavno sejo iz namenskega MikroFix profila?",
+            parent=self.window,
+        ):
+            return
+        try:
+            disconnect_pro_session(self.pro_profile)
+            self._refresh_price_rows()
+        except Exception as exc:
+            messagebox.showerror("iFixit Pro", str(exc), parent=self.window)
+            return
+        messagebox.showinfo(
+            "iFixit Pro", "Pro seja je odstranjena. Aktivne so javne iFixit EU cene.",
+            parent=self.window,
+        )
+
+    def connect_fixshop_pro(self):
+        if self.fixshop_login_process is not None and self.fixshop_login_process.poll() is None:
+            messagebox.showinfo(
+                "FixShop Pro", "Prijavno okno je že odprto.", parent=self.window
+            )
+            return
+        try:
+            self.fixshop_login_process = launch_fixshop_pro_login(self.fixshop_profile)
+        except Exception as exc:
+            messagebox.showerror("FixShop Pro", str(exc), parent=self.window)
+            return
+        self.price_status.set(
+            "FixShop Pro: prijavi se v Firefoxu in nato zapri namensko okno …"
+        )
+        self.window.after(800, self._wait_for_fixshop_login)
+
+    def _wait_for_fixshop_login(self):
+        if not self.window.winfo_exists() or self.fixshop_login_process is None:
+            return
+        if self.fixshop_login_process.poll() is None:
+            self.window.after(800, self._wait_for_fixshop_login)
+            return
+        self.fixshop_login_process = None
+        self._refresh_price_rows()
+        if fixshop_pro_session_connected(self.fixshop_profile, timeout=6):
+            messagebox.showinfo(
+                "FixShop Pro",
+                "Povezava je uspešna. Za manjkajoče iFixit primerjave so prikazane prijavljene FixShop cene.",
+                parent=self.window,
+            )
+        else:
+            messagebox.showwarning(
+                "FixShop Pro",
+                "Prijava ni bila potrjena. Uporabljen ostaja javni FixShop cenik.",
+                parent=self.window,
+            )
+
+    def _selected(self):
+        chosen = list(self.tree.selection())
+        if not chosen:
+            messagebox.showwarning("MikroFIX Office", "Izberi vsaj en modul.", parent=self.window)
+        return chosen
+
+    def _render(self, iid):
+        row = self.rows[iid]
+        price = f"{row['price']:.2f} €" if row["price"] > 0 else "-"
+        self.tree.item(iid, values=(
+            row["code"], row["name"], row["status"], row["grade"],
+            price, row["source"] or "-",
+        ))
+
+    def mark_pulled(self):
+        for iid in self._selected():
+            row = self.rows[iid]
+            source_host = urllib.parse.urlparse(row["source_url"]).hostname or ""
+            if row["price"] <= 0 or source_host not in {
+                "www.ifixit.com", "ifixit.com", "fixshop.si", "www.fixshop.si",
+            }:
+                messagebox.showerror(
+                    "MikroFIX Office",
+                    f"Za modul »{row['name']}« ni natančne primerjave niti v iFixit "
+                    "niti v FixShop spletnem ceniku. Program cene ne bo ugibal.",
+                    parent=self.window,
+                )
+                return
+            row.update({
+                "status": "PULLED_OK", "grade": self.grade.get(),
+                "source": row["source"],
+            })
+            self._render(iid)
+
+    def mark_waste(self, status):
+        for iid in self._selected():
+            self.rows[iid].update({"status": status, "grade": ""})
+            self._render(iid)
 
     def finish(self):
+        if any(row["status"] == "NEPREGLEDAN" for row in self.rows.values()):
+            messagebox.showerror(
+                "MikroFIX Office",
+                "Pred zaključkom razvrsti vse module: uporaben, ni izvlečen ali neuporaben.",
+                parent=self.window,
+            )
+            return
+        parts = [
+            HarvestPart(
+                article_id=row["article_id"], condition_grade=row["grade"],
+                test_result="OK", location=self.location.get().strip(),
+                module_code=row["code"], module_name=row["name"],
+                device_model=self.model, recommended_sale_price=row["price"],
+                price_source_kind=row["source"],
+                price_source_url=row["source_url"],
+                price_observed_on=row["observed_on"],
+            )
+            for row in self.rows.values() if row["status"] == "PULLED_OK"
+        ]
+        full_writeoff = False
+        if not parts:
+            confirmation = simpledialog.askstring(
+                "Popolni odpis",
+                "Ni uporabnih delov. Za knjiženje celotne izgube vpiši: POPOLN ODPIS",
+                parent=self.window,
+            )
+            full_writeoff = str(confirmation or "").strip().upper() == "POPOLN ODPIS"
+            if not full_writeoff:
+                return
+        waste = []
+        for row in self.rows.values():
+            if row["status"] == "PULLED_OK":
+                continue
+            waste_type = "BATTERY" if row["code"] == "BATTERY" else "ELECTRONIC"
+            waste.append((waste_type, f"{row['name']} – {row['status']} – {self.model}"))
         try:
             _harvest_id, number, allocated = harvest_donor_device(
                 inventory_db=self.panel.inventory_db, device_id=self.device_id,
-                parts=self.parts, operator_code=self.panel.operator_code,
+                parts=parts, operator_code=self.panel.operator_code,
+                full_writeoff_confirmed=full_writeoff, waste_modules=waste,
             )
         except Exception as exc:
             messagebox.showerror("MikroFIX Office", str(exc), parent=self.window)
@@ -598,7 +1010,10 @@ class DonorDialog:
         self.panel.refresh()
         if self.panel.on_changed:
             self.panel.on_changed()
-        messagebox.showinfo("MikroFIX Office", f"Zapisnik {number} je zaključen. Osnovna razdelitev: {allocated:.2f} € na del.")
+        messagebox.showinfo(
+            "MikroFIX Office",
+            f"Zapisnik {number} je zaključen. Povprečni razporejeni strošek: {allocated:.2f} € na uporaben del.",
+        )
 
 
 def build_price_profiles_tab(parent, **kwargs):

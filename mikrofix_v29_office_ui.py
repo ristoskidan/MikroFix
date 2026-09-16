@@ -622,28 +622,28 @@ class ReceiptDialog:
         connection = self.panel.inventory_connect()
         profile_row = connection.execute(
             """
-            SELECT target_margin, hard_margin, min_contribution_eur,
-                   consumables_eur, warranty_reserve, round_step_eur
-            FROM price_profiles WHERE code=? AND active=1
+            SELECT version_no,tiers_json,warranty_reserve
+            FROM price_profile_versions WHERE code=? AND active=1
+            ORDER BY version_no DESC LIMIT 1
             """,
             (profile_code,),
         ).fetchone()
         if not profile_row:
             profile_row = connection.execute(
                 """
-                SELECT target_margin, hard_margin, min_contribution_eur,
-                       consumables_eur, warranty_reserve, round_step_eur
-                FROM price_profiles WHERE code='SPLOŠNO'
+                SELECT version_no,tiers_json,warranty_reserve
+                FROM price_profile_versions WHERE code='SPLOŠNO' AND active=1
+                ORDER BY version_no DESC LIMIT 1
                 """
             ).fetchone()
             profile_code = "SPLOŠNO"
         connection.close()
         if not profile_row:
             return
+        import json
         profile = {
-            "target_margin": profile_row[0], "hard_margin": profile_row[1],
-            "min_contribution_eur": profile_row[2], "consumables_eur": profile_row[3],
-            "warranty_reserve": profile_row[4], "round_step_eur": profile_row[5],
+            "version": profile_row[0], "tiers": json.loads(profile_row[1]),
+            "warranty_reserve": profile_row[2],
         }
         rec = recommend_price(cost, profile, profile_code=profile_code)
         self.recommended.set(f"{rec.recommended_price:.2f}")

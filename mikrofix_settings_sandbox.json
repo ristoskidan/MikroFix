@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "app_version": "30.0-sandbox",
+  "environment": "TEST",
+  "sandbox": {
+    "enabled": true,
+    "purpose": "TESTIRANJE_IN_NACRTOVANJE_POSODOBITEV"
+  },
+  "database": {
+    "backend": "sqlite",
+    "data_dir": "/home/mikrofix/MikroFixData_V30_SANDBOX",
+    "server_url": ""
+  },
+  "business": {
+    "legal_name": "MikroFix, popravilo elektronskih in telekomunikacijskih naprav, Ristoski Daniel s.p.",
+    "tax_number": "84514841",
+    "registration_number": "7565178000",
+    "iban": "SI56040000283154872",
+    "street": "Paradiž 73",
+    "city": "2282 Cirkulane",
+    "premises": [
+      "MFD",
+      "MFT"
+    ],
+    "active_premise": "MFD",
+    "electronic_device": "PIS",
+    "operator_code": "DR",
+    "operator_tax_number": "84514841",
+    "numbering_structure": "B"
+  },
+  "tax": {
+    "mode": "NON_VAT",
+    "default_vat_rate": 0.0,
+    "effective_from": "2026-08-19",
+    "invoice_note": "Oproščeno po prvem odstavku 94. člena ZDDV-1."
+  },
+  "service_policy": {
+    "unclaimed_free_days": 30,
+    "unclaimed_storage_eur_per_30_days": 10.0,
+    "unclaimed_final_notice_days": 90,
+    "unclaimed_never_transfers_ownership_automatically": true
+  },
+  "furs": {
+    "enabled": false,
+    "environment": "TEST",
+    "certificate_path": "",
+    "test_console_enabled": true,
+    "test_certificate_path": "/home/mikrofix/KINGSTON_PRE_FORMAT_2026-09-04/MikroFix linux/Cert/10695087-1.p12",
+    "test_ca_bundle_path": "certs/furs-test-ca-bundle.pem",
+    "test_business_premise_id": "TESTMFD",
+    "test_electronic_device_id": "PIS",
+    "test_timeout_seconds": 15,
+    "production_requires_explicit_confirmation": true
+  },
+  "printer": {
+    "model": "Epson TM-T20II (M267D)",
+    "paper_width_mm": 80,
+    "connection": "USB",
+    "dpi": 203,
+    "printer_name": "TM-T20II",
+    "a4_printer_name": "HP-LaserJet-1020",
+    "windows_printer_name": ""
+  },
+  "data_encryption": {
+    "enabled": false,
+    "provider": "gocryptfs",
+    "cipher_dir": ""
+  },
+  "backup": {
+    "enabled": true,
+    "target_dir": "/media/mikrofix/KINGSTON/MikroFix_Backup",
+    "retention_days": 30,
+    "max_age_hours": 24,
+    "require_distinct_volume": true,
+    "passphrase_configured": true
+  },
+  "supplier": {
+    "fixshop": {
+      "enabled": false,
+      "auto_refresh": false,
+      "refresh_hours": 24,
+      "timeout_seconds": 12,
+      "max_workers": 2,
+      "allowed_hosts": [
+        "fixshop.si"
+      ],
+      "user_agent": "MikroFIX/30 E2E TEST"
+    }
+  },
+  "weekly_report": {
+    "enabled": true,
+    "automatic_monday": true
+  }
+}

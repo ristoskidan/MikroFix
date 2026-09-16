@@ -32,7 +32,7 @@
     "environment": "TEST",
     "certificate_path": "",
     "test_console_enabled": true,
-    "test_certificate_path": "C:\\Users\\MikroFix\\Desktop\\MikroFix SERVICE\\10695087-1.p12",
+    "test_certificate_path": "",
     "test_ca_bundle_path": "certs/furs-test-ca-bundle.pem",
     "test_business_premise_id": "TESTMFD",
     "test_electronic_device_id": "PIS",
@@ -44,7 +44,8 @@
     "paper_width_mm": 80,
     "connection": "USB",
     "dpi": 203,
-    "windows_printer_name": "EPSON TM-T20II Receipt"
+    "printer_name": "",
+    "windows_printer_name": ""
   },
   "supplier": {
     "fixshop": {

@@ -4,7 +4,16 @@ import unittest
 from pathlib import Path
 
 from mikrofix_invoice_bridge import ensure_service_invoice_schema, mark_service_invoiced
-from mikrofix_workflows import create_service_order, ensure_workflow_schema, link_service_result
+from mikrofix_workflows import (
+    create_service_order,
+    ensure_workflow_schema,
+    link_service_result,
+    list_running_service_work_sessions,
+    load_service_order_parts,
+    save_service_order_parts,
+    start_service_work_timer,
+    pause_service_work_timer,
+)
 
 
 class V30ServiceLifecycleTests(unittest.TestCase):
@@ -71,6 +80,58 @@ class V30ServiceLifecycleTests(unittest.TestCase):
         self.assertEqual(row[0], "COMPLETED")
         self.assertEqual(row[1], service_id)
         self.assertTrue(row[2])
+
+    def _create_open_order(self, serial):
+        order_id, _ = create_service_order(
+            self.connection,
+            {
+                "customer_name": "Stranka",
+                "customer_phone": "040000000",
+                "device_model": "Telefon",
+                "device_serial": serial,
+                "device_type": "TELEFON",
+                "identity_method": "MANUAL_OTHER",
+                "manual_identity_confirmed": True,
+                "customer_request": "Diagnostika",
+                "contract_context": "MFD",
+                "delivery_channel": "PAPER",
+                "operator_code": "DR",
+            },
+        )
+        return order_id
+
+    def test_open_service_parts_survive_workspace_reopen(self):
+        order_id = self._create_open_order("SN-002")
+        expected = [
+            ("Lightning konektor", "CHARGING_PORT", "383000000001", 42, "LOT-7", 39.9),
+            ("Tesnilo", "SEAL", "383000000002", 43, "", 4.5),
+        ]
+
+        save_service_order_parts(self.connection, order_id, expected)
+
+        self.assertEqual(load_service_order_parts(self.connection, order_id), expected)
+
+    def test_saving_open_service_parts_replaces_removed_lines(self):
+        order_id = self._create_open_order("SN-003")
+        first = ("Baterija", "BATTERY", "383000000003", 44, "LOT-8", 29.0)
+        removed = ("Zaslon", "DISPLAY", "383000000004", 45, "LOT-9", 89.0)
+        save_service_order_parts(self.connection, order_id, [first, removed])
+
+        save_service_order_parts(self.connection, order_id, [first])
+
+        self.assertEqual(load_service_order_parts(self.connection, order_id), [first])
+
+    def test_running_service_session_blocks_close_until_timer_is_paused(self):
+        order_id = self._create_open_order("SN-AKTIVNA")
+        start_service_work_timer(self.connection, order_id, operator_code="DR")
+
+        running = list_running_service_work_sessions(self.connection)
+        self.assertEqual(len(running), 1)
+        self.assertEqual(running[0]["service_order_id"], order_id)
+        self.assertEqual(running[0]["device_model"], "Telefon")
+
+        pause_service_work_timer(self.connection, order_id, operator_code="DR")
+        self.assertEqual(list_running_service_work_sessions(self.connection), [])
 
 
 if __name__ == "__main__":
