@@ -46,6 +46,13 @@ odločitev. Dostopni arhiv je bil 14. 9. 2026 pregledan v prijavljenem računu.
 Odločitev iz pogovora se pri prenosu v novo arhitekturo presodi glede varnosti,
 sledljivosti in nove centralne zapisovalne meje.
 
+Celotni preverljivi indeks 25 pogovorov, najdenih formul in dokumentov je v
+[`../POGOVORI_RISTOSKI_DAN_INDEKS_2026-09-18.md`](../POGOVORI_RISTOSKI_DAN_INDEKS_2026-09-18.md).
+Pregled je potrdil obstoj izdelane odkupne pogodbe s prodajalcem, ne pa tudi
+dokončanega ločenega pisnega pooblastila osebi, ki odkupuje v imenu MikroFIX.
+Pooblastila zato pred uporabo agentskega toka ni dovoljeno šteti za že izdelan
+dokument.
+
 ## 4. Produkcijske blokade, ki zahtevajo zunanjo potrditev
 
 ### FURS in interni akt
