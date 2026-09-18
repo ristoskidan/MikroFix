@@ -64,8 +64,8 @@ limita agenta.
   računalnik, spletno MiniBlagajno in A4/PDF. Bluetooth in model tiskalnika ne
   sodita v interni akt.
 - Fizična kopija dokazuje, da je bila poznejša **različica 1.2 podpisana
-  31. 8. 2026**. Na njej je firma zapisana kot `MikroFix`, uporabnik pa je
-  pozneje opozoril, da to ni pravilen zapis firme.
+  31. 8. 2026**. Na njej je firma napačno zapisana kot `MikroFIX`; pravilen
+  zapis firme je `MikroFix`.
 - Sedanja zasnova aplikacije in matrika naprav/prostorov se razlikujeta od
   podpisane različice. Pred produkcijskim FURS tokom je zato predvidena nova
   prijava/uskladitev in nov interni akt; stare podpisane različice se ne
