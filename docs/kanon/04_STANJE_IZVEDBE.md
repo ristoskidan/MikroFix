@@ -91,6 +91,22 @@ prodaja tega načina nima. Ciljani testi preverjajo vrstni red, predogled PDF,
 prazna plačila, dejanski runtime klic in prepoved pri neposredni prodaji. Ročni
 preizkus celotnega zaslona še ostaja potreben.
 
+Centralni PostgreSQL del ima od 19. 9. 2026 trajno pripravljalno pregrado za
+polno inventuro. Začetek seje `PREPARING` in njen preklic sta idempotentna,
+preživita ponovni zagon strežnika in sta vezana na globalno transakcijsko
+ključavnico. Med pripravo so novi servisni, prodajni, zalogovni in dokumentni
+tokovi zavrnjeni; ostanejo samo izrecno določeni zaključni ukazi za zapiranje
+že odprtega dneva. Vsaka registrirana Service postaja lahko za konkretno sejo
+shrani podpisano poročilo o checkpointu, lokalni zapisovalni blokadi ter ločenih
+`pending`, `uncertain` in konfliktnih ukazih. PostgreSQL integracijski testi
+potrjujejo trajno blokado, enak rezultat ponovitve, preklic in ohranitev
+blokirajočega poročila postaje.
+
+To je samo varen temelj 8. sklopa. Prehod v `ACTIVE` še ni dovoljen, dokler niso
+izvedeni centralni pregled vseh odprtih dokumentov in vseh aktivnih Service
+postaj, inventurne vrstice, pravila manjkov/viškov, zaključek ter nova
+inventurna epoha, ki zavrne zastarele offline ukaze.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:

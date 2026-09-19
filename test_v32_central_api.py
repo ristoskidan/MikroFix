@@ -56,7 +56,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.clean_server_tables()
 
     def clean_server_tables(self):
-        from sqlalchemy import delete
+        from sqlalchemy import delete, update
 
         from mikrofix_server.models import (
             accepted_operations,
@@ -72,6 +72,8 @@ class CentralApiIntegrationTests(unittest.TestCase):
             direct_sale_discount_audit,
             direct_sale_stock_allocations,
             fiscal_outbox,
+            full_inventory_sessions,
+            inventory_control,
             inventory_items,
             invoice_drafts,
             invoice_number_sequences,
@@ -87,6 +89,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
             inventory_identities,
             inventory_lots,
             inventory_price_history,
+            inventory_service_readiness,
             service_orders,
             service_part_consumptions,
             service_stock_allocations,
@@ -95,8 +98,14 @@ class CentralApiIntegrationTests(unittest.TestCase):
         )
 
         with self.engine.begin() as connection:
+            connection.execute(
+                update(inventory_control)
+                .where(inventory_control.c.control_id == 1)
+                .values(mode="NORMAL", current_session_uuid=None)
+            )
             connection.execute(delete(central_audit_events))
             connection.execute(delete(central_sessions))
+            connection.execute(delete(inventory_service_readiness))
             connection.execute(delete(physical_stock_returns))
             connection.execute(delete(service_stock_allocations))
             connection.execute(delete(receipt_attachments))
@@ -119,6 +128,7 @@ class CentralApiIntegrationTests(unittest.TestCase):
             connection.execute(delete(invoice_drafts))
             connection.execute(delete(service_part_consumptions))
             connection.execute(delete(technical_completions))
+            connection.execute(delete(full_inventory_sessions))
             connection.execute(delete(accepted_operations))
             connection.execute(delete(change_feed))
             connection.execute(delete(service_orders))
@@ -160,6 +170,23 @@ class CentralApiIntegrationTests(unittest.TestCase):
                 "quote_eur": "0",
                 "logistics_eur": "0",
             },
+            "contract_version": 1,
+        }
+
+    def full_inventory_operation(
+        self, session_id, *, operation_type, sequence, expected_version, payload,
+    ):
+        return {
+            "operation_id": str(uuid4()),
+            "operation_type": operation_type,
+            "aggregate_type": "FULL_INVENTORY",
+            "aggregate_id": str(session_id),
+            "expected_version": expected_version,
+            "actor_id": "office-test",
+            "device_id": "OFFICE-PC-TEST",
+            "device_sequence": sequence,
+            "occurred_at": "2026-09-19T08:00:00+02:00",
+            "payload": payload,
             "contract_version": 1,
         }
 
@@ -3841,6 +3868,131 @@ class CentralApiIntegrationTests(unittest.TestCase):
             )).one()
         self.assertEqual(str(stock.quantity_on_hand), "2.0000")
         self.assertEqual(str(stock.current_sale_price), "15.00")
+
+    def test_inventory_preparation_blocks_new_business_until_cancelled(self):
+        session_id = uuid4()
+        begin = self.full_inventory_operation(
+            session_id,
+            operation_type="BeginFullInventoryPreparation",
+            sequence=1,
+            expected_version=0,
+            payload={
+                "session_id": str(session_id),
+                "reference": "INVENTURA-2026-09",
+                "confirmed": True,
+            },
+        )
+        started = self.client.post(
+            "/v1/sync/operations", json=begin, headers=self.headers
+        ).json()
+        self.assertEqual(started["result_code"], "ACCEPTED")
+        self.assertEqual(started["result"]["status"], "PREPARING")
+
+        retried = self.client.post(
+            "/v1/sync/operations", json=begin, headers=self.headers
+        ).json()
+        self.assertEqual(retried, started)
+
+        blocked_order = self.operation(sequence=2)
+        blocked = self.client.post(
+            "/v1/sync/operations", json=blocked_order, headers=self.headers
+        ).json()
+        self.assertEqual(blocked["result_code"], "REJECTED")
+        self.assertEqual(blocked["error_code"], "FULL_INVENTORY_LOCKED")
+
+        cancel = self.full_inventory_operation(
+            session_id,
+            operation_type="CancelFullInventoryPreparation",
+            sequence=3,
+            expected_version=1,
+            payload={
+                "session_id": str(session_id),
+                "reason": "Priprava je bila prekinjena zaradi nedosegljive postaje",
+                "confirmed": True,
+            },
+        )
+        cancelled = self.client.post(
+            "/v1/sync/operations", json=cancel, headers=self.headers
+        ).json()
+        self.assertEqual(cancelled["result_code"], "ACCEPTED")
+        self.assertEqual(cancelled["result"]["status"], "CANCELLED")
+
+        accepted_order = self.operation(sequence=4)
+        accepted = self.client.post(
+            "/v1/sync/operations", json=accepted_order, headers=self.headers
+        ).json()
+        self.assertEqual(accepted["result_code"], "ACCEPTED")
+
+    def test_service_readiness_is_bound_to_session_and_keeps_blockers(self):
+        from datetime import datetime, timezone
+
+        from sqlalchemy import insert, select
+
+        from mikrofix_server.models import inventory_service_readiness, workstations
+        from mikrofix_server.operations import process_operation
+        from mikrofix_sync_contracts import SyncOperationEnvelope
+
+        session_id = uuid4()
+        begin = self.full_inventory_operation(
+            session_id,
+            operation_type="BeginFullInventoryPreparation",
+            sequence=10,
+            expected_version=0,
+            payload={
+                "session_id": str(session_id),
+                "reference": "INVENTURA-READINESS",
+                "confirmed": True,
+            },
+        )
+        started = self.client.post(
+            "/v1/sync/operations", json=begin, headers=self.headers
+        ).json()
+        barrier = int(started["result"]["barrier_sequence"])
+        workstation_id = uuid4()
+        with self.engine.begin() as connection:
+            connection.execute(insert(workstations).values(
+                workstation_uuid=workstation_id,
+                workstation_code="SERVICE-READY-1",
+                display_name="Service readiness test",
+                application_type="SERVICE",
+                credential_hash="0" * 64,
+                is_active=True,
+                approved_at=datetime.now(timezone.utc),
+            ))
+            request = SyncOperationEnvelope(
+                operation_id=str(uuid4()),
+                operation_type="AcknowledgeFullInventoryReadiness",
+                aggregate_type="FULL_INVENTORY",
+                aggregate_id=str(session_id),
+                expected_version=1,
+                actor_id="serviser-test",
+                device_id="SERVICE-READY-1",
+                device_sequence=1,
+                occurred_at="2026-09-19T08:10:00+02:00",
+                payload={
+                    "session_id": str(session_id),
+                    "pending_outbox_count": 1,
+                    "uncertain_outbox_count": 0,
+                    "sync_conflict_count": 0,
+                    "central_checkpoint": barrier,
+                    "local_write_lock_active": True,
+                },
+            )
+            receipt = process_operation(
+                connection,
+                request,
+                transmitted_by_workstation_uuid=workstation_id,
+            )
+            row = connection.execute(
+                select(inventory_service_readiness).where(
+                    inventory_service_readiness.c.session_uuid == session_id,
+                    inventory_service_readiness.c.workstation_uuid == workstation_id,
+                )
+            ).one()
+        self.assertEqual(receipt["result_code"], "ACCEPTED")
+        self.assertFalse(receipt["result"]["ready"])
+        self.assertEqual(row.pending_outbox_count, 1)
+        self.assertTrue(row.local_write_lock_active)
 
 
 if __name__ == "__main__":

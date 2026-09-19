@@ -28,8 +28,11 @@ from mikrofix_sync_contracts import (
     validated_create_inventory_item_payload,
     validated_create_service_order_payload,
     validated_create_partner_payload,
+    validated_begin_full_inventory_payload,
+    validated_cancel_full_inventory_payload,
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
+    validated_inventory_readiness_payload,
     validated_technical_completion_payload,
     validated_set_partner_active_payload,
     validated_storno_invoice_payload,
@@ -591,6 +594,56 @@ class SyncContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "not supported"):
             validated_resolve_physical_stock_return_payload({
                 **decision.payload(), "decision": "CREATE_STOCK_EXCEPTION",
+            })
+
+    def test_full_inventory_preparation_requires_identity_and_confirmation(self):
+        session_id = str(uuid4())
+        self.assertEqual(
+            validated_begin_full_inventory_payload({
+                "session_id": session_id,
+                "reference": "INVENTURA-2026",
+                "confirmed": True,
+            })["session_id"],
+            session_id,
+        )
+        with self.assertRaisesRegex(ContractError, "explicitly confirmed"):
+            validated_begin_full_inventory_payload({
+                "session_id": session_id,
+                "reference": "INVENTURA-2026",
+                "confirmed": False,
+            })
+
+    def test_inventory_readiness_preserves_all_blocking_counts(self):
+        payload = validated_inventory_readiness_payload({
+            "session_id": str(uuid4()),
+            "pending_outbox_count": 2,
+            "uncertain_outbox_count": 1,
+            "sync_conflict_count": 3,
+            "central_checkpoint": 17,
+            "local_write_lock_active": False,
+        })
+        self.assertEqual(payload["pending_outbox_count"], 2)
+        self.assertEqual(payload["uncertain_outbox_count"], 1)
+        self.assertEqual(payload["sync_conflict_count"], 3)
+        self.assertFalse(payload["local_write_lock_active"])
+        with self.assertRaisesRegex(ContractError, "non-negative integer"):
+            validated_inventory_readiness_payload({
+                **payload, "pending_outbox_count": -1,
+            })
+
+    def test_full_inventory_cancellation_requires_auditable_reason(self):
+        session_id = str(uuid4())
+        cancelled = validated_cancel_full_inventory_payload({
+            "session_id": session_id,
+            "reason": "Service postaja ni dosegljiva",
+            "confirmed": True,
+        })
+        self.assertEqual(cancelled["session_id"], session_id)
+        with self.assertRaisesRegex(ContractError, "3 to 500"):
+            validated_cancel_full_inventory_payload({
+                "session_id": session_id,
+                "reason": "x",
+                "confirmed": True,
             })
 
 

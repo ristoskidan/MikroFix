@@ -1436,6 +1436,107 @@ def validated_resolve_physical_stock_return_payload(
         raise ContractError("physical return decision payload is invalid.") from exc
 
 
+def validated_begin_full_inventory_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = dict(value)
+    allowed = {"session_id", "reference", "confirmed"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "full inventory preparation contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    reference = str(raw.get("reference") or "").strip()
+    if len(reference) < 3 or len(reference) > 200:
+        raise ContractError(
+            "full inventory reference must contain 3 to 200 characters."
+        )
+    if raw.get("confirmed") is not True:
+        raise ContractError(
+            "full inventory preparation must be explicitly confirmed."
+        )
+    return {
+        "session_id": normalized_uuid(
+            raw.get("session_id"), field="payload.session_id"
+        ),
+        "reference": reference,
+        "confirmed": True,
+    }
+
+
+def validated_inventory_readiness_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = dict(value)
+    allowed = {
+        "session_id", "pending_outbox_count", "uncertain_outbox_count",
+        "sync_conflict_count", "central_checkpoint", "local_write_lock_active",
+    }
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "inventory readiness contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    result: dict[str, Any] = {
+        "session_id": normalized_uuid(
+            raw.get("session_id"), field="payload.session_id"
+        )
+    }
+    for field_name in (
+        "pending_outbox_count", "uncertain_outbox_count",
+        "sync_conflict_count", "central_checkpoint",
+    ):
+        value = raw.get(field_name)
+        if isinstance(value, bool):
+            raise ContractError(f"payload.{field_name} must be a non-negative integer.")
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ContractError(
+                f"payload.{field_name} must be a non-negative integer."
+            ) from exc
+        if parsed < 0 or str(value).strip() != str(parsed):
+            raise ContractError(
+                f"payload.{field_name} must be a non-negative integer."
+            )
+        result[field_name] = parsed
+    if not isinstance(raw.get("local_write_lock_active"), bool):
+        raise ContractError("payload.local_write_lock_active must be boolean.")
+    result["local_write_lock_active"] = raw["local_write_lock_active"]
+    return result
+
+
+def validated_cancel_full_inventory_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = dict(value)
+    allowed = {"session_id", "reason", "confirmed"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "full inventory cancellation contains unsupported fields: "
+            + ", ".join(unexpected)
+        )
+    reason = str(raw.get("reason") or "").strip()
+    if len(reason) < 3 or len(reason) > 500:
+        raise ContractError(
+            "full inventory cancellation reason must contain 3 to 500 characters."
+        )
+    if raw.get("confirmed") is not True:
+        raise ContractError(
+            "full inventory cancellation must be explicitly confirmed."
+        )
+    return {
+        "session_id": normalized_uuid(
+            raw.get("session_id"), field="payload.session_id"
+        ),
+        "reason": reason,
+        "confirmed": True,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class SyncOperationEnvelope:
     operation_id: str

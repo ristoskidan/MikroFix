@@ -363,3 +363,25 @@ oznake veljajo za lokalne. Če način osnutka ne ustreza trenutno izbranemu nač
 Blagajne, se zagon ustavi brez spremembe osnutka. Enako centralnega toka ni
 dovoljeno odpreti, dokler lokalno izdani račun še čaka na varno dokončanje
 prvotnega izpisa.
+
+## Priprava polne inventure
+
+Centralna baza ima trajno inventurno pregrado. Office z dovoljenjem
+`MANAGE_INVENTORY` začne idempotentno pripravo `FULL_INVENTORY`; strežnik
+ustvari sejo `PREPARING`, objavi njen centralni checkpoint in od takrat zavrne
+nove servise, tehnične zaključke, izdajo računov, novo prodajo ter druge nove
+zalogovne ali dokumentne vpise. Pregrada temelji na transakcijski PostgreSQL
+ključavnici, zato se začetek priprave ne more prehiteti z vzporednim zapisom.
+
+Med pripravo so dovoljeni samo zaključni ukazi, potrebni za zaprtje že odprtega
+dneva ali dokumenta. Vsaka aktivna Service postaja mora za konkretno sejo po
+vključitvi lokalne zapisovalne blokade sporočiti svoj centralni checkpoint ter
+ločena števila `pending`, `uncertain` in konfliktnih ukazov. Strežnik poročilo
+veže na identiteto registrirane Service postaje; poročilo z zastarelim
+checkpointom ali katerim koli odprtim ukazom ni pripravljeno.
+
+Pripravo je mogoče izrecno preklicati z razlogom. Preklic ohrani sejo in
+poročila za revizijo, pregrado pa vrne v `NORMAL`. Prehod v dejansko štetje
+`ACTIVE`, inventurne vrstice, obravnava manjkov in varno zaprtje z novo
+inventurno epoho še niso izvedeni, zato ta pripravljalni protokol sam zase ni
+produkcijsko končana polna inventura.

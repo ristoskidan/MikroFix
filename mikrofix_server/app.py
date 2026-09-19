@@ -380,6 +380,9 @@ def create_app(
             "ResolvePhysicalStockReturn": ("MODULE_OFFICE", "OFFICE"),
             "ConfirmPurchaseReceipt": ("MODULE_OFFICE", "OFFICE"),
             "AttachPurchaseInvoice": ("MODULE_OFFICE", "OFFICE"),
+            "BeginFullInventoryPreparation": ("MODULE_OFFICE", "OFFICE"),
+            "AcknowledgeFullInventoryReadiness": ("MODULE_SERVICE", "SERVICE"),
+            "CancelFullInventoryPreparation": ("MODULE_OFFICE", "OFFICE"),
         }
         additional_permissions = {
             "CreateInventoryItem": ("MANAGE_INVENTORY",),
@@ -388,6 +391,8 @@ def create_app(
             "AttachPurchaseInvoice": ("CONFIRM_DOCUMENT",),
             "StornoInvoice": ("STORNO_DOCUMENT",),
             "ResolvePhysicalStockReturn": ("MANAGE_INVENTORY",),
+            "BeginFullInventoryPreparation": ("MANAGE_INVENTORY",),
+            "CancelFullInventoryPreparation": ("MANAGE_INVENTORY",),
         }
         required = requirements.get(request.operation_type)
         if identity.must_change_pin and not identity.legacy_development:

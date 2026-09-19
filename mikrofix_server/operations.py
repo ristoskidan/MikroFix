@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_CEILING, ROUND_HALF_UP
 from uuid import UUID, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import Connection, delete, func, select, update
+from sqlalchemy import Connection, delete, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 
 from mikrofix_sync_contracts import (
@@ -17,6 +17,8 @@ from mikrofix_sync_contracts import (
     normalized_uuid,
     payload_sha256,
     validated_attach_receipt_invoice_payload,
+    validated_begin_full_inventory_payload,
+    validated_cancel_full_inventory_payload,
     validated_close_cash_session_payload,
     validated_confirm_receipt_payload,
     validated_create_inventory_item_payload,
@@ -24,6 +26,7 @@ from mikrofix_sync_contracts import (
     validated_create_service_order_payload,
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
+    validated_inventory_readiness_payload,
     validated_manual_cash_entry_payload,
     validated_open_cash_session_payload,
     validated_receive_physical_stock_return_payload,
@@ -45,10 +48,13 @@ from .models import (
     direct_sale_discount_audit,
     direct_sale_stock_allocations,
     fiscal_outbox,
+    full_inventory_sessions,
+    inventory_control,
     inventory_items,
     inventory_identities,
     inventory_lots,
     inventory_price_history,
+    inventory_service_readiness,
     invoice_number_sequences,
     invoice_drafts,
     invoices,
@@ -65,6 +71,7 @@ from .models import (
     service_stock_allocations,
     service_tariffs,
     technical_completions,
+    workstations,
 )
 from .stock_returns import service_returnable_parts
 
@@ -85,6 +92,82 @@ class CentralCashJournalError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+_INVENTORY_ADVISORY_LOCK_KEY = 2026091901
+_INVENTORY_CONTROL_OPERATIONS = {
+    "BeginFullInventoryPreparation",
+    "AcknowledgeFullInventoryReadiness",
+    "CancelFullInventoryPreparation",
+}
+_INVENTORY_GUARDED_OPERATIONS = {
+    "CreateServiceOrder",
+    "CreateInventoryItem",
+    "UpdateInventorySalePrice",
+    "CompleteServiceTechnically",
+    "IssueServiceInvoice",
+    "IssueDirectSaleInvoice",
+    "OpenCashSession",
+    "CloseCashSession",
+    "RecordManualCashEntry",
+    "SettleUnpaidBankInvoice",
+    "StornoInvoice",
+    "ReceiveReturnedSaleItem",
+    "ReceiveRemovedServicePart",
+    "ResolvePhysicalStockReturn",
+    "ConfirmPurchaseReceipt",
+    "AttachPurchaseInvoice",
+}
+_INVENTORY_PREPARATION_CLEANUP_OPERATIONS = {
+    "CloseCashSession",
+    "RecordManualCashEntry",
+    "SettleUnpaidBankInvoice",
+    "StornoInvoice",
+    "ResolvePhysicalStockReturn",
+    "AttachPurchaseInvoice",
+}
+
+
+def _inventory_advisory_lock(connection: Connection, *, exclusive: bool) -> None:
+    function = (
+        "pg_advisory_xact_lock" if exclusive
+        else "pg_advisory_xact_lock_shared"
+    )
+    connection.execute(
+        text(f"SELECT {function}(:lock_key)"),
+        {"lock_key": _INVENTORY_ADVISORY_LOCK_KEY},
+    )
+
+
+def _inventory_write_gate(
+    connection: Connection, operation_type: str,
+) -> tuple[str, dict, int | None] | None:
+    if (
+        operation_type in _INVENTORY_CONTROL_OPERATIONS
+        or operation_type not in _INVENTORY_GUARDED_OPERATIONS
+    ):
+        return None
+    _inventory_advisory_lock(connection, exclusive=False)
+    control = connection.execute(
+        select(inventory_control).where(inventory_control.c.control_id == 1)
+    ).one_or_none()
+    if control is None:
+        return _reject(
+            "INVENTORY_CONTROL_MISSING",
+            "Central inventory control is not initialized.",
+        )
+    if control.mode == "NORMAL":
+        return None
+    if (
+        control.mode == "PREPARING"
+        and operation_type in _INVENTORY_PREPARATION_CLEANUP_OPERATIONS
+    ):
+        return None
+    return _reject(
+        "FULL_INVENTORY_LOCKED",
+        "The operation is blocked by full inventory "
+        f"{str(control.current_session_uuid)} in state {control.mode}.",
+    )
 
 
 def _create_inventory_item(
@@ -3174,6 +3257,320 @@ def _complete_service_technically(
     )
 
 
+def _begin_full_inventory_preparation(
+    connection: Connection,
+    envelope: SyncOperationEnvelope,
+    aggregate_uuid: UUID,
+    operation_uuid: UUID,
+    *,
+    actor_user_uuid: UUID | None,
+    workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "FULL_INVENTORY":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "BeginFullInventoryPreparation requires FULL_INVENTORY.",
+        )
+    if envelope.expected_version != 0:
+        return _reject(
+            "VERSION_CONFLICT",
+            "A new full inventory preparation requires expected_version 0.",
+        )
+    try:
+        payload = validated_begin_full_inventory_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["session_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH",
+            "payload.session_id must equal aggregate_id.",
+        )
+
+    _inventory_advisory_lock(connection, exclusive=True)
+    control = connection.execute(
+        select(inventory_control)
+        .where(inventory_control.c.control_id == 1)
+        .with_for_update()
+    ).one_or_none()
+    if control is None:
+        return _reject(
+            "INVENTORY_CONTROL_MISSING",
+            "Central inventory control is not initialized.",
+        )
+    if control.mode != "NORMAL":
+        return _reject(
+            "FULL_INVENTORY_ALREADY_OPEN",
+            "Another full inventory session is already preparing or active.",
+        )
+
+    sequence = _publish_change(
+        connection,
+        event_type="FullInventoryPreparationStarted",
+        aggregate_type="FULL_INVENTORY",
+        aggregate_uuid=aggregate_uuid,
+        aggregate_version=1,
+        payload={
+            "session_id": str(aggregate_uuid),
+            "reference": payload["reference"],
+            "inventory_epoch": int(control.current_epoch),
+        },
+        occurred_at=envelope.occurred_at,
+    )
+    occurred_at = datetime.fromisoformat(envelope.occurred_at)
+    connection.execute(insert(full_inventory_sessions).values(
+        session_uuid=aggregate_uuid,
+        row_version=1,
+        reference=payload["reference"],
+        status="PREPARING",
+        open_slot=1,
+        barrier_sequence=sequence,
+        inventory_epoch=int(control.current_epoch),
+        preparation_operation_id=operation_uuid,
+        prepared_by_user_uuid=actor_user_uuid,
+        prepared_at_workstation_uuid=workstation_uuid,
+        prepared_at=occurred_at,
+        updated_at=occurred_at,
+    ))
+    connection.execute(
+        update(inventory_control)
+        .where(inventory_control.c.control_id == 1)
+        .values(
+            mode="PREPARING",
+            current_session_uuid=aggregate_uuid,
+            row_version=inventory_control.c.row_version + 1,
+            updated_at=occurred_at,
+        )
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 1,
+        "central_sequence": sequence,
+        "session_id": str(aggregate_uuid),
+        "status": "PREPARING",
+        "barrier_sequence": sequence,
+        "inventory_epoch": int(control.current_epoch),
+    }, sequence
+
+
+def _acknowledge_full_inventory_readiness(
+    connection: Connection,
+    envelope: SyncOperationEnvelope,
+    aggregate_uuid: UUID,
+    operation_uuid: UUID,
+    *,
+    workstation_uuid: UUID | None,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "FULL_INVENTORY":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "AcknowledgeFullInventoryReadiness requires FULL_INVENTORY.",
+        )
+    if envelope.expected_version != 1:
+        return _reject(
+            "VERSION_CONFLICT",
+            "Inventory readiness requires a PREPARING session at version 1.",
+        )
+    if workstation_uuid is None:
+        return _reject(
+            "WORKSTATION_REQUIRED",
+            "Inventory readiness requires an authenticated Service workstation.",
+        )
+    try:
+        payload = validated_inventory_readiness_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["session_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH",
+            "payload.session_id must equal aggregate_id.",
+        )
+
+    _inventory_advisory_lock(connection, exclusive=False)
+    control = connection.execute(
+        select(inventory_control).where(inventory_control.c.control_id == 1)
+    ).one_or_none()
+    session = connection.execute(
+        select(full_inventory_sessions).where(
+            full_inventory_sessions.c.session_uuid == aggregate_uuid
+        )
+    ).one_or_none()
+    workstation = connection.execute(
+        select(workstations).where(
+            workstations.c.workstation_uuid == workstation_uuid
+        )
+    ).one_or_none()
+    if (
+        control is None
+        or session is None
+        or control.mode != "PREPARING"
+        or control.current_session_uuid != aggregate_uuid
+        or session.status != "PREPARING"
+    ):
+        return _reject(
+            "FULL_INVENTORY_NOT_PREPARING",
+            "The requested full inventory session is not preparing.",
+        )
+    if (
+        workstation is None
+        or not workstation.is_active
+        or workstation.application_type != "SERVICE"
+    ):
+        return _reject(
+            "SERVICE_WORKSTATION_NOT_ACTIVE",
+            "Readiness can be acknowledged only by an active Service workstation.",
+        )
+    required_checkpoint = int(connection.execute(
+        select(func.coalesce(func.max(change_feed.c.central_sequence), 0))
+    ).scalar_one())
+    occurred_at = datetime.fromisoformat(envelope.occurred_at)
+    connection.execute(
+        insert(inventory_service_readiness)
+        .values(
+            session_uuid=aggregate_uuid,
+            workstation_uuid=workstation_uuid,
+            operation_id=operation_uuid,
+            pending_outbox_count=payload["pending_outbox_count"],
+            uncertain_outbox_count=payload["uncertain_outbox_count"],
+            sync_conflict_count=payload["sync_conflict_count"],
+            central_checkpoint=payload["central_checkpoint"],
+            ack_device_sequence=envelope.device_sequence,
+            local_write_lock_active=payload["local_write_lock_active"],
+            acknowledged_at=occurred_at,
+        )
+        .on_conflict_do_update(
+            index_elements=[
+                inventory_service_readiness.c.session_uuid,
+                inventory_service_readiness.c.workstation_uuid,
+            ],
+            set_={
+                "operation_id": operation_uuid,
+                "pending_outbox_count": payload["pending_outbox_count"],
+                "uncertain_outbox_count": payload["uncertain_outbox_count"],
+                "sync_conflict_count": payload["sync_conflict_count"],
+                "central_checkpoint": payload["central_checkpoint"],
+                "ack_device_sequence": envelope.device_sequence,
+                "local_write_lock_active": payload["local_write_lock_active"],
+                "acknowledged_at": occurred_at,
+            },
+        )
+    )
+    ready = (
+        payload["pending_outbox_count"] == 0
+        and payload["uncertain_outbox_count"] == 0
+        and payload["sync_conflict_count"] == 0
+        and payload["central_checkpoint"] >= required_checkpoint
+        and payload["local_write_lock_active"]
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 1,
+        "session_id": str(aggregate_uuid),
+        "status": "PREPARING",
+        "workstation_id": str(workstation_uuid),
+        "ready": ready,
+        "required_checkpoint": required_checkpoint,
+        "reported_checkpoint": payload["central_checkpoint"],
+        "pending_outbox_count": payload["pending_outbox_count"],
+        "uncertain_outbox_count": payload["uncertain_outbox_count"],
+        "sync_conflict_count": payload["sync_conflict_count"],
+        "local_write_lock_active": payload["local_write_lock_active"],
+    }, None
+
+
+def _cancel_full_inventory_preparation(
+    connection: Connection,
+    envelope: SyncOperationEnvelope,
+    aggregate_uuid: UUID,
+    operation_uuid: UUID,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "FULL_INVENTORY":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "CancelFullInventoryPreparation requires FULL_INVENTORY.",
+        )
+    if envelope.expected_version != 1:
+        return _reject(
+            "VERSION_CONFLICT",
+            "Only a PREPARING full inventory session at version 1 can be cancelled.",
+        )
+    try:
+        payload = validated_cancel_full_inventory_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["session_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH",
+            "payload.session_id must equal aggregate_id.",
+        )
+
+    _inventory_advisory_lock(connection, exclusive=True)
+    control = connection.execute(
+        select(inventory_control)
+        .where(inventory_control.c.control_id == 1)
+        .with_for_update()
+    ).one_or_none()
+    session = connection.execute(
+        select(full_inventory_sessions)
+        .where(full_inventory_sessions.c.session_uuid == aggregate_uuid)
+        .with_for_update()
+    ).one_or_none()
+    if (
+        control is None
+        or session is None
+        or control.mode != "PREPARING"
+        or control.current_session_uuid != aggregate_uuid
+        or session.status != "PREPARING"
+        or int(session.row_version) != 1
+    ):
+        return _reject(
+            "FULL_INVENTORY_NOT_PREPARING",
+            "Only the current PREPARING full inventory session can be cancelled.",
+        )
+    occurred_at = datetime.fromisoformat(envelope.occurred_at)
+    connection.execute(
+        update(full_inventory_sessions)
+        .where(full_inventory_sessions.c.session_uuid == aggregate_uuid)
+        .values(
+            status="CANCELLED",
+            open_slot=None,
+            row_version=2,
+            cancellation_operation_id=operation_uuid,
+            cancellation_reason=payload["reason"],
+            cancelled_at=occurred_at,
+            updated_at=occurred_at,
+        )
+    )
+    connection.execute(
+        update(inventory_control)
+        .where(inventory_control.c.control_id == 1)
+        .values(
+            mode="NORMAL",
+            current_session_uuid=None,
+            row_version=inventory_control.c.row_version + 1,
+            updated_at=occurred_at,
+        )
+    )
+    sequence = _publish_change(
+        connection,
+        event_type="FullInventoryPreparationCancelled",
+        aggregate_type="FULL_INVENTORY",
+        aggregate_uuid=aggregate_uuid,
+        aggregate_version=2,
+        payload={
+            "session_id": str(aggregate_uuid),
+            "status": "CANCELLED",
+            "reason": payload["reason"],
+            "inventory_epoch": int(session.inventory_epoch),
+        },
+        occurred_at=envelope.occurred_at,
+    )
+    return "ACCEPTED", {
+        "aggregate_version": 2,
+        "central_sequence": sequence,
+        "session_id": str(aggregate_uuid),
+        "status": "CANCELLED",
+        "inventory_epoch": int(session.inventory_epoch),
+    }, sequence
+
+
 def process_operation(
     connection: Connection, envelope: SyncOperationEnvelope,
     *,
@@ -3223,7 +3620,25 @@ def process_operation(
             )
         return _receipt(existing)
 
-    if envelope.operation_type == "CreateServiceOrder":
+    gate_rejection = _inventory_write_gate(connection, envelope.operation_type)
+    if gate_rejection is not None:
+        result_code, response, central_sequence = gate_rejection
+    elif envelope.operation_type == "BeginFullInventoryPreparation":
+        result_code, response, central_sequence = _begin_full_inventory_preparation(
+            connection, envelope, aggregate_uuid, operation_uuid,
+            actor_user_uuid=transmitted_by_user_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "AcknowledgeFullInventoryReadiness":
+        result_code, response, central_sequence = _acknowledge_full_inventory_readiness(
+            connection, envelope, aggregate_uuid, operation_uuid,
+            workstation_uuid=transmitted_by_workstation_uuid,
+        )
+    elif envelope.operation_type == "CancelFullInventoryPreparation":
+        result_code, response, central_sequence = _cancel_full_inventory_preparation(
+            connection, envelope, aggregate_uuid, operation_uuid,
+        )
+    elif envelope.operation_type == "CreateServiceOrder":
         result_code, response, central_sequence = _create_service_order(
             connection, envelope, aggregate_uuid
         )

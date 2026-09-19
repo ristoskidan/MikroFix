@@ -228,6 +228,129 @@ accepted_operations = Table(
 )
 
 
+full_inventory_sessions = Table(
+    "full_inventory_sessions_v32",
+    metadata,
+    Column("session_uuid", UUID(as_uuid=True), primary_key=True),
+    Column("row_version", Integer, nullable=False, server_default="1"),
+    Column("reference", String(200), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("open_slot", Integer, unique=True),
+    Column("barrier_sequence", BigInteger, nullable=False),
+    Column("inventory_epoch", Integer, nullable=False),
+    Column(
+        "preparation_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), nullable=False, unique=True,
+    ),
+    Column("prepared_by_user_uuid", UUID(as_uuid=True), ForeignKey("central_users_v32.user_uuid")),
+    Column("prepared_at_workstation_uuid", UUID(as_uuid=True), ForeignKey("workstations_v32.workstation_uuid")),
+    Column("prepared_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "activation_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), unique=True,
+    ),
+    Column("activated_at", DateTime(timezone=True)),
+    Column(
+        "closing_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), unique=True,
+    ),
+    Column("closed_at", DateTime(timezone=True)),
+    Column(
+        "cancellation_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), unique=True,
+    ),
+    Column("cancelled_at", DateTime(timezone=True)),
+    Column("cancellation_reason", String(500)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("row_version >= 1", name="full_inventory_session_version"),
+    CheckConstraint("barrier_sequence >= 1", name="full_inventory_barrier_positive"),
+    CheckConstraint("inventory_epoch >= 0", name="full_inventory_epoch_nonnegative"),
+    CheckConstraint(
+        "status IN ('PREPARING','ACTIVE','CLOSED','CANCELLED')",
+        name="full_inventory_session_status",
+    ),
+    CheckConstraint(
+        "(status='PREPARING' AND activation_operation_id IS NULL "
+        "AND closing_operation_id IS NULL AND cancellation_operation_id IS NULL "
+        "AND activated_at IS NULL AND closed_at IS NULL AND cancelled_at IS NULL "
+        "AND cancellation_reason IS NULL AND open_slot=1) OR "
+        "(status='ACTIVE' AND activation_operation_id IS NOT NULL "
+        "AND activated_at IS NOT NULL AND closing_operation_id IS NULL "
+        "AND cancellation_operation_id IS NULL AND closed_at IS NULL "
+        "AND cancelled_at IS NULL AND cancellation_reason IS NULL AND open_slot=1) OR "
+        "(status='CLOSED' AND activation_operation_id IS NOT NULL "
+        "AND closing_operation_id IS NOT NULL AND activated_at IS NOT NULL "
+        "AND closed_at IS NOT NULL AND cancellation_operation_id IS NULL "
+        "AND cancelled_at IS NULL AND cancellation_reason IS NULL AND open_slot IS NULL) OR "
+        "(status='CANCELLED' AND activation_operation_id IS NULL "
+        "AND closing_operation_id IS NULL AND cancellation_operation_id IS NOT NULL "
+        "AND activated_at IS NULL AND closed_at IS NULL AND cancelled_at IS NOT NULL "
+        "AND cancellation_reason IS NOT NULL AND open_slot IS NULL)",
+        name="full_inventory_session_shape",
+    ),
+)
+
+
+inventory_control = Table(
+    "inventory_control_v32",
+    metadata,
+    Column("control_id", Integer, primary_key=True),
+    Column("mode", String(20), nullable=False),
+    Column(
+        "current_session_uuid", UUID(as_uuid=True),
+        ForeignKey("full_inventory_sessions_v32.session_uuid"), unique=True,
+    ),
+    Column("current_epoch", Integer, nullable=False, server_default="0"),
+    Column("row_version", Integer, nullable=False, server_default="1"),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("control_id = 1", name="inventory_control_singleton"),
+    CheckConstraint(
+        "mode IN ('NORMAL','PREPARING','ACTIVE')",
+        name="inventory_control_mode",
+    ),
+    CheckConstraint("current_epoch >= 0", name="inventory_control_epoch_nonnegative"),
+    CheckConstraint("row_version >= 1", name="inventory_control_version"),
+    CheckConstraint(
+        "(mode='NORMAL' AND current_session_uuid IS NULL) OR "
+        "(mode IN ('PREPARING','ACTIVE') AND current_session_uuid IS NOT NULL)",
+        name="inventory_control_shape",
+    ),
+)
+
+
+inventory_service_readiness = Table(
+    "inventory_service_readiness_v32",
+    metadata,
+    Column(
+        "session_uuid", UUID(as_uuid=True),
+        ForeignKey("full_inventory_sessions_v32.session_uuid"), primary_key=True,
+    ),
+    Column(
+        "workstation_uuid", UUID(as_uuid=True),
+        ForeignKey("workstations_v32.workstation_uuid"), primary_key=True,
+    ),
+    Column(
+        "operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), nullable=False, unique=True,
+    ),
+    Column("pending_outbox_count", Integer, nullable=False),
+    Column("uncertain_outbox_count", Integer, nullable=False),
+    Column("sync_conflict_count", Integer, nullable=False),
+    Column("central_checkpoint", BigInteger, nullable=False),
+    Column("ack_device_sequence", BigInteger, nullable=False),
+    Column("local_write_lock_active", Boolean, nullable=False),
+    Column("acknowledged_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "pending_outbox_count >= 0 AND uncertain_outbox_count >= 0 "
+        "AND sync_conflict_count >= 0",
+        name="inventory_readiness_counts_nonnegative",
+    ),
+    CheckConstraint("central_checkpoint >= 0", name="inventory_readiness_checkpoint_nonnegative"),
+    CheckConstraint("ack_device_sequence >= 1", name="inventory_readiness_sequence_positive"),
+)
+
+
 inventory_items = Table(
     "inventory_items_v32",
     metadata,
