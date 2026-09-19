@@ -46,6 +46,89 @@ deleted file mode 100644
 """
         self.assertEqual(server.validate_patch(patch), ["example.py"])
 
+    def test_patch_manifest_rejects_file_outside_approved_plan(self):
+        patch = """diff --git a/example.py b/example.py
+--- a/example.py
++++ b/example.py
+@@ -1 +1 @@
+-print('old')
++print('new')
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "allowed.json"
+            manifest.write_text(
+                json.dumps({"allowed_files": ["other.py"]}), encoding="utf-8"
+            )
+            with mock.patch.object(
+                server, "ALLOWED_FILES_MANIFEST", str(manifest)
+            ):
+                with self.assertRaises(HTTPException) as error:
+                    server.validate_patch(patch)
+        self.assertEqual(error.exception.status_code, 403)
+
+    def test_patch_manifest_accepts_exact_approved_file(self):
+        patch = """diff --git a/example.py b/example.py
+--- a/example.py
++++ b/example.py
+@@ -1 +1 @@
+-print('old')
++print('new')
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "allowed.json"
+            manifest.write_text(
+                json.dumps({"allowed_files": ["example.py"]}), encoding="utf-8"
+            )
+            with mock.patch.object(
+                server, "ALLOWED_FILES_MANIFEST", str(manifest)
+            ):
+                self.assertEqual(server.validate_patch(patch), ["example.py"])
+
+    def test_exact_replace_requires_one_match_and_preserves_other_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "example.py"
+            target.write_text("before\nold block\nafter\n", encoding="utf-8")
+            request = server.ReplaceRequest(
+                path="example.py", old="old block", new="new block",
+                summary="replace one block",
+            )
+            with (
+                mock.patch.object(server, "PROJECT_ROOT", root),
+                mock.patch.object(server, "ALLOWED_FILES_MANIFEST", ""),
+                mock.patch.object(
+                    server, "require_lease", return_value={"lease_id": "test"}
+                ),
+                mock.patch.object(server, "_audit"),
+            ):
+                result = server.project_replace(request)
+            self.assertTrue(result["replaced"])
+            self.assertEqual(
+                target.read_text(encoding="utf-8"),
+                "before\nnew block\nafter\n",
+            )
+
+    def test_exact_replace_rejects_ambiguous_match(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "example.py"
+            target.write_text("same\nsame\n", encoding="utf-8")
+            request = server.ReplaceRequest(
+                path="example.py", old="same", new="new",
+                summary="ambiguous replacement",
+            )
+            with (
+                mock.patch.object(server, "PROJECT_ROOT", root),
+                mock.patch.object(server, "ALLOWED_FILES_MANIFEST", ""),
+                mock.patch.object(
+                    server, "require_lease", return_value={"lease_id": "test"}
+                ),
+            ):
+                with self.assertRaises(HTTPException) as error:
+                    server.project_replace(request)
+            self.assertEqual(error.exception.status_code, 409)
+            self.assertEqual(target.read_text(encoding="utf-8"), "same\nsame\n")
+
     def test_expired_lease_is_rejected_and_removed(self):
         with tempfile.TemporaryDirectory() as directory:
             lease_file = Path(directory) / "lease.json"
@@ -57,6 +140,52 @@ deleted file mode 100644
                     server.require_lease()
             self.assertEqual(error.exception.status_code, 423)
             self.assertFalse(lease_file.exists())
+
+    def test_run_scoped_lease_must_match_executor_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease_file = Path(directory) / "lease.json"
+            lease_file.write_text(
+                json.dumps({
+                    "expires_at": time.time() + 60,
+                    "run_id": "other-run",
+                    "project_root": str(server.PROJECT_ROOT),
+                    "plan_sha256": "plan",
+                    "allowed_files_sha256": "allowed",
+                }),
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(server, "LEASE_FILE", lease_file),
+                mock.patch.object(server, "EXPECTED_RUN_ID", "expected-run"),
+                mock.patch.object(server, "EXPECTED_PLAN_SHA256", "plan"),
+                mock.patch.object(
+                    server, "EXPECTED_ALLOWED_FILES_SHA256", "allowed"
+                ),
+            ):
+                with self.assertRaises(HTTPException) as error:
+                    server.require_lease()
+            self.assertEqual(error.exception.status_code, 423)
+
+    def test_matching_run_scoped_lease_is_accepted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lease_file = Path(directory) / "lease.json"
+            lease = {
+                "expires_at": time.time() + 60,
+                "run_id": "expected-run",
+                "project_root": str(server.PROJECT_ROOT),
+                "plan_sha256": "plan",
+                "allowed_files_sha256": "allowed",
+            }
+            lease_file.write_text(json.dumps(lease), encoding="utf-8")
+            with (
+                mock.patch.object(server, "LEASE_FILE", lease_file),
+                mock.patch.object(server, "EXPECTED_RUN_ID", "expected-run"),
+                mock.patch.object(server, "EXPECTED_PLAN_SHA256", "plan"),
+                mock.patch.object(
+                    server, "EXPECTED_ALLOWED_FILES_SHA256", "allowed"
+                ),
+            ):
+                self.assertEqual(server.require_lease(), lease)
 
     def test_authentication_rejects_wrong_token(self):
         with self.assertRaises(HTTPException) as error:

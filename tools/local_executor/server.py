@@ -31,11 +31,27 @@ PROJECT_ROOT = Path(
         "/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV",
     )
 ).resolve()
-CONFIG_DIR = Path.home() / ".config" / "mikrofix-local-executor"
-STATE_DIR = Path.home() / ".local" / "state" / "mikrofix"
+CONFIG_DIR = Path(
+    os.environ.get(
+        "MIKROFIX_EXECUTOR_CONFIG_DIR",
+        str(Path.home() / ".config" / "mikrofix-local-executor"),
+    )
+).expanduser().resolve()
+STATE_DIR = Path(
+    os.environ.get(
+        "MIKROFIX_EXECUTOR_STATE_DIR",
+        str(Path.home() / ".local" / "state" / "mikrofix"),
+    )
+).expanduser().resolve()
 TOKEN_FILE = CONFIG_DIR / "token"
 LEASE_FILE = STATE_DIR / "executor-lease.json"
 AUDIT_FILE = STATE_DIR / "executor-audit.jsonl"
+ALLOWED_FILES_MANIFEST = os.environ.get("MIKROFIX_EXECUTOR_ALLOWED_FILES", "").strip()
+EXPECTED_RUN_ID = os.environ.get("MIKROFIX_EXECUTOR_RUN_ID", "").strip()
+EXPECTED_PLAN_SHA256 = os.environ.get("MIKROFIX_EXECUTOR_PLAN_SHA256", "").strip()
+EXPECTED_ALLOWED_FILES_SHA256 = os.environ.get(
+    "MIKROFIX_EXECUTOR_ALLOWED_FILES_SHA256", ""
+).strip()
 
 READABLE_SUFFIXES = {
     ".py", ".md", ".txt", ".toml", ".ini", ".json", ".yaml", ".yml",
@@ -104,6 +120,22 @@ def require_lease() -> dict[str, object]:
     if expires_at <= time.time():
         LEASE_FILE.unlink(missing_ok=True)
         raise HTTPException(status_code=423, detail="The write lease has expired")
+    expected = {
+        "run_id": EXPECTED_RUN_ID,
+        "project_root": str(PROJECT_ROOT) if EXPECTED_RUN_ID else "",
+        "plan_sha256": EXPECTED_PLAN_SHA256,
+        "allowed_files_sha256": EXPECTED_ALLOWED_FILES_SHA256,
+    }
+    mismatched = [
+        key for key, value in expected.items()
+        if value and str(data.get(key) or "") != value
+    ]
+    if mismatched:
+        raise HTTPException(
+            status_code=423,
+            detail="The write lease does not match this supervised run: "
+            + ", ".join(mismatched),
+        )
     return data
 
 
@@ -253,6 +285,13 @@ class PatchRequest(BaseModel):
     summary: str = Field(min_length=3, max_length=300)
 
 
+class ReplaceRequest(BaseModel):
+    path: str
+    old: str = Field(min_length=1, max_length=MAX_PATCH_BYTES)
+    new: str = Field(max_length=MAX_PATCH_BYTES)
+    summary: str = Field(min_length=3, max_length=300)
+
+
 class CheckRequest(BaseModel):
     profile: Literal[
         "local_agent_tests",
@@ -397,6 +436,27 @@ def project_diff() -> dict[str, object]:
     return {"exit_code": result.returncode, "diff": result.stdout[-80_000:]}
 
 
+def require_approved_paths(paths: set[str]) -> None:
+    if not ALLOWED_FILES_MANIFEST:
+        return
+    manifest_path = Path(ALLOWED_FILES_MANIFEST).expanduser().resolve()
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        allowed = manifest.get("allowed_files", manifest)
+        allowed_files = {
+            Path(str(item)).as_posix() for item in allowed
+            if isinstance(item, str) and item
+        }
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError) as exc:
+        raise HTTPException(status_code=500, detail="Invalid allowed-files manifest") from exc
+    forbidden = sorted(paths - allowed_files)
+    if forbidden:
+        raise HTTPException(
+            status_code=403,
+            detail="Change touches files outside the approved plan: " + ", ".join(forbidden),
+        )
+
+
 def validate_patch(patch: str) -> list[str]:
     if len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
         raise HTTPException(status_code=413, detail="Patch is too large")
@@ -412,6 +472,7 @@ def validate_patch(patch: str) -> list[str]:
         safe_path(raw_path)
         if Path(raw_path).suffix.casefold() not in READABLE_SUFFIXES:
             raise HTTPException(status_code=403, detail=f"File type is not writable: {raw_path}")
+    require_approved_paths({path for path in paths + old_paths if path != "/dev/null"})
     if re.search(r"^(rename|delete) (from|to|mode) ", patch, flags=re.MULTILINE):
         raise HTTPException(status_code=400, detail="Rename and deletion patches are forbidden")
     return paths
@@ -452,6 +513,53 @@ def project_apply_patch(request: PatchRequest) -> dict[str, object]:
         },
     )
     return {"applied": True, "paths": paths, "patch_sha256": patch_sha256, "status": after[-20_000:]}
+
+
+@app.post("/v1/project/replace", dependencies=[Depends(authenticate)])
+def project_replace(request: ReplaceRequest) -> dict[str, object]:
+    lease = require_lease()
+    path = safe_path(request.path, require_file=True)
+    relative = path.relative_to(PROJECT_ROOT).as_posix()
+    require_approved_paths({relative})
+    content = path.read_text(encoding="utf-8")
+    matches = content.count(request.old)
+    if matches != 1:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Exact replacement requires one match; found {matches}",
+        )
+    updated = content.replace(request.old, request.new, 1)
+    mode = path.stat().st_mode
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, delete=False
+    ) as handle:
+        handle.write(updated)
+        handle.flush()
+        os.fsync(handle.fileno())
+        temporary = Path(handle.name)
+    try:
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    replacement_sha256 = hashlib.sha256(
+        (request.old + "\0" + request.new).encode("utf-8")
+    ).hexdigest()
+    _audit(
+        "replace",
+        ok=True,
+        details={
+            "summary": request.summary,
+            "path": relative,
+            "replacement_sha256": replacement_sha256,
+            "lease_id": lease.get("lease_id"),
+        },
+    )
+    return {
+        "replaced": True,
+        "path": relative,
+        "replacement_sha256": replacement_sha256,
+    }
 
 
 CHECKS: dict[str, tuple[list[str], int]] = {

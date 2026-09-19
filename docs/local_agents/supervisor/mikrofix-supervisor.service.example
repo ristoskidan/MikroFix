@@ -1,0 +1,18 @@
+[Unit]
+Description=MikroFIX local agent supervisor
+After=ollama.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV
+ExecStart=/usr/bin/python3 tools/mikrofix_supervisor.py run
+Restart=on-failure
+RestartSec=5
+
+# SAFETY BOUNDARY:
+# This example is documentation only. Per-run executor and bridge-monitor
+# processes must first be launched from the reviewed environment.json. The
+# supervisor pauses at NEEDS_WRITE_LEASE and never grants its own lease.
+
+[Install]
+WantedBy=default.target
