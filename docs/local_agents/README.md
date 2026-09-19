@@ -12,7 +12,9 @@ spreminjati kode, poslovnih pravil ali podatkov.
   sočasnosti, idempotentnosti in revizijske sledi.
 
 Oba vedno prejmeta kanonični kontekst iz
-`docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md`.
+`docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md` in potrjene korektivne lekcije iz
+`docs/local_agents/LEKCIJE.md`. Vsak dnevnik vsebuje zgoščeno vrednost obeh
+datotek, zato je pozneje dokazljivo, katero različico sta modela uporabila.
 
 ## Uporaba
 
@@ -38,3 +40,7 @@ Za preizkus zapisa brez zagona modela dodaj `--dry-run`.
 
 Most privzeto uporablja isti Ollama strežnik kot Open WebUI na
 `172.17.0.1:11434`. Drugačen naslov se lahko izrecno poda z `--ollama-url`.
+Delegirani klic privzeto uporablja kontekstno okno 32768 in zahteva neposreden
+končni odgovor brez ločenega prikaza notranjega razmišljanja.
+Odgovor je privzeto omejen na 1600 tokenov; drugačna meja se poda z
+`--max-tokens`, ne da bi se zaradi tega zmanjšal vhodni kontekst.

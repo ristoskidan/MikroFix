@@ -20,6 +20,29 @@ class LocalAgentBridgeTests(unittest.TestCase):
             "NALOGA:\nnaloga\n\nGRADIVO:\ngradivo\n\nZAHTEVANI IZHOD:\nizhod\n",
         )
 
+    def test_system_prompt_skips_chat_only_acknowledgement(self):
+        prompt = bridge.build_system_prompt("kanonicni kontekst", "potrjena lekcija")
+        self.assertTrue(prompt.startswith("kanonicni kontekst"))
+        self.assertIn("potrjena lekcija", prompt)
+        self.assertIn("Uvodna potrditev", prompt)
+        self.assertIn("Odgovori neposredno na", prompt)
+
+    def test_payload_disables_reasoning_only_output_and_keeps_requested_context(self):
+        payload = bridge.build_payload(
+            "qwen3.5:9b", "kontekst", "naloga", 32768, 1200, "lekcija"
+        )
+        self.assertIs(payload["think"], False)
+        self.assertEqual(
+            payload["options"], {"num_ctx": 32768, "num_predict": 1200}
+        )
+        self.assertEqual(payload["messages"][1]["content"], "naloga")
+
+    def test_gpt_oss_uses_low_reasoning_instead_of_unsupported_disable(self):
+        payload = bridge.build_payload(
+            "gpt-oss:20b", "kontekst", "naloga", 32768, 1200, "lekcija"
+        )
+        self.assertEqual(payload["think"], "low")
+
     def test_task_id_has_timestamp_and_random_suffix(self):
         now = dt.datetime(2026, 9, 19, 12, 34, 56)
         task_id = bridge.make_task_id(now)
@@ -38,6 +61,8 @@ class LocalAgentBridgeTests(unittest.TestCase):
             context = root / "context.md"
             logs = root / "logs"
             context.write_text("kanonični kontekst", encoding="utf-8")
+            lessons = root / "lessons.md"
+            lessons.write_text("potrjena lekcija", encoding="utf-8")
             exit_code = bridge.main(
                 [
                     "--agent",
@@ -48,6 +73,8 @@ class LocalAgentBridgeTests(unittest.TestCase):
                     str(context),
                     "--log-dir",
                     str(logs),
+                    "--lessons",
+                    str(lessons),
                     "--dry-run",
                 ]
             )

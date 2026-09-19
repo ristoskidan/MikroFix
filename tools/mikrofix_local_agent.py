@@ -23,6 +23,7 @@ import uuid
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTEXT = PROJECT_ROOT / "docs" / "MIKROFIX_GPT_OSS_20B_KONTEKST.md"
+DEFAULT_LESSONS = PROJECT_ROOT / "docs" / "local_agents" / "LEKCIJE.md"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "docs" / "local_agents" / "dnevnik"
 # Ollama is bound to Docker's host bridge so Open WebUI and local tools can use
 # the same server.  The CLI option still permits a different deployment.
@@ -38,6 +39,15 @@ AGENTS = {
         "role": "skeptični drugi pregledovalec",
     },
 }
+
+BRIDGE_SYSTEM_SUFFIX = """
+
+---
+MOST ZA DELEGIRANO NALOGO:
+Uvodna potrditev, da je kontekst nalozen, je bila ze opravljena. Uporabnisko
+sporocilo v tem klicu je konkretna operativna naloga. Odgovori neposredno na
+NALOGO in upostevaj ZAHTEVANI IZHOD; ne odgovori samo s potrditvijo pripravljenosti.
+"""
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -59,13 +69,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Zahtevana oblika oziroma vsebina odgovora.",
     )
     parser.add_argument("--context", type=Path, default=DEFAULT_CONTEXT)
+    parser.add_argument("--lessons", type=Path, default=DEFAULT_LESSONS)
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
     parser.add_argument("--ollama-url", default=OLLAMA_CHAT_URL)
     parser.add_argument(
         "--num-ctx",
         type=int,
-        default=16384,
-        help="Kontekstno okno Ollama (privzeto 16384).",
+        default=32768,
+        help="Kontekstno okno Ollama (privzeto 32768).",
+    )
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=1600,
+        help="Najvecje stevilo tokenov odgovora (privzeto 1600).",
     )
     parser.add_argument(
         "--dry-run",
@@ -91,6 +108,36 @@ def build_user_prompt(task: str, material: str, requested_output: str) -> str:
         "ZAHTEVANI IZHOD:\n"
         f"{requested_output.strip()}\n"
     )
+
+
+def build_system_prompt(context: str, lessons: str = "") -> str:
+    """Adapt the reusable chat context for a one-shot delegated API call."""
+    lesson_block = ""
+    if lessons.strip():
+        lesson_block = "\n\n---\nTRAJNE POTRJENE LEKCIJE:\n" + lessons.strip()
+    return context.rstrip() + lesson_block + BRIDGE_SYSTEM_SUFFIX
+
+
+def build_payload(
+    model: str,
+    context: str,
+    prompt: str,
+    num_ctx: int,
+    max_tokens: int = 1600,
+    lessons: str = "",
+) -> dict[str, object]:
+    thinking: bool | str = "low" if model.startswith("gpt-oss:") else False
+    return {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": build_system_prompt(context, lessons)},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": True,
+        "think": thinking,
+        "keep_alive": "15m",
+        "options": {"num_ctx": num_ctx, "num_predict": max_tokens},
+    }
 
 
 def make_task_id(now: dt.datetime | None = None) -> str:
@@ -127,6 +174,8 @@ def transcript(
     role: str,
     context_path: Path,
     context_hash: str,
+    lessons_path: Path,
+    lessons_hash: str,
     prompt: str,
     answer: str,
     status: str,
@@ -138,6 +187,8 @@ def transcript(
 - Model: `{model}`
 - Kontekst: `{context_path}`
 - SHA-256 konteksta: `{context_hash}`
+- Potrjene lekcije: `{lessons_path}`
+- SHA-256 lekcij: `{lessons_hash}`
 - Stanje: **{status}**
 - Odločitev glavnega pomočnika: **ČAKA NA PREGLED**
 
@@ -192,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
     agent = AGENTS[args.agent]
     context_path = args.context.expanduser().resolve()
     context = read_text(context_path, "konteksta")
+    lessons_path = args.lessons.expanduser().resolve()
+    lessons = read_text(lessons_path, "potrjenih lekcij")
     task = args.task if args.task is not None else read_text(args.task_file, "naloge")
     material_parts = [args.material]
     if args.material_file:
@@ -201,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
     task_id = make_task_id()
     created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     context_hash = hashlib.sha256(context.encode("utf-8")).hexdigest()
+    lessons_hash = hashlib.sha256(lessons.encode("utf-8")).hexdigest()
     log_path = args.log_dir.expanduser().resolve() / f"{task_id}.md"
 
     initial = transcript(
@@ -211,6 +265,8 @@ def main(argv: list[str] | None = None) -> int:
         role=agent["role"],
         context_path=context_path,
         context_hash=context_hash,
+        lessons_path=lessons_path,
+        lessons_hash=lessons_hash,
         prompt=prompt,
         answer="",
         status="PRIPRAVLJENO" if args.dry_run else "V TEKU",
@@ -224,20 +280,15 @@ def main(argv: list[str] | None = None) -> int:
         print("Dry-run: model ni bil poklican.")
         return 0
 
-    payload: dict[str, object] = {
-        "model": agent["model"],
-        "messages": [
-            {"role": "system", "content": context},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": True,
-        "keep_alive": "15m",
-        "options": {"num_ctx": args.num_ctx},
-    }
+    payload = build_payload(
+        agent["model"], context, prompt, args.num_ctx, args.max_tokens, lessons
+    )
 
     print("\n--- odgovor lokalnega modela ---\n", flush=True)
     try:
         answer = stream_ollama(args.ollama_url, payload)
+        if not answer.strip():
+            raise RuntimeError("Model ni vrnil koncnega vsebinskega odgovora.")
     except (RuntimeError, json.JSONDecodeError) as exc:
         failed = transcript(
             task_id=task_id,
@@ -247,6 +298,8 @@ def main(argv: list[str] | None = None) -> int:
             role=agent["role"],
             context_path=context_path,
             context_hash=context_hash,
+            lessons_path=lessons_path,
+            lessons_hash=lessons_hash,
             prompt=prompt,
             answer=f"NAPAKA MOSTU: {exc}",
             status="NAPAKA",
@@ -263,6 +316,8 @@ def main(argv: list[str] | None = None) -> int:
         role=agent["role"],
         context_path=context_path,
         context_hash=context_hash,
+        lessons_path=lessons_path,
+        lessons_hash=lessons_hash,
         prompt=prompt,
         answer=answer,
         status="ODGOVOR PREJET",
