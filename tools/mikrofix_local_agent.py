@@ -24,6 +24,7 @@ import uuid
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONTEXT = PROJECT_ROOT / "docs" / "MIKROFIX_GPT_OSS_20B_KONTEKST.md"
 DEFAULT_LESSONS = PROJECT_ROOT / "docs" / "local_agents" / "LEKCIJE.md"
+DEFAULT_RULES_DIR = PROJECT_ROOT / "docs" / "local_agents" / "pravila"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "docs" / "local_agents" / "dnevnik"
 # Ollama is bound to Docker's host bridge so Open WebUI and local tools can use
 # the same server.  The CLI option still permits a different deployment.
@@ -70,6 +71,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--context", type=Path, default=DEFAULT_CONTEXT)
     parser.add_argument("--lessons", type=Path, default=DEFAULT_LESSONS)
+    parser.add_argument("--rules-dir", type=Path, default=DEFAULT_RULES_DIR)
+    parser.add_argument(
+        "--scope",
+        action="append",
+        default=[],
+        help=(
+            "Tematski obseg pravil; možnost se lahko ponovi. Brez nje most "
+            "izbere obsege po nalogi in ob nejasnosti naloži vse."
+        ),
+    )
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
     parser.add_argument("--ollama-url", default=OLLAMA_CHAT_URL)
     parser.add_argument(
@@ -108,6 +119,66 @@ def build_user_prompt(task: str, material: str, requested_output: str) -> str:
         "ZAHTEVANI IZHOD:\n"
         f"{requested_output.strip()}\n"
     )
+
+
+def load_scoped_context(
+    rules_dir: Path,
+    canonical_path: Path,
+    requested_scopes: list[str],
+    searchable_text: str,
+) -> tuple[str, list[tuple[Path, str]], list[str]]:
+    rules_dir = rules_dir.expanduser().resolve()
+    canonical_path = canonical_path.expanduser().resolve()
+    index_path = rules_dir / "INDEX.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Napaka pri branju indeksa pravil '{index_path}': {exc}") from exc
+
+    canonical = read_text(canonical_path, "kanoničnega konteksta")
+    canonical_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if canonical_hash != index.get("source_sha256"):
+        raise SystemExit(
+            "Moduli pravil niso usklajeni s kanoničnim kontekstom. Zaženi "
+            "python3 tools/build_local_agent_rules.py."
+        )
+
+    scopes = index.get("scopes", {})
+    unknown = sorted(set(requested_scopes) - set(scopes) - {"all"})
+    if unknown:
+        raise SystemExit(
+            "Neznani obsegi pravil: " + ", ".join(unknown)
+            + ". Dovoljeni: " + ", ".join(sorted(scopes))
+        )
+
+    if "all" in requested_scopes:
+        selected = list(scopes)
+    elif requested_scopes:
+        selected = list(dict.fromkeys(requested_scopes))
+    else:
+        haystack = searchable_text.casefold()
+        selected = [
+            name
+            for name, definition in scopes.items()
+            if any(keyword.casefold() in haystack for keyword in definition["keywords"])
+        ]
+        if not selected:
+            selected = list(scopes)
+
+    file_names = list(index.get("always", []))
+    file_names.extend(scopes[name]["file"] for name in selected)
+    file_names = list(dict.fromkeys(file_names))
+    loaded: list[tuple[Path, str]] = []
+    blocks: list[str] = []
+    for file_name in file_names:
+        path = (rules_dir / file_name).resolve()
+        if path.parent != rules_dir:
+            raise SystemExit(f"Nedovoljena pot v indeksu pravil: {file_name}")
+        content = read_text(path, "modula pravil")
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        loaded.append((path, digest))
+        blocks.append(f"# NALOŽEN MODUL: {file_name}\n\n{content.strip()}")
+    return "\n\n---\n\n".join(blocks), loaded, selected
 
 
 def build_system_prompt(context: str, lessons: str = "") -> str:
@@ -174,6 +245,8 @@ def transcript(
     role: str,
     context_path: Path,
     context_hash: str,
+    context_files: list[tuple[Path, str]],
+    selected_scopes: list[str],
     lessons_path: Path,
     lessons_hash: str,
     prompt: str,
@@ -187,6 +260,9 @@ def transcript(
 - Model: `{model}`
 - Kontekst: `{context_path}`
 - SHA-256 konteksta: `{context_hash}`
+- Izbrani obsegi: `{', '.join(selected_scopes)}`
+- Naloženi moduli:
+{os.linesep.join(f'  - `{path}` — `{digest}`' for path, digest in context_files)}
 - Potrjene lekcije: `{lessons_path}`
 - SHA-256 lekcij: `{lessons_hash}`
 - Stanje: **{status}**
@@ -241,15 +317,21 @@ def stream_ollama(url: str, payload: dict[str, object]) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     agent = AGENTS[args.agent]
-    context_path = args.context.expanduser().resolve()
-    context = read_text(context_path, "konteksta")
     lessons_path = args.lessons.expanduser().resolve()
     lessons = read_text(lessons_path, "potrjenih lekcij")
     task = args.task if args.task is not None else read_text(args.task_file, "naloge")
     material_parts = [args.material]
     if args.material_file:
         material_parts.append(read_text(args.material_file, "gradiva"))
-    prompt = build_user_prompt(task, "\n\n".join(filter(None, material_parts)), args.output)
+    material = "\n\n".join(filter(None, material_parts))
+    prompt = build_user_prompt(task, material, args.output)
+    context_path = args.rules_dir.expanduser().resolve()
+    context, context_files, selected_scopes = load_scoped_context(
+        context_path,
+        args.context,
+        args.scope,
+        task + "\n" + args.output,
+    )
 
     task_id = make_task_id()
     created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -265,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
         role=agent["role"],
         context_path=context_path,
         context_hash=context_hash,
+        context_files=context_files,
+        selected_scopes=selected_scopes,
         lessons_path=lessons_path,
         lessons_hash=lessons_hash,
         prompt=prompt,
@@ -298,6 +382,8 @@ def main(argv: list[str] | None = None) -> int:
             role=agent["role"],
             context_path=context_path,
             context_hash=context_hash,
+            context_files=context_files,
+            selected_scopes=selected_scopes,
             lessons_path=lessons_path,
             lessons_hash=lessons_hash,
             prompt=prompt,
@@ -316,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         role=agent["role"],
         context_path=context_path,
         context_hash=context_hash,
+        context_files=context_files,
+        selected_scopes=selected_scopes,
         lessons_path=lessons_path,
         lessons_hash=lessons_hash,
         prompt=prompt,

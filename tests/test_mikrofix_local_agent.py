@@ -1,5 +1,7 @@
 import datetime as dt
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,8 +13,25 @@ bridge = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(bridge)
 
+GENERATOR_PATH = Path(__file__).resolve().parents[1] / "tools" / "build_local_agent_rules.py"
+GENERATOR_SPEC = importlib.util.spec_from_file_location(
+    "build_local_agent_rules", GENERATOR_PATH
+)
+generator = importlib.util.module_from_spec(GENERATOR_SPEC)
+assert GENERATOR_SPEC.loader is not None
+GENERATOR_SPEC.loader.exec_module(generator)
+
 
 class LocalAgentBridgeTests(unittest.TestCase):
+    def test_rule_groups_cover_every_canonical_section_exactly_once(self):
+        numbers = [
+            number
+            for definition in generator.GROUPS.values()
+            for number in definition["sections"]
+        ]
+        self.assertEqual(sorted(numbers), list(range(1, 21)))
+        self.assertEqual(len(numbers), len(set(numbers)))
+
     def test_prompt_has_required_sections(self):
         prompt = bridge.build_user_prompt("naloga", "gradivo", "izhod")
         self.assertEqual(
@@ -55,6 +74,54 @@ class LocalAgentBridgeTests(unittest.TestCase):
             bridge.atomic_write(path, "druga")
             self.assertEqual(path.read_text(encoding="utf-8"), "druga")
 
+    def make_rules(self, root, canonical_text="kanonični kontekst"):
+        rules = root / "rules"
+        rules.mkdir()
+        (rules / "00.md").write_text("jedro", encoding="utf-8")
+        (rules / "40.md").write_text("računi", encoding="utf-8")
+        (rules / "70.md").write_text("cene", encoding="utf-8")
+        index = {
+            "source_sha256": hashlib.sha256(
+                canonical_text.encode("utf-8")
+            ).hexdigest(),
+            "always": ["00.md"],
+            "scopes": {
+                "invoices": {"file": "40.md", "keywords": ["račun", "preveri"]},
+                "pricing": {"file": "70.md", "keywords": ["cena"]},
+            },
+        }
+        (rules / "INDEX.json").write_text(
+            json.dumps(index, ensure_ascii=False), encoding="utf-8"
+        )
+        return rules
+
+    def test_scoped_context_loads_core_and_matching_topic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = root / "context.md"
+            canonical.write_text("kanonični kontekst", encoding="utf-8")
+            rules = self.make_rules(root)
+            context, loaded, scopes = bridge.load_scoped_context(
+                rules, canonical, [], "preveri račun"
+            )
+            self.assertEqual(scopes, ["invoices"])
+            self.assertEqual([path.name for path, _ in loaded], ["00.md", "40.md"])
+            self.assertIn("jedro", context)
+            self.assertIn("računi", context)
+            self.assertNotIn("cene", context)
+
+    def test_unknown_topic_safely_loads_all_topics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            canonical = root / "context.md"
+            canonical.write_text("kanonični kontekst", encoding="utf-8")
+            rules = self.make_rules(root)
+            _, loaded, scopes = bridge.load_scoped_context(
+                rules, canonical, [], "neznana tema"
+            )
+            self.assertEqual(set(scopes), {"invoices", "pricing"})
+            self.assertEqual(len(loaded), 3)
+
     def test_dry_run_writes_trace_without_calling_ollama(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -63,6 +130,7 @@ class LocalAgentBridgeTests(unittest.TestCase):
             context.write_text("kanonični kontekst", encoding="utf-8")
             lessons = root / "lessons.md"
             lessons.write_text("potrjena lekcija", encoding="utf-8")
+            rules = self.make_rules(root)
             exit_code = bridge.main(
                 [
                     "--agent",
@@ -75,6 +143,8 @@ class LocalAgentBridgeTests(unittest.TestCase):
                     str(logs),
                     "--lessons",
                     str(lessons),
+                    "--rules-dir",
+                    str(rules),
                     "--dry-run",
                 ]
             )

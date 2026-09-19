@@ -12,9 +12,21 @@ spreminjati kode, poslovnih pravil ali podatkov.
   sočasnosti, idempotentnosti in revizijske sledi.
 
 Oba vedno prejmeta kanonični kontekst iz
-`docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md` in potrjene korektivne lekcije iz
-`docs/local_agents/LEKCIJE.md`. Vsak dnevnik vsebuje zgoščeno vrednost obeh
-datotek, zato je pozneje dokazljivo, katero različico sta modela uporabila.
+`docs/local_agents/pravila/` in potrjene korektivne lekcije iz
+`docs/local_agents/LEKCIJE.md`. Pravila so mehansko izdelani tematski moduli iz
+kanoničnega dokumenta `docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md`.
+
+Most vedno naloži `00_JEDRO.md`, trajne lekcije in module, ki ustrezajo nalogi.
+Obseg je mogoče določiti tudi izrecno, na primer `--scope invoices --scope
+stock_offline`. Če naloge ni mogoče varno razvrstiti, most naloži vse module.
+Model zato nikoli ne ostane brez pravil samo zaradi neuspešnega iskanja.
+
+Vsak dnevnik vsebuje seznam in SHA-256 vseh naloženih modulov. Če se kanonični
+dokument spremeni, most zavrne delo, dokler se moduli ne osvežijo z:
+
+```bash
+python3 tools/build_local_agent_rules.py
+```
 
 ## Uporaba
 
@@ -23,6 +35,7 @@ Iz korena projekta:
 ```bash
 python3 tools/mikrofix_local_agent.py \
   --agent qwen \
+  --scope invoices \
   --task "Preveri predlagano spremembo." \
   --material-file /pot/do/gradiva.txt \
   --output "Naštej konflikte in pet manjkajočih testov."
