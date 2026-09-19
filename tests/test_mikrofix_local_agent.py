@@ -130,6 +130,7 @@ class LocalAgentBridgeTests(unittest.TestCase):
             context.write_text("kanonični kontekst", encoding="utf-8")
             lessons = root / "lessons.md"
             lessons.write_text("potrjena lekcija", encoding="utf-8")
+            console = root / "agent-console.log"
             rules = self.make_rules(root)
             exit_code = bridge.main(
                 [
@@ -145,6 +146,8 @@ class LocalAgentBridgeTests(unittest.TestCase):
                     str(lessons),
                     "--rules-dir",
                     str(rules),
+                    "--console-log",
+                    str(console),
                     "--dry-run",
                 ]
             )
@@ -155,6 +158,27 @@ class LocalAgentBridgeTests(unittest.TestCase):
             self.assertIn("Stanje: **PRIPRAVLJENO**", content)
             self.assertIn("Model: `gpt-oss:20b`", content)
             self.assertIn("NALOGA:\npreveri", content)
+            visible = console.read_text(encoding="utf-8")
+            self.assertIn("ZAHTEVA:\npreveri", visible)
+            self.assertIn("DRY-RUN", visible)
+
+    def test_console_header_shows_request_but_not_inline_material(self):
+        header = bridge.console_header(
+            task_id="LOCAL-1",
+            created_at="2026-09-19T12:00:00+02:00",
+            agent="qwen",
+            model="qwen3.5:9b",
+            role="pomocnik",
+            selected_scopes=["invoices"],
+            context_files=[(Path("/tmp/40.md"), "hash")],
+            task="preveri konkurencnost",
+            requested_output="pet testov",
+            material_file=None,
+        )
+        self.assertIn("AGENT: qwen", header)
+        self.assertIn("ZAHTEVA:\npreveri konkurencnost", header)
+        self.assertIn("MODULI: 40.md", header)
+        self.assertNotIn("skrivno gradivo", header)
 
 
 if __name__ == "__main__":

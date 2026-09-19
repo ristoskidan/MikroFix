@@ -42,8 +42,20 @@ python3 tools/mikrofix_local_agent.py \
 ```
 
 Za skeptični drugi pregled se uporabi `--agent reviewer`. Odgovor se med
-nastajanjem izpisuje v terminalu, celoten poziv in nespremenjen odgovor pa se
-atomsko shranita v `docs/local_agents/dnevnik/LOCAL-....md`.
+nastajanjem izpisuje v terminalu in v skupnem toku
+`~/.local/state/mikrofix/agent-console.log`, celoten poziv in nespremenjen
+odgovor pa se atomsko shranita v
+`docs/local_agents/dnevnik/LOCAL-....md`.
+
+Na namizju je bližnjica **MikroFix – lokalni agenti**. Odpre eno stalno
+terminalsko okno, ki spremlja skupni tok. Most vanj za vsako nalogo zapiše
+agenta, model, uporabljene module pravil, zahtevo, zahtevani izhod, sprotni
+odgovor in pot do trajnega dnevnika. Bližnjice ni treba ponovno odpirati za
+vsako nalogo. Če je spremljevalnik že odprt, drugi primerek ne ostane odprt.
+
+Ker lokalna modela uporabljata isti grafični procesor, skupni tok hkrati služi
+kot čakalna vrsta: naslednji klic počaka, dokler se prejšnji odgovor ne konča.
+Tako se odgovori ne prepletajo in ena naloga ne jemlje pomnilnika drugi.
 
 Most ne daje modeloma dostopa do aplikacij ali baze in njun odgovor ni
 samodejno odobren. V vsakem dnevniku ostane razdelek za pregled glavnega

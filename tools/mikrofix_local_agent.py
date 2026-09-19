@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
@@ -26,6 +27,9 @@ DEFAULT_CONTEXT = PROJECT_ROOT / "docs" / "MIKROFIX_GPT_OSS_20B_KONTEKST.md"
 DEFAULT_LESSONS = PROJECT_ROOT / "docs" / "local_agents" / "LEKCIJE.md"
 DEFAULT_RULES_DIR = PROJECT_ROOT / "docs" / "local_agents" / "pravila"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "docs" / "local_agents" / "dnevnik"
+DEFAULT_CONSOLE_LOG = (
+    Path.home() / ".local" / "state" / "mikrofix" / "agent-console.log"
+)
 # Ollama is bound to Docker's host bridge so Open WebUI and local tools can use
 # the same server.  The CLI option still permits a different deployment.
 OLLAMA_CHAT_URL = "http://172.17.0.1:11434/api/chat"
@@ -82,6 +86,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    parser.add_argument(
+        "--console-log",
+        type=Path,
+        default=DEFAULT_CONSOLE_LOG,
+        help="Skupni tok za stalno vidno terminalsko okno.",
+    )
     parser.add_argument("--ollama-url", default=OLLAMA_CHAT_URL)
     parser.add_argument(
         "--num-ctx",
@@ -286,7 +296,47 @@ _Sem se zapiše, kaj je sprejeto, zavrnjeno ali zahteva odločitev lastnika._
 """
 
 
-def stream_ollama(url: str, payload: dict[str, object]) -> str:
+def console_header(
+    *,
+    task_id: str,
+    created_at: str,
+    agent: str,
+    model: str,
+    role: str,
+    selected_scopes: list[str],
+    context_files: list[tuple[Path, str]],
+    task: str,
+    requested_output: str,
+    material_file: Path | None,
+) -> str:
+    material = str(material_file.expanduser().resolve()) if material_file else "brez datoteke"
+    modules = ", ".join(path.name for path, _ in context_files)
+    return f"""
+========================================================================
+NALOGA: {task_id}
+CAS: {created_at}
+AGENT: {agent} — {role}
+MODEL: {model}
+OBSEGI PRAVIL: {', '.join(selected_scopes)}
+MODULI: {modules}
+GRADIVO: {material}
+
+ZAHTEVA:
+{task.strip()}
+
+ZAHTEVANI IZHOD:
+{requested_output.strip()}
+
+--- ODGOVOR LOKALNEGA MODELA ---
+"""
+
+
+def console_write(handle, content: str) -> None:
+    handle.write(content)
+    handle.flush()
+
+
+def stream_ollama(url: str, payload: dict[str, object], console_handle=None) -> str:
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -306,6 +356,8 @@ def stream_ollama(url: str, payload: dict[str, object]) -> str:
                 if content:
                     chunks.append(content)
                     print(content, end="", flush=True)
+                    if console_handle is not None:
+                        console_write(console_handle, content)
     except urllib.error.URLError as exc:
         raise RuntimeError(
             f"Ollama na {url} ni dosegljiva ali je prekinila odgovor: {exc}"
@@ -339,6 +391,28 @@ def main(argv: list[str] | None = None) -> int:
     lessons_hash = hashlib.sha256(lessons.encode("utf-8")).hexdigest()
     log_path = args.log_dir.expanduser().resolve() / f"{task_id}.md"
 
+    console_path = args.console_log.expanduser().resolve()
+    console_path.parent.mkdir(parents=True, exist_ok=True)
+    console_handle = console_path.open("a", encoding="utf-8")
+    # En sam GPU ne sme obdelovati dveh lokalnih nalog hkrati. Zaklep tudi
+    # zagotovi, da se odgovora v skupnem terminalsko vidnem toku ne prepletata.
+    fcntl.flock(console_handle.fileno(), fcntl.LOCK_EX)
+    console_write(
+        console_handle,
+        console_header(
+            task_id=task_id,
+            created_at=created_at,
+            agent=args.agent,
+            model=agent["model"],
+            role=agent["role"],
+            selected_scopes=selected_scopes,
+            context_files=context_files,
+            task=task,
+            requested_output=args.output,
+            material_file=args.material_file,
+        ),
+    )
+
     initial = transcript(
         task_id=task_id,
         created_at=created_at,
@@ -362,6 +436,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Dnevnik: {log_path}", flush=True)
     if args.dry_run:
         print("Dry-run: model ni bil poklican.")
+        console_write(
+            console_handle,
+            f"(DRY-RUN: model ni bil poklican.)\nDNEVNIK: {log_path}\n",
+        )
+        console_handle.close()
         return 0
 
     payload = build_payload(
@@ -370,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n--- odgovor lokalnega modela ---\n", flush=True)
     try:
-        answer = stream_ollama(args.ollama_url, payload)
+        answer = stream_ollama(args.ollama_url, payload, console_handle)
         if not answer.strip():
             raise RuntimeError("Model ni vrnil koncnega vsebinskega odgovora.")
     except (RuntimeError, json.JSONDecodeError) as exc:
@@ -392,6 +471,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         atomic_write(log_path, failed)
         print(f"\nNapaka: {exc}", file=sys.stderr)
+        console_write(
+            console_handle,
+            f"\n--- NAPAKA ---\n{exc}\nDNEVNIK: {log_path}\n",
+        )
+        console_handle.close()
         return 2
 
     completed = transcript(
@@ -413,6 +497,13 @@ def main(argv: list[str] | None = None) -> int:
     atomic_write(log_path, completed)
     print(f"\nOdgovor je shranjen v: {log_path}")
     print("Lokalni odgovor ni odobritev; pregledati ga mora glavni pomočnik.")
+    console_write(
+        console_handle,
+        "\n\n--- KONEC ODGOVORA ---\n"
+        f"DNEVNIK: {log_path}\n"
+        "STANJE: caka na pregled glavnega pomocnika.\n",
+    )
+    console_handle.close()
     return 0
 
 
