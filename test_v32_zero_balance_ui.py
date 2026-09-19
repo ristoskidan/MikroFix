@@ -35,6 +35,26 @@ class _Cashier:
         )
 
 
+class _ReadyServiceCashier:
+    def ready_service_drafts(self):
+        return [{
+            "draft_id": "draft-1",
+            "service_order_id": "11111111-1111-1111-1111-111111111111",
+            "status": "READY",
+            "created_at": "2026-09-19T10:15:00+02:00",
+            "locked_payload": {
+                "service_no": "MF-SN-2026-0042",
+                "customer": {"name": "Testna stranka"},
+                "service": {
+                    "device_model": "Prenosnik",
+                    "device_serial": "SER-42",
+                },
+                "billing_lines": [{"quantity": "1", "unit_price": "30.00"}],
+                "parts": [{"quantity": "2", "unit_price": "12.50"}],
+            },
+        }]
+
+
 class ZeroBalanceUiPolicyTests(unittest.TestCase):
     def lines(self):
         return [
@@ -141,6 +161,40 @@ class ZeroBalanceUiPolicyTests(unittest.TestCase):
         self.assertIn("settlement_mode=self.service_settlement_mode.get()", source)
         self.assertIn('"service_settlement_mode": self.service_settlement_mode.get()', source)
         self.assertIn('payload.get("service_settlement_mode")', source)
+
+    def test_ready_devices_use_locked_identity_status_and_decimal_total(self):
+        window = PosWindow.__new__(PosWindow)
+        window.central_mode = True
+        window.central_cashier = _ReadyServiceCashier()
+
+        rows = window.ready_services()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["service_no"], "MF-SN-2026-0042")
+        self.assertEqual(rows[0]["status"], "PRIPRAVLJENA ZA OBRAČUN")
+        self.assertEqual(rows[0]["total"], "55.00 EUR")
+        self.assertEqual(rows[0]["serial"], "SER-42")
+
+        draft = _ReadyServiceCashier().ready_service_drafts()[0]
+        draft["locked_payload"].pop("service_no")
+        draft["locked_payload"]["order_no"] = "MF-SN-2026-0043"
+        window.central_cashier = SimpleNamespace(
+            ready_service_drafts=lambda: [draft]
+        )
+        self.assertEqual(
+            window.ready_services()[0]["service_no"], "MF-SN-2026-0043"
+        )
+        draft["locked_payload"].pop("order_no")
+        self.assertEqual(
+            window.ready_services()[0]["service_no"], draft["service_order_id"]
+        )
+
+    def test_ready_devices_dialog_keeps_legacy_rows_compatible(self):
+        source = inspect.getsource(PosWindow.choose_ready_service)
+        self.assertIn('dialog.title("Naprave za prevzem")', source)
+        self.assertIn('"status", "total"', source)
+        self.assertIn('row.get("status", "")', source)
+        self.assertIn('row.get("total", "")', source)
 
 
 if __name__ == "__main__":

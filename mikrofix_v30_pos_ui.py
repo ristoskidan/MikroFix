@@ -4130,13 +4130,31 @@ class PosWindow:
                 payload = dict(draft.get("locked_payload") or {})
                 customer = dict(payload.get("customer") or {})
                 service = dict(payload.get("service") or {})
+                lines = list(payload.get("billing_lines") or []) + list(
+                    payload.get("parts") or []
+                )
+                total = sum(
+                    (dec(line.get("quantity")) * dec(line.get("unit_price"))
+                     for line in lines),
+                    Decimal("0"),
+                )
+                raw_status = str(draft.get("status") or "")
                 result.append({
                     "id": str(draft["draft_id"]),
-                    "service_no": str(draft["service_order_id"]),
+                    "service_no": (
+                        str(payload.get("service_no") or "").strip()
+                        or str(payload.get("order_no") or "").strip()
+                        or str(draft.get("service_order_id") or "")
+                    ),
                     "date": str(draft.get("created_at") or "")[:10],
                     "customer": str(customer.get("name") or ""),
                     "model": str(service.get("device_model") or ""),
                     "serial": str(service.get("device_serial") or ""),
+                    "status": (
+                        "PRIPRAVLJENA ZA OBRAČUN"
+                        if raw_status == "READY" else raw_status
+                    ),
+                    "total": f"{total:.2f} EUR",
                     "locked_payload": payload,
                 })
             return result
@@ -4182,26 +4200,31 @@ class PosWindow:
             return
 
         dialog = tk.Toplevel(self.win)
-        dialog.title("Servisi, pripravljeni za račun")
+        dialog.title("Naprave za prevzem")
         dialog.transient(self.win)
         dialog.grab_set()
-        dialog.geometry("920x460")
+        dialog.geometry("1120x460")
         dialog.minsize(760, 380)
         tk.Label(
             dialog,
-            text="Izberi servis in prenesi njegove storitve, dele ter kupca v blagajno.",
+            text=(
+                "Izberi tehnično zaključeno napravo in prenesi njen zaklenjeni "
+                "obračunski osnutek v blagajno."
+            ),
             font=("Segoe UI", 11, "bold"),
         ).pack(anchor="w", padx=14, pady=(14, 8))
         wrap = ttk.Frame(dialog)
         wrap.pack(fill="both", expand=True, padx=14, pady=(0, 10))
         tree = ttk.Treeview(
-            wrap, columns=("no", "date", "customer", "device", "serial"),
+            wrap,
+            columns=("no", "date", "customer", "device", "serial", "status", "total"),
             show="headings", selectmode="browse",
         )
         for key, label, width in (
-            ("no", "Servis", 150), ("date", "Datum", 125),
-            ("customer", "Stranka", 190), ("device", "Naprava", 190),
-            ("serial", "Serijska", 160),
+            ("no", "Servis", 150), ("date", "Datum", 100),
+            ("customer", "Stranka", 170), ("device", "Naprava", 170),
+            ("serial", "Serijska", 130), ("status", "Stanje", 185),
+            ("total", "Znesek", 100),
         ):
             tree.heading(key, text=label)
             tree.column(key, width=width, stretch=key in {"customer", "device"})
@@ -4212,7 +4235,12 @@ class PosWindow:
         for row in rows:
             tree.insert(
                 "", "end", iid=str(row["id"]),
-                values=(row["service_no"], row["date"], row["customer"], row["model"], row["serial"]),
+                values=(
+                    row.get("service_no", ""), row.get("date", ""),
+                    row.get("customer", ""), row.get("model", ""),
+                    row.get("serial", ""), row.get("status", ""),
+                    row.get("total", ""),
+                ),
             )
 
         def transfer():

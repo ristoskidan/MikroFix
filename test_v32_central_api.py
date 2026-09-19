@@ -565,11 +565,13 @@ class CentralApiIntegrationTests(unittest.TestCase):
             ))
         return supplier_id, article_id
 
-    def prepared_draft(self, *, sequence, barcode):
+    def prepared_draft(self, *, sequence, barcode, order_no=None):
         from sqlalchemy import insert
         from mikrofix_server.models import inventory_items
 
         order = self.operation(sequence=sequence)
+        if order_no is not None:
+            order["payload"]["order_no"] = order_no
         created = self.client.post(
             "/v1/sync/operations", json=order, headers=self.headers
         )
@@ -1169,7 +1171,9 @@ class CentralApiIntegrationTests(unittest.TestCase):
             ).scalar_one(), 1)
 
     def test_cashier_lists_locked_ready_service_draft_without_claiming_it(self):
-        _, draft_id = self.prepared_draft(sequence=51, barcode="LIST-PART")
+        order, draft_id = self.prepared_draft(
+            sequence=51, barcode="LIST-PART", order_no="MF-SN-2026-0051",
+        )
         first = self.client.get(
             "/v1/cashier/service-invoice-drafts", headers=self.headers
         )
@@ -1182,6 +1186,12 @@ class CentralApiIntegrationTests(unittest.TestCase):
         self.assertEqual(draft["draft_id"], draft_id)
         self.assertEqual(draft["status"], "READY")
         self.assertEqual(draft["aggregate_version"], 1)
+        self.assertEqual(
+            draft["locked_payload"]["service_order_id"], order["aggregate_id"]
+        )
+        self.assertEqual(
+            draft["locked_payload"]["service_no"], "MF-SN-2026-0051"
+        )
         self.assertEqual(draft["locked_payload"]["customer"]["name"], "Testna stranka")
 
     def test_bank_transfer_issues_once_and_billing_closes_service(self):

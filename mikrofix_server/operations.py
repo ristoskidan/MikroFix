@@ -3188,20 +3188,27 @@ def _complete_service_technically(
             lot_available[lot.lot_uuid] = new_available
 
     draft_uuid = uuid4()
+    order_payload = dict(order.payload_json)
+    service_no = (
+        str(order_payload.get("service_no") or "").strip()
+        or str(order_payload.get("order_no") or "").strip()
+        or envelope.aggregate_id
+    )
     draft_payload = {
         "draft_uuid": str(draft_uuid),
         "service_order_id": envelope.aggregate_id,
+        "service_no": service_no,
         "customer": {
-            "name": dict(order.payload_json).get("customer_name", ""),
-            "address": dict(order.payload_json).get("customer_address", ""),
-            "phone": dict(order.payload_json).get("customer_phone", ""),
-            "email": dict(order.payload_json).get("customer_email", ""),
+            "name": order_payload.get("customer_name", ""),
+            "address": order_payload.get("customer_address", ""),
+            "phone": order_payload.get("customer_phone", ""),
+            "email": order_payload.get("customer_email", ""),
         },
         "service": {
-            "device_model": dict(order.payload_json).get("device_model", ""),
-            "device_serial": dict(order.payload_json).get("device_serial", ""),
-            "customer_request": dict(order.payload_json).get("customer_request", ""),
-            "contract_context": dict(order.payload_json).get("contract_context", ""),
+            "device_model": order_payload.get("device_model", ""),
+            "device_serial": order_payload.get("device_serial", ""),
+            "customer_request": order_payload.get("customer_request", ""),
+            "contract_context": order_payload.get("contract_context", ""),
         },
         "work_summary": payload["work_summary"],
         "findings": payload["findings"],
