@@ -31,6 +31,23 @@ DEFAULT_BRIDGE_CONFIG = (
     Path.home() / ".local" / "share" / "mikrofix-bridge" / "config.json"
 )
 MAX_RETRIES_LIMIT = 3
+DEFAULT_JOB_TIMEOUT_SECONDS = 1800
+CONTROL_PLANE_FILES = {
+    "tools/mikrofix_supervisor.py",
+    "tools/mikrofix_bridge.py",
+    "tools/mikrofix_local_agent.py",
+    "tests/test_mikrofix_supervisor.py",
+    "tests/test_local_executor_server.py",
+    "tests/test_mikrofix_local_agent.py",
+    "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
+    "docs/local_agents/LEKCIJE.md",
+}
+CONTROL_PLANE_PREFIXES = (
+    "tools/local_executor/",
+    "docs/local_agents/izvajalec/",
+    "docs/local_agents/pravila/",
+    "docs/local_agents/supervisor/",
+)
 CHECK_COMMANDS: dict[str, tuple[str, ...]] = {
     "syntax_changed_python": (".venv/bin/python", "-m", "py_compile"),
     "local_agent_tests": (
@@ -138,6 +155,14 @@ class RunEnvironment:
                 f"Server virtual-environment interpreter is missing or not executable: "
                 f"{server_python}"
             )
+        trusted_bridge = source_root / "tools" / "mikrofix_bridge.py"
+        trusted_reviewer = source_root / "tools" / "mikrofix_local_agent.py"
+        for label, trusted_path in (
+            ("vendored bridge", trusted_bridge),
+            ("local reviewer", trusted_reviewer),
+        ):
+            if not trusted_path.is_file():
+                raise RuntimeError(f"Trusted {label} is missing: {trusted_path}")
         worktree.parent.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, mode=0o700)
         result = subprocess.run(
@@ -183,7 +208,7 @@ class RunEnvironment:
             "worktree": str(worktree),
             "lease_file": str(lease_file),
             "bridge": {
-                "argv": ["bridge", "monitor"],
+                "argv": [str(server_python), str(trusted_bridge), "monitor"],
                 "cwd": str(worktree),
                 "env": {
                     "MIKROFIX_BRIDGE_HOME": str(bridge_home),
@@ -341,6 +366,10 @@ def safe_relative_path(raw: object) -> str:
     return path.as_posix()
 
 
+def is_control_plane_path(path: str) -> bool:
+    return path in CONTROL_PLANE_FILES or path.startswith(CONTROL_PLANE_PREFIXES)
+
+
 def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
     required_strings = ("run_id", "objective", "base_checkpoint")
     for key in required_strings:
@@ -352,6 +381,10 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(allowed_raw, list) or not allowed_raw:
         raise ValueError("allowed_files must be a non-empty list")
     allowed = list(dict.fromkeys(safe_relative_path(item) for item in allowed_raw))
+    protected = sorted(path for path in allowed if is_control_plane_path(path))
+    if protected:
+        raise ValueError("allowed_files contains protected control-plane paths: "
+                         + ", ".join(protected))
     atoms_raw = plan.get("atoms")
     if not isinstance(atoms_raw, list) or not atoms_raw:
         raise ValueError("atoms must be a non-empty list")
@@ -382,6 +415,9 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
     retries = plan.get("max_retries_per_atom", MAX_RETRIES_LIMIT)
     if not isinstance(retries, int) or not 1 <= retries <= MAX_RETRIES_LIMIT:
         raise ValueError(f"max_retries_per_atom must be between 1 and {MAX_RETRIES_LIMIT}")
+    job_timeout = plan.get("job_timeout_seconds", DEFAULT_JOB_TIMEOUT_SECONDS)
+    if not isinstance(job_timeout, int) or not 30 <= job_timeout <= 7200:
+        raise ValueError("job_timeout_seconds must be between 30 and 7200")
     if plan.get("final_gate", Stage.AWAIT_CODEX_REVIEW.value) != Stage.AWAIT_CODEX_REVIEW.value:
         raise ValueError("final_gate must be AWAIT_CODEX_REVIEW")
     return {
@@ -391,6 +427,7 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "allowed_files": allowed,
         "atoms": atoms,
         "max_retries_per_atom": retries,
+        "job_timeout_seconds": job_timeout,
         "final_gate": Stage.AWAIT_CODEX_REVIEW.value,
     }
 
@@ -407,6 +444,7 @@ def initial_run(
         "atom_index": 0,
         "attempt": 0,
         "job_id": None,
+        "job_dispatched_at": None,
         "feedback": "",
         "qwen_result": "",
         "diff": "",
@@ -444,6 +482,7 @@ def retry_or_block(run: dict[str, Any], reason: str) -> None:
         record(run, Stage.BLOCKED, f"Retry limit reached: {reason}")
     else:
         run["job_id"] = None
+        run["job_dispatched_at"] = None
         record(run, Stage.PLANNED, f"Retry requested: {reason}")
 
 
@@ -507,6 +546,7 @@ class Supervisor:
             run["attempt"] += 1
             run["dispatch_snapshot"] = self.adapter.snapshot()
             run["job_id"] = self.adapter.dispatch_qwen(qwen_prompt(run))
+            run["job_dispatched_at"] = time.time()
             record(run, Stage.DISPATCHED_TO_QWEN,
                    f"Qwen job dispatched: {run['job_id']}")
             self.save(run)
@@ -514,6 +554,21 @@ class Supervisor:
         if stage is Stage.DISPATCHED_TO_QWEN:
             status, result = self.adapter.qwen_result(str(run["job_id"]))
             if status in {"queued", "running"}:
+                dispatched_at = run.get("job_dispatched_at")
+                timeout = run["plan"]["job_timeout_seconds"]
+                if not isinstance(dispatched_at, (int, float)):
+                    run["feedback"] = "Missing dispatch timestamp for active Qwen job"
+                    record(run, Stage.BLOCKED, "Cannot enforce Qwen job timeout")
+                    self.save(run)
+                    return True
+                if time.time() - dispatched_at >= timeout:
+                    run["feedback"] = (
+                        f"Qwen job {run['job_id']} remained {status} for at least "
+                        f"{timeout} seconds; worker must be inspected before retry"
+                    )
+                    record(run, Stage.BLOCKED, "Qwen job timeout reached")
+                    self.save(run)
+                    return True
                 return False
             if status != "completed":
                 retry_or_block(run, f"Qwen job ended as {status}: {result}")
@@ -579,6 +634,7 @@ class Supervisor:
             run["atom_index"] += 1
             if run["atom_index"] < len(run["plan"]["atoms"]):
                 run.update({"attempt": 0, "job_id": None, "feedback": "",
+                            "job_dispatched_at": None,
                             "qwen_result": "", "diff": "", "test_evidence": "",
                             "review_evidence": "", "dispatch_snapshot": None})
                 record(run, Stage.PLANNED, "Atom accepted; next atom planned")
@@ -682,12 +738,18 @@ class LocalAdapter:
         return snapshot
 
     def dispatch_qwen(self, prompt: str) -> str:
-        return self._run(["bridge", "dispatch", "--task", prompt], timeout=30,
-                         env=self._bridge_env).stdout.strip()
+        return self._run([
+            str(self.source_root / ".venv-server" / "bin" / "python"),
+            str(self.source_root / "tools" / "mikrofix_bridge.py"),
+            "dispatch", "--task", prompt,
+        ], timeout=30, env=self._bridge_env).stdout.strip()
 
     def qwen_result(self, job_id: str) -> tuple[str, str]:
-        raw = self._run(["bridge", "status", job_id], timeout=30,
-                        env=self._bridge_env).stdout
+        raw = self._run([
+            str(self.source_root / ".venv-server" / "bin" / "python"),
+            str(self.source_root / "tools" / "mikrofix_bridge.py"),
+            "status", job_id,
+        ], timeout=30, env=self._bridge_env).stdout
         try:
             job = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -752,7 +814,9 @@ class LocalAdapter:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(material)
             result = self._run([
-                "python3", "tools/mikrofix_local_agent.py", "--agent", "reviewer",
+                str(self.source_root / ".venv-server" / "bin" / "python"),
+                str(self.source_root / "tools" / "mikrofix_local_agent.py"),
+                "--agent", "reviewer",
                 "--task", prompt, "--material-file", str(path), "--max-tokens", "2200",
                 "--output", "Specific findings followed by exactly one final verdict line.",
                 "--log-dir", str(self.state_dir / "reviews"),

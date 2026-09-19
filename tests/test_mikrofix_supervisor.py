@@ -160,6 +160,23 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(2, len(self.adapter.jobs))
         self.assertIn("missing regression", self.adapter.jobs[1])
 
+    def test_active_job_timeout_blocks_without_dispatching_a_retry(self):
+        timeout_plan = plan(job_timeout_seconds=30)
+        atomic_write_json(
+            self.state, initial_run(timeout_plan, self.adapter.snapshot())
+        )
+        self.adapter.job_results = [("running", "")]
+        self.assertTrue(self.supervisor.step())
+        state = self.supervisor.load()
+        state["job_dispatched_at"] = time.time() - 31
+        atomic_write_json(self.state, state)
+
+        self.assertTrue(self.supervisor.step())
+        state = self.supervisor.load()
+        self.assertEqual(Stage.BLOCKED.value, state["stage"])
+        self.assertIn("worker must be inspected", state["feedback"])
+        self.assertEqual(1, len(self.adapter.jobs))
+
 
 class PlanValidationTests(unittest.TestCase):
     def test_rejects_path_escape(self):
@@ -180,6 +197,19 @@ class PlanValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_plan(invalid)
 
+    def test_rejects_control_plane_paths(self):
+        for protected in (
+            "tools/mikrofix_supervisor.py",
+            "tools/mikrofix_bridge.py",
+            "tools/local_executor/server.py",
+            "tools/mikrofix_local_agent.py",
+            "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md",
+            "docs/local_agents/pravila/00_JEDRO.md",
+            "docs/local_agents/LEKCIJE.md",
+        ):
+            with self.subTest(protected=protected), self.assertRaises(ValueError):
+                validate_plan(plan(allowed_files=[protected]))
+
 
 class RunEnvironmentTests(unittest.TestCase):
     def git(self, root, *args):
@@ -195,6 +225,15 @@ class RunEnvironmentTests(unittest.TestCase):
         interpreter.chmod(0o755)
         return interpreter
 
+    def add_trusted_agent_tools(self, source):
+        tools = source / "tools"
+        tools.mkdir(exist_ok=True)
+        bridge = tools / "mikrofix_bridge.py"
+        reviewer = tools / "mikrofix_local_agent.py"
+        bridge.write_text("# trusted bridge\n", encoding="utf-8")
+        reviewer.write_text("# trusted reviewer\n", encoding="utf-8")
+        return bridge, reviewer
+
     def test_prepares_isolated_worktree_config_manifest_and_lease_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -206,7 +245,8 @@ class RunEnvironmentTests(unittest.TestCase):
             self.git(source, "config", "user.name", "Supervisor Test")
             (source / "app.py").write_text("print('main')\n", encoding="utf-8")
             server_python = self.add_server_python(source)
-            self.git(source, "add", "app.py", ".venv-server/bin/python")
+            trusted_bridge, _ = self.add_trusted_agent_tools(source)
+            self.git(source, "add", "app.py", ".venv-server/bin/python", "tools")
             self.git(source, "commit", "-qm", "base")
             head = self.git(source, "rev-parse", "HEAD")
             before_status = self.git(source, "status", "--porcelain=v1")
@@ -251,6 +291,7 @@ class RunEnvironmentTests(unittest.TestCase):
             self.assertEqual(str(environment.worktree), metadata["bridge"]["cwd"])
             self.assertEqual(str(environment.worktree), metadata["executor"]["cwd"])
             self.assertEqual(str(server_python), metadata["executor"]["argv"][0])
+            self.assertEqual(str(trusted_bridge), metadata["bridge"]["argv"][1])
             executor_env = metadata["executor"]["env"]
             self.assertEqual(str(environment.worktree),
                              executor_env["MIKROFIX_EXECUTOR_ROOT"])
@@ -293,7 +334,8 @@ class RunEnvironmentTests(unittest.TestCase):
             self.git(source, "config", "user.name", "Supervisor Test")
             (source / "app.py").write_text("pass\n", encoding="utf-8")
             self.add_server_python(source)
-            self.git(source, "add", "app.py", ".venv-server/bin/python")
+            self.add_trusted_agent_tools(source)
+            self.git(source, "add", "app.py", ".venv-server/bin/python", "tools")
             self.git(source, "commit", "-qm", "base")
             environment = RunEnvironment.create(
                 source, base / "state",
@@ -325,6 +367,35 @@ class RunEnvironmentTests(unittest.TestCase):
 
 
 class LocalAdapterTests(unittest.TestCase):
+    def test_bridge_and_reviewer_use_absolute_trusted_source_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            source = base / "trusted-source"
+            worktree = base / "worktree"
+            state = base / "state"
+            worktree.mkdir()
+            adapter = LocalAdapter(worktree, state, source_root=source)
+            calls = []
+
+            def fake_run(args, timeout=900, check=True, env=None):
+                calls.append(list(args))
+                output = "JOB-1\n" if "dispatch" in args else "VERDICT: APPROVE\n"
+                return subprocess.CompletedProcess(args, 0, output, "")
+
+            adapter._run = fake_run
+            self.assertEqual("JOB-1", adapter.dispatch_qwen("bounded task"))
+            review = adapter.review("review it", "diff")
+            self.assertTrue(review.ok)
+            python = str(source / ".venv-server" / "bin" / "python")
+            self.assertEqual(
+                [python, str(source / "tools" / "mikrofix_bridge.py")],
+                calls[0][:2],
+            )
+            self.assertEqual(
+                [python, str(source / "tools" / "mikrofix_local_agent.py")],
+                calls[1][:2],
+            )
+
     def test_syntax_check_includes_unstaged_staged_and_untracked_python(self):
         adapter = LocalAdapter(Path("/worktree"), Path("/state"),
                                source_root=Path("/source"))

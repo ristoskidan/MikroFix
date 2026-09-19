@@ -602,6 +602,11 @@ def system_command(request: CommandRequest) -> dict[str, object]:
     structured project endpoints. Administrator mode additionally invokes
     pkexec, whose password dialog is owned by the operating system.
     """
+    if EXPECTED_RUN_ID:
+        raise HTTPException(
+            status_code=403,
+            detail="system_command is disabled for supervised executor runs",
+        )
     lease = require_lease()
     working_directory = safe_path(request.working_directory)
     if not working_directory.is_dir():
@@ -721,6 +726,11 @@ def _screen_geometry() -> tuple[int, int]:
 
 @app.post("/v1/desktop/action", dependencies=[Depends(authenticate)])
 def desktop_action(request: DesktopActionRequest) -> dict[str, object]:
+    if EXPECTED_RUN_ID:
+        raise HTTPException(
+            status_code=403,
+            detail="desktop_action is disabled for supervised executor runs",
+        )
     lease = require_lease()
     width, height = _screen_geometry()
     if request.action in {"move_pointer", "click", "double_click"}:

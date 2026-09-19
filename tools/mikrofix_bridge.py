@@ -1,0 +1,1090 @@
+#!/usr/bin/env python3
+
+import argparse
+import fcntl
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+
+BASE = Path(
+    os.environ.get(
+        "MIKROFIX_BRIDGE_HOME",
+        str(Path.home() / ".local/share/mikrofix-bridge"),
+    )
+).expanduser().resolve()
+CONFIG_FILE = Path(
+    os.environ.get("MIKROFIX_BRIDGE_CONFIG", str(BASE / "config.json"))
+).expanduser().resolve()
+JOBS = BASE / "jobs"
+LOGS = BASE / "logs"
+
+
+def now():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def load_config():
+    with CONFIG_FILE.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+CFG = load_config()
+
+OLLAMA = CFG["ollama_url"]
+MODEL = CFG["model"]
+EXECUTOR = CFG["executor_url"].rstrip("/")
+TOKEN_FILE = Path(CFG["token_file"])
+PROJECT = Path(CFG["project"])
+SYSTEM_PROMPT = Path(CFG["system_prompt"])
+MAX_STEPS = int(CFG.get("max_steps", 30))
+NUM_CTX = int(CFG.get("num_ctx", 65536))
+
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "project_status",
+            "description": "Vrne trenutno stanje MikroFIX projekta.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_read",
+            "description": "Prebere izbrani del datoteke v MikroFIX projektu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "default": 1
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200000,
+                        "default": 240
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_list",
+            "description": "Izpiše datoteke in mape v MikroFIX projektu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "default": "."
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "default": 200
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_search",
+            "description": "Išče besedilo po datotekah MikroFIX projekta.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 500
+                    },
+                    "path": {
+                        "type": "string",
+                        "default": "."
+                    },
+                    "file_glob": {
+                        "type": ["string", "null"]
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200,
+                        "default": 80
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_diff",
+            "description": "Vrne trenutni git diff oziroma spremembe projekta.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_apply_patch",
+            "description": "Nadzorovano uporabi unified diff patch na MikroFIX projektu.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128000
+                    },
+                    "summary": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 300
+                    }
+                },
+                "required": ["patch", "summary"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_replace",
+            "description": "Varno zamenja en sam natancen besedilni blok v odobreni projektni datoteki.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old": {"type": "string", "minLength": 1, "maxLength": 128000},
+                    "new": {"type": "string", "maxLength": 128000},
+                    "summary": {"type": "string", "minLength": 3, "maxLength": 300}
+                },
+                "required": ["path", "old", "new", "summary"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_run_check",
+            "description": "Zažene enega od dovoljenih preverjevalnih profilov.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "enum": [
+                            "local_agent_tests",
+                            "desktop_unit_tests",
+                            "central_api_tests",
+                            "syntax_changed_python"
+                        ]
+                    }
+                },
+                "required": ["profile"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "system_command",
+            "description": "Preko nadzorovanega MikroFIX executorja izvede dovoljen sistemski ukaz.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000
+                    },
+                    "purpose": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 500
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "default": "."
+                    },
+                    "administrator": {
+                        "type": "boolean",
+                        "default": False
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 900,
+                        "default": 300
+                    }
+                },
+                "required": ["command", "purpose"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_inspect",
+            "description": "Vrne podatke o trenutnem namizju in oknih.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_action",
+            "description": "Izvede nadzorovano dejanje na lokalnem namizju.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "move_pointer",
+                            "click",
+                            "double_click",
+                            "type_text",
+                            "press_key",
+                            "scroll",
+                            "focus_window"
+                        ]
+                    },
+                    "x": {"type": ["integer", "null"]},
+                    "y": {"type": ["integer", "null"]},
+                    "button": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5,
+                        "default": 1
+                    },
+                    "text": {
+                        "type": ["string", "null"]
+                    },
+                    "key": {
+                        "type": ["string", "null"]
+                    },
+                    "amount": {
+                        "type": ["integer", "null"],
+                        "minimum": -20,
+                        "maximum": 20
+                    },
+                    "window_id": {
+                        "type": ["integer", "null"],
+                        "minimum": 1
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    }
+]
+
+
+TOOL_ENDPOINTS = {
+    "project_status": ("GET", "/v1/project/status"),
+    "project_read": ("POST", "/v1/project/read"),
+    "project_list": ("POST", "/v1/project/list"),
+    "project_search": ("POST", "/v1/project/search"),
+    "project_diff": ("GET", "/v1/project/diff"),
+    "project_apply_patch": ("POST", "/v1/project/apply-patch"),
+    "project_replace": ("POST", "/v1/project/replace"),
+    "project_run_check": ("POST", "/v1/project/run-check"),
+    "system_command": ("POST", "/v1/system/command"),
+    "desktop_inspect": ("GET", "/v1/desktop/inspect"),
+    "desktop_action": ("POST", "/v1/desktop/action")
+}
+
+
+def atomic_json(path, obj):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+    os.replace(tmp, path)
+
+
+def request_json(url, method="GET", data=None, headers=None, timeout=900):
+    hdrs = dict(headers or {})
+
+    body = None
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        hdrs["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers=hdrs,
+        method=method
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read()
+
+            if not raw:
+                return {}
+
+            text = raw.decode("utf-8")
+            return json.loads(text)
+
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"HTTP {e.code} za {url}: {body}"
+        ) from e
+
+    except urllib.error.URLError as e:
+        raise RuntimeError(
+            f"Povezava ni uspela za {url}: {e}"
+        ) from e
+
+
+def token():
+    return TOKEN_FILE.read_text(
+        encoding="utf-8"
+    ).strip()
+
+
+def executor_request(method, path, data=None):
+    return request_json(
+        EXECUTOR + path,
+        method=method,
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token()}"
+        }
+    )
+
+
+def execute_tool(name, arguments):
+    if name not in TOOL_ENDPOINTS:
+        raise RuntimeError(f"Neznano orodje: {name}")
+
+    method, path = TOOL_ENDPOINTS[name]
+
+    if method == "GET":
+        return executor_request(method, path)
+
+    return executor_request(method, path, arguments)
+
+
+def call_qwen(messages):
+    return request_json(
+        OLLAMA,
+        method="POST",
+        data={
+            "model": MODEL,
+            "stream": False,
+            "keep_alive": "30m",
+            "options": {"num_ctx": NUM_CTX},
+            "messages": messages,
+            "tools": TOOLS
+        },
+        timeout=900
+    )
+
+
+def next_job_id():
+    counter = BASE / "counter"
+
+    with counter.open("a+", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+        f.seek(0)
+        raw = f.read().strip()
+
+        n = int(raw) + 1 if raw else 1
+
+        f.seek(0)
+        f.truncate()
+        f.write(str(n))
+        f.flush()
+
+        return f"MF-{datetime.now().year}-{n:04d}"
+
+
+def job_dir(job_id):
+    return JOBS / job_id
+
+
+def job_file(job_id):
+    return job_dir(job_id) / "job.json"
+
+
+def load_job(job_id):
+    p = job_file(job_id)
+
+    if not p.exists():
+        raise RuntimeError(f"Naloga {job_id} ne obstaja.")
+
+    with p.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_job(job):
+    atomic_json(
+        job_file(job["id"]),
+        job
+    )
+
+
+def write_log(job_id, text):
+    p = job_dir(job_id) / "log.txt"
+
+    line = f"[{now()}] {text}"
+
+    with p.open("a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+    print(line, flush=True)
+
+
+def create_job(task):
+    job_id = next_job_id()
+    d = job_dir(job_id)
+    d.mkdir(parents=True)
+
+    job = {
+        "id": job_id,
+        "task": task,
+        "status": "queued",
+        "created_at": now(),
+        "started_at": None,
+        "finished_at": None,
+        "steps": 0,
+        "result": None,
+        "error": None
+    }
+
+    save_job(job)
+
+    return job
+
+
+def runtime_system_prompt():
+    prompt = SYSTEM_PROMPT.read_text(
+        encoding="utf-8"
+    )
+
+    addition = """
+    
+--- MIKROFIX BRIDGE RUNTIME ---
+
+Deluješ preko lokalnega MikroFIX bridge izvajalca.
+
+Ko potrebuješ dejanske podatke ali želiš nekaj spremeniti,
+uporabi razpoložljiva orodja.
+
+Ne trdi, da je bilo nekaj prebrano, spremenjeno ali preverjeno,
+če za to nisi prejel rezultata ustreznega orodja.
+
+Po spremembah uporabi primeren preverjevalni profil, kadar je to
+smiselno.
+
+Ko je naloga končana, podaj kratek in konkreten končni povzetek.
+"""
+
+    return prompt + addition
+
+
+def process_job(job_id):
+    job = load_job(job_id)
+
+    if job["status"] not in {"queued", "running"}:
+        return
+
+    job["status"] = "running"
+    job["started_at"] = now()
+    job["error"] = None
+    save_job(job)
+
+    write_log(job_id, f"Začenjam nalogo: {job['task']}")
+
+    messages = [
+        {
+            "role": "system",
+            "content": runtime_system_prompt()
+        },
+        {
+            "role": "user",
+            "content": job["task"]
+        }
+    ]
+
+    tool_use_count = 0
+
+    try:
+        for step in range(1, MAX_STEPS + 1):
+            job["steps"] = step
+            save_job(job)
+
+            write_log(
+                job_id,
+                f"Qwen korak {step}/{MAX_STEPS}"
+            )
+
+            response = call_qwen(messages)
+
+            message = response.get("message", {})
+            tool_calls = message.get("tool_calls") or []
+
+            if not tool_calls:
+                result = (
+                    message.get("content") or ""
+                ).strip()
+
+                # Model ne sme zaključiti projektne naloge,
+                # ne da bi dejansko uporabil vsaj eno orodje.
+                if tool_use_count == 0:
+                    write_log(
+                        job_id,
+                        "Qwen je poskusil zaključiti brez uporabe orodij; zahtevam dejanski pregled."
+                    )
+
+                    messages.append(message)
+
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Ne zaključuj še. Naloga zahteva dejanski pregled projekta. "
+                            "Uporabi razpoložljiva projektna orodja "
+                            "(project_status, project_list, project_search, project_read "
+                            "in po potrebi project_diff), preveri dejansko stanje "
+                            "in šele nato pripravi končni odgovor."
+                        )
+                    })
+
+                    continue
+
+                if not result:
+                    write_log(
+                        job_id,
+                        "Qwen je vrnil prazen končni odgovor; zahtevam besedni povzetek."
+                    )
+
+                    messages.append(message)
+
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Orodja si že uporabil. Zdaj ne kliči dodatnih orodij, "
+                            "ampak napiši jasen končni odgovor uporabniku. "
+                            "Povzemi konkretne ugotovitve, kaj si preveril in "
+                            "kaj predlagaš kot naslednje korake. "
+                            "Končni odgovor ne sme biti prazen."
+                        )
+                    })
+
+                    continue
+
+                job["status"] = "completed"
+                job["finished_at"] = now()
+                job["result"] = result
+                save_job(job)
+
+                (job_dir(job_id) / "result.txt").write_text(
+                    result + "\n",
+                    encoding="utf-8"
+                )
+
+                write_log(job_id, "Naloga končana.")
+                return
+
+            messages.append(message)
+
+            for call in tool_calls:
+                fn = call.get("function", {})
+                name = fn.get("name")
+                arguments = fn.get("arguments", {})
+
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        arguments = {}
+
+                tool_use_count += 1
+
+                write_log(
+                    job_id,
+                    f"TOOL {name}: "
+                    + json.dumps(
+                        arguments,
+                        ensure_ascii=False
+                    )
+                )
+
+                try:
+                    result = execute_tool(
+                        name,
+                        arguments
+                    )
+
+                    tool_result = {
+                        "ok": True,
+                        "result": result
+                    }
+
+                    write_log(
+                        job_id,
+                        f"TOOL {name}: OK"
+                    )
+
+                except Exception as e:
+                    tool_result = {
+                        "ok": False,
+                        "error": str(e)
+                    }
+
+                    write_log(
+                        job_id,
+                        f"TOOL {name}: ERROR: {e}"
+                    )
+
+                messages.append({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": json.dumps(
+                        tool_result,
+                        ensure_ascii=False
+                    )
+                })
+
+        raise RuntimeError(
+            f"Dosežena omejitev {MAX_STEPS} Qwen korakov."
+        )
+
+    except Exception as e:
+        job = load_job(job_id)
+        job["status"] = "failed"
+        job["finished_at"] = now()
+        job["error"] = str(e)
+        save_job(job)
+
+        write_log(
+            job_id,
+            f"Naloga je spodletela: {e}"
+        )
+
+
+def queued_jobs():
+    result = []
+
+    for d in sorted(JOBS.iterdir()):
+        if not d.is_dir():
+            continue
+
+        p = d / "job.json"
+
+        if not p.exists():
+            continue
+
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            continue
+
+        if job.get("status") == "queued":
+            result.append(job["id"])
+
+    return result
+
+
+def recover_jobs():
+    for d in JOBS.iterdir():
+        if not d.is_dir():
+            continue
+
+        p = d / "job.json"
+
+        if not p.exists():
+            continue
+
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                job = json.load(f)
+        except Exception:
+            continue
+
+        if job.get("status") == "running":
+            job["status"] = "queued"
+            job["error"] = None
+            atomic_json(p, job)
+
+
+def latest_job():
+    jobs = []
+
+    for d in JOBS.iterdir():
+        p = d / "job.json"
+
+        if not p.exists():
+            continue
+
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                jobs.append(json.load(f))
+        except Exception:
+            pass
+
+    if not jobs:
+        return None
+
+    jobs.sort(
+        key=lambda j: j.get("created_at", ""),
+        reverse=True
+    )
+
+    return jobs[0]
+
+
+def render_monitor(job=None):
+    # Clear screen + cursor home.
+    print("\033[2J\033[H", end="")
+
+    print("=" * 74)
+    print("                    MikroFIX - lokalni agenti")
+    print("=" * 74)
+    print()
+    print(f"Model:     {MODEL}")
+    print(f"Ollama:    {OLLAMA}")
+    print(f"Executor:  {EXECUTOR}")
+    print()
+
+    if not job:
+        print("STATUS: čakam na nalogo")
+        print()
+        print("Pošlji nalogo z:")
+        print('  bridge dispatch --task "..."')
+        print()
+        print("CTRL+C za izhod.")
+        return
+
+    print(f"NALOGA:    {job.get('id')}")
+    print(f"STATUS:    {job.get('status')}")
+    print(f"KORAK:     {job.get('steps', 0)}/{MAX_STEPS}")
+    print(f"ZAČETEK:   {job.get('started_at') or '-'}")
+    print()
+    print("NAVODILO:")
+    print(job.get("task", ""))
+    print()
+
+    log_file = job_dir(job["id"]) / "log.txt"
+
+    print("-" * 74)
+    print("DOGAJANJE")
+    print("-" * 74)
+
+    if log_file.exists():
+        try:
+            lines = log_file.read_text(
+                encoding="utf-8",
+                errors="replace"
+            ).splitlines()
+
+            for line in lines[-12:]:
+                print(line)
+        except Exception as e:
+            print(f"Napaka pri branju loga: {e}")
+    else:
+        print("Čakam na prvi zapis ...")
+
+    if job.get("status") == "completed":
+        print()
+        print("=" * 74)
+        print("REZULTAT")
+        print("=" * 74)
+        print()
+        print(job.get("result") or "(prazen rezultat)")
+        print()
+        print("=" * 74)
+
+    elif job.get("status") == "failed":
+        print()
+        print("=" * 74)
+        print("NAPAKA")
+        print("=" * 74)
+        print()
+        print(job.get("error") or "(neznana napaka)")
+
+    print()
+    print("CTRL+C za izhod.")
+
+
+def monitor(once=False):
+    lock_path = BASE / "monitor.lock"
+    lock = lock_path.open("w")
+
+    try:
+        fcntl.flock(
+            lock.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB
+        )
+    except BlockingIOError:
+        print("Monitor že teče.")
+        return 1
+
+    recover_jobs()
+
+    worker = None
+    active_job_id = None
+
+    try:
+        while True:
+            # Če worker ne teče, poberi naslednjo queued nalogo.
+            if worker is None or not worker.is_alive():
+                if active_job_id:
+                    try:
+                        finished = load_job(active_job_id)
+                    except Exception:
+                        finished = None
+
+                    # Pri --once ostani z rezultatom na zaslonu,
+                    # nato končaj po kratkem zaključnem prikazu.
+                    if (
+                        once
+                        and finished
+                        and finished.get("status")
+                        in {"completed", "failed"}
+                    ):
+                        render_monitor(finished)
+                        return 0
+
+                queue = queued_jobs()
+
+                if queue:
+                    active_job_id = queue[0]
+
+                    worker = threading.Thread(
+                        target=process_job,
+                        args=(active_job_id,),
+                        daemon=True
+                    )
+
+                    worker.start()
+
+            # Prikaži trenutno aktivno ali zadnjo nalogo.
+            job = None
+
+            if active_job_id:
+                try:
+                    job = load_job(active_job_id)
+                except Exception:
+                    job = None
+
+            if job is None:
+                job = latest_job()
+
+            render_monitor(job)
+
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\nMonitor zaprt.")
+        return 0
+
+def show_status(job_id=None):
+    if job_id:
+        job = load_job(job_id)
+
+        print(json.dumps(
+            job,
+            ensure_ascii=False,
+            indent=2
+        ))
+
+        return
+
+    jobs = []
+
+    for d in JOBS.iterdir():
+        p = d / "job.json"
+
+        if not p.exists():
+            continue
+
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                jobs.append(json.load(f))
+        except Exception:
+            pass
+
+    jobs.sort(
+        key=lambda j: j.get("created_at", ""),
+        reverse=True
+    )
+
+    for job in jobs[:20]:
+        print(
+            f"{job['id']:15} "
+            f"{job['status']:10} "
+            f"{job['created_at']}  "
+            f"{job['task'][:70]}"
+        )
+
+
+def show_result(job_id):
+    job = load_job(job_id)
+
+    if job["status"] == "completed":
+        print(job.get("result") or "")
+        return
+
+    if job["status"] == "failed":
+        print(
+            f"Naloga {job_id} je spodletela:",
+            file=sys.stderr
+        )
+        print(job.get("error") or "", file=sys.stderr)
+        sys.exit(1)
+
+    print(
+        f"{job_id}: {job['status']}"
+    )
+
+
+def health():
+    print("=== MikroFIX bridge health ===")
+
+    checks = [
+        ("Config", CONFIG_FILE.exists()),
+        ("Token", TOKEN_FILE.exists()),
+        ("Projekt", PROJECT.is_dir()),
+        ("System prompt", SYSTEM_PROMPT.is_file())
+    ]
+
+    for name, ok in checks:
+        print(
+            f"{name:16}: {'OK' if ok else 'MANJKA'}"
+        )
+
+    if not all(ok for _, ok in checks):
+        sys.exit(1)
+
+    try:
+        r = executor_request(
+            "GET",
+            "/health"
+        )
+        print("Executor API    : OK")
+        print(
+            "  "
+            + json.dumps(
+                r,
+                ensure_ascii=False
+            )[:300]
+        )
+    except Exception as e:
+        print(f"Executor API    : NAPAKA - {e}")
+
+    try:
+        r = request_json(
+            OLLAMA.rsplit("/api/chat", 1)[0]
+            + "/api/version"
+        )
+        print(
+            f"Ollama API      : OK - "
+            f"{r.get('version', '?')}"
+        )
+    except Exception as e:
+        print(f"Ollama API      : NAPAKA - {e}")
+
+
+def main():
+    JOBS.mkdir(parents=True, exist_ok=True)
+    LOGS.mkdir(parents=True, exist_ok=True)
+
+    parser = argparse.ArgumentParser(
+        description="MikroFIX lokalni Qwen bridge"
+    )
+
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True
+    )
+
+    p = sub.add_parser("dispatch")
+    p.add_argument(
+        "--task",
+        required=True
+    )
+
+    p = sub.add_parser("status")
+    p.add_argument(
+        "job_id",
+        nargs="?"
+    )
+
+    p = sub.add_parser("result")
+    p.add_argument("job_id")
+
+    p = sub.add_parser("monitor")
+    p.add_argument(
+        "--once",
+        action="store_true"
+    )
+
+    sub.add_parser("health")
+
+    args = parser.parse_args()
+
+    if args.command == "dispatch":
+        job = create_job(args.task)
+
+        print(job["id"])
+        return
+
+    if args.command == "status":
+        show_status(args.job_id)
+        return
+
+    if args.command == "result":
+        show_result(args.job_id)
+        return
+
+    if args.command == "monitor":
+        sys.exit(monitor(args.once))
+
+    if args.command == "health":
+        health()
+        return
+
+
+if __name__ == "__main__":
+    main()
