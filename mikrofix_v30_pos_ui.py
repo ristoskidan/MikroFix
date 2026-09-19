@@ -293,7 +293,7 @@ class PosWindow:
             ("F3  T1 DELO", lambda: self.add_service("T1")),
             ("F4  T2 DELO", lambda: self.add_service("T2")),
             ("F5  NOV RAČUN", self.new_invoice),
-            ("F6  SERVIS ZA RAČUN", self.choose_ready_service),
+            ("F6  NAPRAVE ZA PREVZEM", self.choose_ready_service),
             ("F7  RABAT", self.edit_discount),
             ("F8  UPN QR ZA BANKO", self.print_upn_qr),
             ("F9  STRANKA", self.open_customer_dialog),
@@ -4161,7 +4161,7 @@ class PosWindow:
     def choose_ready_service(self):
         if self.issued_id:
             return
-        if not self.service_loader:
+        if not self.central_mode and not self.service_loader:
             messagebox.showwarning(
                 "Blagajna", "Povezava s servisom ni na voljo.", parent=self.win
             )

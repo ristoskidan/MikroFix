@@ -12,7 +12,21 @@ lokalni model GPT-OSS opravi še skeptični pregled. Lastnika se vključi, kadar
 manjka poslovna, pravna, davčna, varnostna ali druga odločitev z dejanskimi
 posledicami. Take odločitve ne sprejmeš sam.
 
-## Obvezni začetek vsake naloge
+## Razvrstitev naloge pred začetkom
+
+Najprej ugotovi, ali je naloga projektna ali splošna.
+
+- **Projektna naloga** neposredno zahteva pregled ali spremembo kode,
+  dokumentacije, testov, nastavitev ali stanja projekta MikroFIX. Zanjo uporabi
+  spodnji projektni začetek in ustrezna projektna orodja.
+- **Splošna naloga** zahteva raziskavo, razlago, vprašalnik, osnutek besedila
+  ali pregled priloženega gradiva, projekt MikroFIX pa ni predmet naloge. Pri
+  taki nalogi ne kliči `project_status`, `project_list`, `project_read`,
+  `project_diff` ali drugih projektnih orodij samo zato, ker so na voljo.
+  Odgovori neposredno iz naloge in priloženega gradiva. Če nimaš dostopa do
+  potrebnega aktualnega uradnega vira, to jasno označi in ne izmišljaj podatka.
+
+## Obvezni začetek projektne naloge
 
 1. Preberi ustrezne module v `docs/local_agents/pravila/`, vedno tudi
    `00_JEDRO.md`, ter `docs/local_agents/LEKCIJE.md`.
@@ -20,6 +34,21 @@ posledicami. Take odločitve ne sprejmeš sam.
 3. Kratko povej načrt, merila uspeha in kaj nameravaš spremeniti.
 4. Najprej uporabi strukturirana projektna orodja; poljubni terminal uporabi le,
    ko z njimi naloge res ni mogoče opraviti.
+
+## Splošna pravila kakovosti odgovora
+
+- Zahtevano obliko, razdelke, stolpce, prioritete in omejitve števila elementov
+  upoštevaj dobesedno ter jih pred oddajo preveri.
+- Ne izmišljaj dejstev, pragov, rokov, obrazcev, kratic, dokazil, pristojnih
+  organov ali pogostosti kontrol. Negotovost označi **ZA PREVERITI**.
+- Pravno ali davčno obveznost loči od priporočene dobre prakse in notranje
+  odločitve naročnika.
+- Uporabljaj ustaljene slovenske strokovne izraze; ne izmišljaj prevodov ali
+  tujih kratic. Podobnih pojmov ne združuj.
+- Pri popravku upoštevaj vse potrjene pripombe koordinatorja in preveri, da se
+  ista napaka ne ponovi drugje v odgovoru.
+- Odgovori neposredno, brez ponavljanja naloge, opisovanja pripravljenosti ali
+  poročanja o orodjih, ki niso pomembna za rezultat.
 
 ## Dovoljene naloge
 
@@ -42,6 +71,10 @@ posledicami. Take odločitve ne sprejmeš sam.
   izrecne uporabnikove zahteve in potrditve.
 - Ne spreminjaj produkcijskih podatkov, poslovne baze, FURS nastavitev,
   certifikatov ali bančnih nastavitev.
+- Nikoli ne vračaj ali čisti sprememb zunaj izrecnega obsega naloge. Brez
+  izrecnega navodila koordinatorja ne uporabi `git checkout`, `git restore`,
+  `git reset` ali enakovrednega ukaza za povrnitev datotek. Obstoječi tuji diff
+  ohrani in samo prijavi morebiten konflikt.
 - Ne spreminjaj poslovnih pravil. Če koda in kanon nista skladna, konflikt
   prijavi in počakaj na odločitev.
 - Ne trdi, da je naloga končana, dokler ne pregledaš diff-a in ne izvedeš

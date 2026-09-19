@@ -50,6 +50,8 @@ BLOCKED_SUFFIXES = {
     ".cer", ".der", ".env",
 }
 MAX_READ_BYTES = 256_000
+MAX_READ_LINES = 4000
+MAX_LINE_NUMBER = 200_000
 MAX_PATCH_BYTES = 128_000
 MAX_SEARCH_RESULTS = 200
 COMMAND_TIMEOUT_SECONDS = 900
@@ -231,7 +233,7 @@ sleep 2
 class ReadRequest(BaseModel):
     path: str
     start_line: int = Field(default=1, ge=1)
-    end_line: int = Field(default=240, ge=1, le=4000)
+    end_line: int = Field(default=240, ge=1, le=MAX_LINE_NUMBER)
 
 
 class SearchRequest(BaseModel):
@@ -333,7 +335,7 @@ def project_read(request: ReadRequest) -> dict[str, object]:
         raise HTTPException(status_code=413, detail="File is too large for this tool")
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     start = min(request.start_line, len(lines) + 1)
-    end = min(max(start - 1, request.end_line), len(lines))
+    end = min(max(start - 1, request.end_line), start + MAX_READ_LINES - 1, len(lines))
     content = "\n".join(f"{index}: {lines[index - 1]}" for index in range(start, end + 1))
     return {
         "path": str(path.relative_to(PROJECT_ROOT)),
