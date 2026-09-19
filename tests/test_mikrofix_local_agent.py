@@ -176,6 +176,7 @@ class LocalAgentBridgeTests(unittest.TestCase):
             material_file=None,
         )
         self.assertIn("AGENT: qwen", header)
+        self.assertIn("######################## QWEN", header)
         self.assertIn("ZAHTEVA:\npreveri konkurencnost", header)
         self.assertIn("MODULI: 40.md", header)
         self.assertNotIn("skrivno gradivo", header)

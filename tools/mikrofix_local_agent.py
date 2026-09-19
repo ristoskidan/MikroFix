@@ -311,8 +311,10 @@ def console_header(
 ) -> str:
     material = str(material_file.expanduser().resolve()) if material_file else "brez datoteke"
     modules = ", ".join(path.name for path, _ in context_files)
+    visible_agent = "QWEN" if agent == "qwen" else "GPT-OSS"
     return f"""
 ========================================================================
+######################## {visible_agent} ########################
 NALOGA: {task_id}
 CAS: {created_at}
 AGENT: {agent} — {role}
@@ -452,6 +454,31 @@ def main(argv: list[str] | None = None) -> int:
         answer = stream_ollama(args.ollama_url, payload, console_handle)
         if not answer.strip():
             raise RuntimeError("Model ni vrnil koncnega vsebinskega odgovora.")
+    except KeyboardInterrupt:
+        interrupted = transcript(
+            task_id=task_id,
+            created_at=created_at,
+            agent=args.agent,
+            model=agent["model"],
+            role=agent["role"],
+            context_path=context_path,
+            context_hash=context_hash,
+            context_files=context_files,
+            selected_scopes=selected_scopes,
+            lessons_path=lessons_path,
+            lessons_hash=lessons_hash,
+            prompt=prompt,
+            answer="NALOGA JE BILA PREKINJENA PRED KONČNIM ODGOVOROM.",
+            status="PREKINJENO",
+        )
+        atomic_write(log_path, interrupted)
+        console_write(
+            console_handle,
+            f"\n--- PREKINJENO ---\nDNEVNIK: {log_path}\n",
+        )
+        console_handle.close()
+        print("\nLokalna naloga je bila prekinjena.", file=sys.stderr)
+        return 130
     except (RuntimeError, json.JSONDecodeError) as exc:
         failed = transcript(
             task_id=task_id,

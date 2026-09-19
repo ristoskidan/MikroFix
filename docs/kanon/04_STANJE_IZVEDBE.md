@@ -1,6 +1,6 @@
 # MikroFIX — stanje izvedbe
 
-Datum dokumenta: 15. 9. 2026
+Datum dokumenta: 19. 9. 2026
 
 ## Namen
 
@@ -79,14 +79,17 @@ stenski zapis; če bi dal negativen rezultat, se izračun izrecno blokira namest
 tihega popravka na nič. Strežniško označevanje nenavadnega razmerja med
 stenskim in izmerjenim časom še ni izvedeno.
 
-Centralna pogodba in strežnik podpirata način `ZERO_BALANCE` samo pri izdaji
-servisnega osnutka v Blagajni. Odjemalec ne pošilja vrstic in ne pošilja
-plačila; strežnik iz zaklenjenih pozitivnih vrstic deterministično izdela
-negativne izravnalne pare. Integracijski test preverja ničelni seštevek,
-nespremenjeno zalogo, obračunski zaključek servisa in identičen rezultat
-ponovitve iste operacije. Uporabniška izbira ter predogled tega načina v
-Blagajni še nista izvedena, zato funkcija skozi uporabniški vmesnik še ni
-dostopna.
+Centralna pogodba, strežnik in Blagajna podpirajo način `ZERO_BALANCE` samo pri
+izdaji centralnega servisnega osnutka. Blagajnik ga izrecno izbere v plačilnem
+koraku. Predogled ohrani vse pozitivne zaklenjene vrstice v prvotnem vrstnem
+redu in za njimi pokaže enake negativne izravnalne vrstice v istem vrstnem
+redu; seštevek je `0,00 EUR`, plačila in UPN ni. Izbira se hrani v lokalnem
+varnostnem osnutku ter je del kontrolnega odtisa predogleda. Drugi F10 pošlje
+samo `payments=[]` in `settlement_mode=ZERO_BALANCE`, brez odjemalskih vrstic;
+strežnik končni posnetek sestavi iz svojega zaklenjenega osnutka. Neposredna
+prodaja tega načina nima. Ciljani testi preverjajo vrstni red, predogled PDF,
+prazna plačila, dejanski runtime klic in prepoved pri neposredni prodaji. Ročni
+preizkus celotnega zaslona še ostaja potreben.
 
 ## Naslednja revizija kode
 
@@ -115,7 +118,7 @@ testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
 Lokalna modela ob posvetu prejmeta celoten urejeni kanonski sklop 01–06;
 `06_LOKALNI_AGENTI.md` dodatno določa njune meje. Modela sta samo pregledovalca:
 nimata izvajalnih pravic,
-ne določata poslovnih pravil in njun odgovor ni dokaz izvedbe. Mistral 7B je
+ne določata poslovnih pravil in njun odgovor ni dokaz izvedbe. Qwen 3.5 9B je
 predviden za običajni tehnični pregled, GPT-OSS 20B pa za občasno drugo
 skeptično mnenje. Codex ostane nadzornik, doda najmanjši potreben nalogi
 specifičen izsek ter sam preveri rezultat.

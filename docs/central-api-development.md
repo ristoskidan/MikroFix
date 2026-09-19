@@ -204,6 +204,14 @@ dvojno izdajo in dvojno številko. Gotovinski račun se ne šteje za dokončno
 izdanega in servis se ne zapre, dokler isti fiskalni dogodek nima potrjenega EOR.
 Dejanski centralni omrežni izvajalnik s produkcijskim potrdilom ostaja izključen.
 
+Centralni servisni osnutek ima v plačilnem koraku tudi izrecno izbiro
+`ZERO_BALANCE`. Blagajna pri prvem F10 izdela neknjižen predogled z vsemi
+pozitivnimi vrsticami in nato pripadajočimi negativnimi vrsticami v istem
+vrstnem redu. Pri drugem F10 ne pošlje teh vrstic ali plačila, temveč samo
+strežniško izbiro `settlement_mode=ZERO_BALANCE` in `payments=[]`. Izbira je
+del lokalnega varnostnega osnutka in kontrolnega odtisa predogleda. Neposredna
+prodaja tega načina ne ponuja.
+
 F9 lahko išče aktivne centralne partnerje in pridobi nepotrjen AJPES-predlog.
 Ločeni `CreatePartner` zahteva izrecno potrditev pregleda, je idempotenten in ne
 omogoča spremembe ali deaktivacije obstoječega partnerja. Pred izdajo se izbrana

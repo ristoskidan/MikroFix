@@ -67,6 +67,30 @@ PAYMENT_LABELS = {
 }
 
 
+def zero_balance_preview_lines(lines):
+    """Mirror the server's public order: all originals, then all reversals."""
+    originals = list(lines)
+    if not originals:
+        raise PosError("Ničelni servisni račun nima nobene postavke.")
+    for line in originals:
+        if not line.source_locked or dec(line.quantity) <= 0:
+            raise PosError(
+                "Ničelni račun je dovoljen samo iz pozitivnih zaklenjenih "
+                "vrstic servisnega osnutka."
+            )
+    balancing = [
+        replace(
+            line,
+            quantity=-dec(line.quantity),
+            origin_kind="ZERO_BALANCE",
+            source_locked=True,
+            central_line_id=f"{line.central_line_id}:ZERO_BALANCE",
+        )
+        for line in originals
+    ]
+    return originals + balancing
+
+
 class PosWindow:
     def __init__(
         self, parent, *, runtime, office_db, inventory_db, service_db, pdf_dir,
@@ -91,6 +115,7 @@ class PosWindow:
         self.central_cashier = central_cashier
         self.central_mode = central_cashier is not None
         self.central_service_draft_id = None
+        self.service_settlement_mode = tk.StringVar(value="STANDARD")
         self.central_invoice = None
         self.central_quote = None
         self.central_operation_id = None
@@ -572,6 +597,7 @@ class PosWindow:
             "premise_id": self.premise_var.get(),
             "service_id": self.service_id,
             "central_service_draft_id": self.central_service_draft_id,
+            "service_settlement_mode": self.service_settlement_mode.get(),
             "used_device_ids": sorted(self.used_device_ids),
             "used_agreement_id": self.used_agreement_id,
             "used_agreement_path": str(self.used_agreement_path or ""),
@@ -749,6 +775,16 @@ class PosWindow:
                 self.premise_var.set(premise)
             self.service_id = payload.get("service_id")
             self.central_service_draft_id = payload.get("central_service_draft_id")
+            restored_settlement = str(
+                payload.get("service_settlement_mode") or "STANDARD"
+            ).upper()
+            self.service_settlement_mode.set(
+                "ZERO_BALANCE"
+                if self.central_mode
+                and self.central_service_draft_id
+                and restored_settlement == "ZERO_BALANCE"
+                else "STANDARD"
+            )
             self.used_device_ids = {int(value) for value in payload.get("used_device_ids", [])}
             self.used_agreement_id = payload.get("used_agreement_id")
             agreement_path = str(payload.get("used_agreement_path") or "")
@@ -2092,6 +2128,35 @@ class PosWindow:
         """Združi interne +/- dogodke; javni račun nikoli ne kaže korekcijskih vrstic."""
         return net_public_pos_lines(self.lines)
 
+    def _zero_balance_selected(self):
+        return bool(
+            self.central_mode
+            and self.central_service_draft_id
+            and self.service_settlement_mode.get() == "ZERO_BALANCE"
+        )
+
+    def _checkout_total(self):
+        return Decimal("0.00") if self._zero_balance_selected() else self.total
+
+    def _preview_invoice_lines(self):
+        if self._zero_balance_selected():
+            return zero_balance_preview_lines(self.lines)
+        if self.central_mode and not self.central_service_draft_id:
+            return self.central_preview_lines()
+        return self.public_invoice_lines()
+
+    def settlement_changed(self):
+        if not (self.central_mode and self.central_service_draft_id):
+            self.service_settlement_mode.set("STANDARD")
+        self.invalidate_review()
+        self.payment_changed()
+        self._schedule_draft_save()
+
+    def select_standard_payment(self):
+        self.service_settlement_mode.set("STANDARD")
+        self.payment_changed()
+        self._schedule_draft_save()
+
     def remove_line(self):
         idx = self.selected_line_index()
         if idx is None or self.issued_id:
@@ -2140,7 +2205,9 @@ class PosWindow:
         except PosError as exc:
             self.state_var.set(str(exc))
         self.total = total.quantize(Decimal("0.01"))
-        self.total_var.set(f"SKUPAJ: {self.total:.2f} EUR".replace(".", ","))
+        self.total_var.set(
+            f"SKUPAJ: {self._checkout_total():.2f} EUR".replace(".", ",")
+        )
         self.used_frame.pack_forget()
         if self.used_device_ids:
             self.used_frame.pack(fill="x", padx=12, pady=(0, 7))
@@ -2193,7 +2260,16 @@ class PosWindow:
             self.total = Decimal("0")
         mode = self.payment_mode.get()
         self.invalidate_review()
-        if mode == "CASH":
+        if self._zero_balance_selected():
+            self.bank_received.set(False)
+            self.cash_amount.set("0.00")
+            self.bank_amount.set("0.00")
+            self.cash_received.set("0.00")
+            self.cash_entry.configure(state="disabled")
+            self.bank_entry.configure(state="disabled")
+            self.bank_received_check.configure(state="disabled")
+            self.total_var.set("SKUPAJ: 0,00 EUR")
+        elif mode == "CASH":
             self.bank_received.set(False)
             self.cash_amount.set(f"{self.total:.2f}")
             self.bank_amount.set("0.00")
@@ -2235,6 +2311,8 @@ class PosWindow:
             self.change_var.set("Vračilo: –")
 
     def payment_values(self):
+        if self._zero_balance_selected():
+            return {}
         mode = self.payment_mode.get()
         if mode == "CASH":
             return {"CASH": self.total}
@@ -2268,6 +2346,7 @@ class PosWindow:
                 for line in self.lines
             ],
             "payments": {key: str(value) for key, value in self.payment_values().items()},
+            "service_settlement_mode": self.service_settlement_mode.get(),
             "cash_received": str(dec(self.cash_received.get())),
             "bank_received": bool(self.bank_received.get()),
             "customer": self.customer_values(),
@@ -2303,11 +2382,7 @@ class PosWindow:
             if self.used_device_ids and not self.used_signed.get():
                 raise PosError("Za obnovljeno rabljeno napravo manjka podpisan 12-mesečni dogovor.")
             premise = self.selected_premise()
-            public_lines = (
-                self.central_preview_lines()
-                if self.central_mode and not self.central_service_draft_id
-                else self.public_invoice_lines()
-            )
+            public_lines = self._preview_invoice_lines()
             calculated = [calculate_line(x, self.labor_floor) for x in public_lines]
             summary = "\n".join(
                 f"• {x.source.name}: {x.line_total:.2f} EUR "
@@ -2325,8 +2400,9 @@ class PosWindow:
             customer = self.customer_values()
             if ask_confirmation and not messagebox.askyesno(
                 "Končni pregled",
-                f"{summary}\n\nSKUPAJ: {self.total:.2f} EUR\n"
-                f"Plačilo: {PAYMENT_LABELS.get(self.payment_mode.get(), self.payment_mode.get())}\n"
+                f"{summary}\n\nSKUPAJ: {self._checkout_total():.2f} EUR\n"
+                f"Plačilo: "
+                f"{'Brez plačila – ničelna izravnava' if self._zero_balance_selected() else PAYMENT_LABELS.get(self.payment_mode.get(), self.payment_mode.get())}\n"
                 f"Kupec: {customer.get('name') or 'Končni kupec'}\n"
                 f"Naslov: {customer.get('address') or '-'}\n"
                 f"Telefon/e-pošta: {customer.get('phone') or '-'} / {customer.get('email') or '-'}\n"
@@ -2717,8 +2793,11 @@ class PosWindow:
             dialog.destroy()
 
         dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        checkout_amount_var = tk.StringVar(
+            value=f"ZA PLAČILO: {self._checkout_total():.2f} EUR".replace(".", ",")
+        )
         tk.Label(
-            dialog, text=f"ZA PLAČILO: {self.total:.2f} EUR".replace(".", ","),
+            dialog, textvariable=checkout_amount_var,
             bg=DARK, fg="white", font=("Segoe UI", 21, "bold"), padx=18, pady=14,
         ).pack(fill="x")
 
@@ -2744,6 +2823,37 @@ class PosWindow:
 
         pay = ttk.LabelFrame(dialog, text="NAČIN PLAČILA", padding=12)
         pay.pack(fill="x", padx=14, pady=8)
+
+        def update_dialog_settlement():
+            self.settlement_changed()
+            checkout_amount_var.set(
+                f"ZA PLAČILO: {self._checkout_total():.2f} EUR".replace(".", ",")
+            )
+            prepare_dialog_upn()
+
+        def select_standard_dialog_payment():
+            self.select_standard_payment()
+            checkout_amount_var.set(
+                f"ZA PLAČILO: {self._checkout_total():.2f} EUR".replace(".", ",")
+            )
+            prepare_dialog_upn()
+
+        if self.central_mode and self.central_service_draft_id:
+            ttk.Checkbutton(
+                pay,
+                text=(
+                    "IZRAVNALNI RAČUN 0,00 EUR – ohrani pozitivne vrstice in "
+                    "samodejno doda enake negativne vrstice"
+                ),
+                variable=self.service_settlement_mode,
+                onvalue="ZERO_BALANCE",
+                offvalue="STANDARD",
+                command=update_dialog_settlement,
+            ).grid(row=0, column=0, columnspan=4, padx=7, pady=(2, 8), sticky="w")
+            payment_row = 1
+        else:
+            self.service_settlement_mode.set("STANDARD")
+            payment_row = 0
         payment_choices = []
         if "CASH" in self.enabled_payment_methods:
             payment_choices.append(("GOTOVINA", "CASH"))
@@ -2756,15 +2866,15 @@ class PosWindow:
         for col, (label, value) in enumerate(payment_choices):
             ttk.Radiobutton(
                 pay, text=label, variable=self.payment_mode, value=value,
-                command=self.payment_changed,
-            ).grid(row=0, column=col, padx=7, pady=4, sticky="w")
+                command=select_standard_dialog_payment,
+            ).grid(row=payment_row, column=col, padx=7, pady=4, sticky="w")
         ttk.Checkbutton(
             pay, text="TRR del je dejansko prejet (obvezno pri razdeljenem plačilu)",
             variable=self.bank_received, command=self.invalidate_review,
-        ).grid(row=1, column=0, columnspan=4, padx=7, pady=(5, 0), sticky="w")
+        ).grid(row=payment_row + 1, column=0, columnspan=4, padx=7, pady=(5, 0), sticky="w")
 
         cash = tk.Frame(pay, bg="#F7F9FA", highlightthickness=1, highlightbackground="#D8DEE3")
-        cash.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 4))
+        cash.grid(row=payment_row + 2, column=0, columnspan=4, sticky="ew", pady=(10, 4))
         tk.Label(cash, text="PREJETI BANKOVEC / GOTOVINA", bg="#F7F9FA", fg=GRAY).grid(row=0, column=0, padx=10, pady=(8, 2), sticky="w")
         received_entry = ttk.Entry(cash, textvariable=self.cash_received, font=("Segoe UI", 17, "bold"), width=15)
         received_entry.grid(row=1, column=0, padx=10, pady=(0, 9), sticky="w")
@@ -2780,6 +2890,10 @@ class PosWindow:
         ttk.Label(upn, textvariable=upn_status).pack(side="left", fill="x", expand=True)
 
         def prepare_dialog_upn(*, open_after=False):
+            if self._zero_balance_selected():
+                self.payment_upn_path = None
+                upn_status.set("Izravnalni račun ne vsebuje plačila ali UPN naloga.")
+                return True
             try:
                 self.payment_upn_path = generate_upnqr_pdf(
                     output_dir=self.pdf_dir, amount=self.total,
@@ -2993,6 +3107,8 @@ class PosWindow:
         return "break"
 
     def _central_payment_payload(self):
+        if self._zero_balance_selected():
+            return []
         result = []
         for method, amount in self.payment_values().items():
             confirmed = method in {"CASH", "CARD"}
@@ -3036,6 +3152,7 @@ class PosWindow:
                     electronic_device_id=self.runtime.electronic_device,
                     billing_customer=self._central_billing_customer(),
                     payments=self._central_payment_payload(),
+                    settlement_mode=self.service_settlement_mode.get(),
                 )
             else:
                 issued = self.central_cashier.issue_direct_sale(
@@ -3903,6 +4020,7 @@ class PosWindow:
         self.used_agreement_id=None; self.used_agreement_path=None
         self.issued_id=None; self.issued_no=""; self.review_ready=False; self.service_id=None
         self.central_service_draft_id=None; self.central_invoice=None
+        self.service_settlement_mode.set("STANDARD")
         self.central_quote=None; self.central_operation_id=None
         self.print_confirmed=False
         self.preview_a4_path=None; self.preview_receipt_path=None; self.review_fingerprint=""
@@ -4220,6 +4338,7 @@ class PosWindow:
             self.lines.clear()
             self.used_device_ids.clear()
         self.central_service_draft_id = str(draft["draft_id"])
+        self.service_settlement_mode.set("STANDARD")
         self.service_id = None
         self._set_customer(dict(payload.get("customer") or {}), partner_id=None)
         for line in payload.get("billing_lines", []):

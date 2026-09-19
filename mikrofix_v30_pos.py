@@ -116,9 +116,12 @@ def calculate_line(line: PosLine, labor_floor: object = 22) -> CalculatedLine:
     requested = max(Decimal("0"), min(Decimal("100"), dec(line.requested_discount_pct)))
     if qty == 0 or base <= 0:
         raise PosError(f"Postavka »{line.name}« nima veljavne količine ali cene.")
-    if qty < 0 and str(line.origin_kind or "") != "POS_CORRECTION":
+    if qty < 0 and str(line.origin_kind or "") not in {
+        "POS_CORRECTION", "ZERO_BALANCE",
+    }:
         raise PosError(
-            f"Negativna postavka »{line.name}« mora biti evidentirana kot korekcija."
+            f"Negativna postavka »{line.name}« mora biti evidentirana kot "
+            "korekcija ali ničelna izravnava."
         )
 
     if line.line_kind == "ARTICLE":
