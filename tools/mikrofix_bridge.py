@@ -2,8 +2,10 @@
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -11,6 +13,19 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+try:
+    from tools.mikrofix_completion import (
+        CompletionError,
+        CompletionOutbox,
+        validate_thread_id,
+    )
+except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
+    from mikrofix_completion import (  # type: ignore[no-redef]
+        CompletionError,
+        CompletionOutbox,
+        validate_thread_id,
+    )
 
 
 BASE = Path(
@@ -24,6 +39,7 @@ CONFIG_FILE = Path(
 ).expanduser().resolve()
 JOBS = BASE / "jobs"
 LOGS = BASE / "logs"
+COMPLETION_OUTBOX = BASE / "completion-outbox"
 
 
 def now():
@@ -333,8 +349,29 @@ def atomic_json(path, obj):
 
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
 
     os.replace(tmp, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def atomic_text(path, text):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def request_json(url, method="GET", data=None, headers=None, timeout=900):
@@ -474,14 +511,19 @@ def write_log(job_id, text):
     print(line, flush=True)
 
 
-def create_job(task):
+def create_job(task, *, display_name=None, codex_thread_id=None):
+    codex_thread_id = validate_thread_id(codex_thread_id)
     job_id = next_job_id()
     d = job_dir(job_id)
     d.mkdir(parents=True)
 
     job = {
         "id": job_id,
+        "display_name": (
+            (display_name or f"MikroFIX local task {job_id}").strip()[:120] or job_id
+        ),
         "task": task,
+        "codex_thread_id": codex_thread_id,
         "status": "queued",
         "created_at": now(),
         "started_at": None,
@@ -494,6 +536,59 @@ def create_job(task):
     save_job(job)
 
     return job
+
+
+def _evidence_payload(job):
+    paths = []
+    hashes = {}
+    for name in ("job.json", "result.txt"):
+        path = job_dir(job["id"]) / name
+        if path.is_file():
+            resolved = str(path.resolve())
+            paths.append(resolved)
+            hashes[resolved] = hashlib.sha256(path.read_bytes()).hexdigest()
+    log_path = job_dir(job["id"]) / "log.txt"
+    # The path is stable even before the first fallback line creates the log.
+    paths.append(str(log_path.resolve()))
+    return paths, hashes
+
+
+def notify_job_completion(job, *, runner=None, notify_runner=None):
+    """Persist one terminal event and attempt the bound thread wake at most once."""
+    if job.get("status") not in {"completed", "failed"}:
+        return None
+    paths, hashes = _evidence_payload(job)
+    kwargs = {}
+    if runner is not None:
+        kwargs["runner"] = runner
+    kwargs["notify_runner"] = notify_runner or subprocess.run
+    outbox = CompletionOutbox(
+        COMPLETION_OUTBOX,
+        thread_id=job.get("codex_thread_id"),
+        **kwargs,
+    )
+    state = "COMPLETED" if job["status"] == "completed" else "FAILED"
+    result = outbox.publish({
+        "job_id": job["id"],
+        "display_name": job.get("display_name") or job["id"],
+        "state": state,
+        "summary": "Inspect the durable bridge evidence.",
+        "test_result": "No separate named-test result is stored; inspect bridge evidence.",
+        "risks": "Local model output still requires Codex review.",
+        "blocked_need": (
+            "Inspect the persisted bridge error and decide the next bounded step."
+            if state == "FAILED" else ""
+        ),
+        "evidence_paths": paths,
+        "evidence_sha256": hashes,
+    })
+    if result["status"] == "queued_no_thread":
+        write_log(
+            job["id"],
+            "Codex nit ni bila vezana ob dispatchu; trajni completion dogodek "
+            f"je v {COMPLETION_OUTBOX / 'events' / (result['event_id'] + '.json')}.",
+        )
+    return result
 
 
 def runtime_system_prompt():
@@ -519,13 +614,16 @@ smiselno.
 Ko je naloga končana, podaj kratek in konkreten končni povzetek.
 """
 
-    return prompt + addition
+    lead_rules = (PROJECT / "AGENTS.md").read_text(encoding="utf-8")
+    return prompt + addition + "\n\n--- PERSISTENT LOCAL-LEAD RULES ---\n\n" + lead_rules
 
 
 def process_job(job_id):
     job = load_job(job_id)
 
     if job["status"] not in {"queued", "running"}:
+        if job["status"] in {"completed", "failed"}:
+            notify_job_completion(job)
         return
 
     job["status"] = "running"
@@ -533,7 +631,10 @@ def process_job(job_id):
     job["error"] = None
     save_job(job)
 
-    write_log(job_id, f"Začenjam nalogo: {job['task']}")
+    write_log(
+        job_id,
+        f"Začenjam nalogo {job.get('display_name') or job_id} ({job_id}): {job['task']}",
+    )
 
     messages = [
         {
@@ -612,17 +713,14 @@ def process_job(job_id):
 
                     continue
 
+                atomic_text(job_dir(job_id) / "result.txt", result + "\n")
                 job["status"] = "completed"
                 job["finished_at"] = now()
                 job["result"] = result
                 save_job(job)
 
-                (job_dir(job_id) / "result.txt").write_text(
-                    result + "\n",
-                    encoding="utf-8"
-                )
-
                 write_log(job_id, "Naloga končana.")
+                notify_job_completion(job)
                 return
 
             messages.append(message)
@@ -700,6 +798,7 @@ def process_job(job_id):
             job_id,
             f"Naloga je spodletela: {e}"
         )
+        notify_job_completion(job)
 
 
 def queued_jobs():
@@ -796,7 +895,7 @@ def render_monitor(job=None):
         print("CTRL+C za izhod.")
         return
 
-    print(f"NALOGA:    {job.get('id')}")
+    print(f"NALOGA:    {job.get('display_name') or job.get('id')} ({job.get('id')})")
     print(f"STATUS:    {job.get('status')}")
     print(f"KORAK:     {job.get('steps', 0)}/{MAX_STEPS}")
     print(f"ZAČETEK:   {job.get('started_at') or '-'}")
@@ -955,7 +1054,7 @@ def show_status(job_id=None):
             f"{job['id']:15} "
             f"{job['status']:10} "
             f"{job['created_at']}  "
-            f"{job['task'][:70]}"
+            f"{(job.get('display_name') or job['task'])[:70]}"
         )
 
 
@@ -1044,6 +1143,7 @@ def main():
         "--task",
         required=True
     )
+    p.add_argument("--name")
 
     p = sub.add_parser("status")
     p.add_argument(
@@ -1065,8 +1165,16 @@ def main():
     args = parser.parse_args()
 
     if args.command == "dispatch":
-        job = create_job(args.task)
+        try:
+            job = create_job(
+                args.task,
+                display_name=args.name,
+                codex_thread_id=os.environ.get("CODEX_THREAD_ID") or None,
+            )
+        except CompletionError as exc:
+            parser.error(str(exc))
 
+        # stdout is a machine-readable protocol consumed by LocalAdapter.
         print(job["id"])
         return
 

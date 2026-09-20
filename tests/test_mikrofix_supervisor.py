@@ -31,6 +31,7 @@ Supervisor = supervisor_module.Supervisor
 atomic_write_json = supervisor_module.atomic_write_json
 initial_run = supervisor_module.initial_run
 validate_plan = supervisor_module.validate_plan
+THREAD_ID = "12345678-1234-5678-9234-567812345678"
 
 
 def plan(**overrides):
@@ -45,6 +46,13 @@ def plan(**overrides):
         }],
         "max_retries_per_atom": 3,
         "final_gate": "AWAIT_CODEX_REVIEW",
+        "constraints": ["Keep the change bounded"],
+        "context_links": {
+            "canon": ["docs/canon.md"],
+            "code": ["app.py"],
+            "tests": ["tests/test_app.py"],
+        },
+        "acceptance_criteria": ["Named checks pass with recorded evidence"],
     }
     value.update(overrides)
     return value
@@ -181,6 +189,71 @@ class SupervisorTests(unittest.TestCase):
         state = self.supervisor.load()
         self.assertEqual(Stage.BLOCKED.value, state["stage"])
         self.assertIn("worker must be inspected", state["feedback"])
+
+    def test_terminal_callback_is_bound_idempotent_and_points_to_evidence(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        atomic_write_json(
+            self.state,
+            initial_run(plan(), self.adapter.snapshot(), codex_thread_id=THREAD_ID),
+        )
+        supervisor = Supervisor(self.state, self.adapter, completion_runner=runner)
+        for _ in range(20):
+            supervisor.step()
+            if supervisor.load()["stage"] in {
+                Stage.AWAIT_CODEX_REVIEW.value, Stage.BLOCKED.value
+            }:
+                break
+        self.assertEqual(1, len(calls))
+        message = json.loads(calls[0][0][-1])
+        self.assertEqual("READY_FOR_CODEX_REVIEW", message["state"])
+        self.assertEqual("Prepare one bounded change", message["display_name"])
+        event = json.loads(Path(message["event_path"]).read_text(encoding="utf-8"))
+        self.assertIn(str(self.state.resolve()), event["payload"]["evidence_paths"])
+        supervisor.step()
+        self.assertEqual(1, len(calls))
+
+    def test_queued_and_running_states_do_not_notify_or_change_lease(self):
+        calls = []
+        self.adapter.job_results = [("running", "")]
+        atomic_write_json(
+            self.state,
+            initial_run(plan(), self.adapter.snapshot(), codex_thread_id=THREAD_ID),
+        )
+        supervisor = Supervisor(
+            self.state, self.adapter,
+            completion_runner=lambda argv, **kwargs: calls.append((argv, kwargs)),
+        )
+        supervisor.step()
+        self.assertFalse(supervisor.step())
+        self.assertEqual([], calls)
+        self.assertTrue(self.adapter.lease)
+
+    def test_blocked_callback_maps_state_and_concrete_need(self):
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        blocked_plan = plan(max_retries_per_atom=1)
+        atomic_write_json(
+            self.state,
+            initial_run(blocked_plan, self.adapter.snapshot(), codex_thread_id=THREAD_ID),
+        )
+        self.adapter.job_results = [("failed", "worker unavailable")]
+        supervisor = Supervisor(self.state, self.adapter, completion_runner=runner)
+        supervisor.step()
+        supervisor.step()
+        self.assertEqual(Stage.BLOCKED.value, supervisor.load()["stage"])
+        message = json.loads(calls[0][0][-1])
+        self.assertEqual("BLOCKED", message["state"])
+        event = json.loads(Path(message["event_path"]).read_text(encoding="utf-8"))
+        self.assertIn("worker unavailable", event["payload"]["blocked_need"])
         self.assertEqual(1, len(self.adapter.jobs))
 
 
@@ -235,6 +308,7 @@ class PlanValidationTests(unittest.TestCase):
 
     def test_rejects_control_plane_paths(self):
         for protected in (
+            "AGENTS.md",
             "tools/mikrofix_supervisor.py",
             "tools/mikrofix_bridge.py",
             "tools/local_executor/server.py",
@@ -246,6 +320,107 @@ class PlanValidationTests(unittest.TestCase):
             with self.subTest(protected=protected), self.assertRaises(ValueError):
                 validate_plan(plan(allowed_files=[protected]))
 
+    def test_rejects_missing_constraints(self):
+        with self.assertRaises(ValueError) as error:
+            invalid = plan()
+            del invalid["constraints"]
+            validate_plan(invalid)
+        self.assertIn("constraints", str(error.exception).lower())
+
+    def test_rejects_empty_and_wrong_type_constraints_distinctly(self):
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            validate_plan(plan(constraints=[]))
+        with self.assertRaisesRegex(ValueError, "must be a list"):
+            validate_plan(plan(constraints="bounded"))
+
+    def test_rejects_empty_context_links_sections(self):
+        invalid = plan()
+        invalid["context_links"]["canon"] = []
+        with self.assertRaises(ValueError) as error:
+            validate_plan(invalid)
+        self.assertIn("canon", str(error.exception).lower())
+
+    def test_rejects_missing_acceptance_criteria(self):
+        with self.assertRaises(ValueError) as error:
+            invalid = plan()
+            del invalid["acceptance_criteria"]
+            validate_plan(invalid)
+        self.assertIn("acceptance_criteria", str(error.exception).lower())
+
+    def test_rejects_unsafe_context_paths(self):
+        invalid = plan()
+        invalid["context_links"]["canon"] = ["../outside.md"]
+        with self.assertRaises(ValueError) as error:
+            validate_plan(invalid)
+        self.assertIn("unsafe path", str(error.exception).lower())
+
+    def test_rejects_unknown_plan_atom_and_context_fields(self):
+        invalid = plan(extra="no")
+        with self.assertRaisesRegex(ValueError, "unknown plan fields"):
+            validate_plan(invalid)
+        invalid = plan()
+        invalid["atoms"][0]["extra"] = "no"
+        with self.assertRaisesRegex(ValueError, "unknown atom fields"):
+            validate_plan(invalid)
+        invalid = plan()
+        invalid["context_links"]["other"] = ["x"]
+        with self.assertRaisesRegex(ValueError, "unknown context_links fields"):
+            validate_plan(invalid)
+
+    def test_normalizes_required_output_and_rejects_duplicate_links(self):
+        normalized = validate_plan(plan(
+            objective="  bounded change  ",
+            constraints=["  no scope drift  "],
+        ))
+        self.assertEqual(normalized["objective"], "bounded change")
+        self.assertEqual(normalized["constraints"], ["no scope drift"])
+        invalid = plan()
+        invalid["context_links"]["code"] = ["app.py", "app.py"]
+        with self.assertRaisesRegex(ValueError, "unique"):
+            validate_plan(invalid)
+
+    def test_qwen_prompt_contains_all_required_fields(self):
+        """Test da qwen_prompt vrne prompt s celimi obveznimi polji."""
+        plan = {
+            "run_id": "TEST-001",
+            "objective": "Dodaj novo funkcionalnost",
+            "base_checkpoint": "origin/main",
+            "allowed_files": ["app.py"],
+            "atoms": [
+                {
+                    "id": "ATOM-001",
+                    "task": "Popravi datoteko A",
+                    "expected_files": ["app.py"],
+                    "checks": ["syntax_changed_python"],
+                }
+            ],
+            "max_retries_per_atom": 2,
+            "final_gate": "AWAIT_CODEX_REVIEW",
+            "constraints": ["Ne dodaj novih funkcionalnosti brez pregleda Codexa"],
+            "context_links": {
+                "canon": ["docs/pravila.md"],
+                "code": ["app.py"],
+                "tests": ["tests/test_mikrofix_supervisor.py"],
+            },
+            "acceptance_criteria": ["Vsi testi morajo uspeti", "Syntax check mora uspeti"],
+        }
+        prompt = supervisor_module.qwen_prompt({
+            "plan": validate_plan(plan), "atom_index": 0, "attempt": 0,
+            "feedback": "",
+        })
+        self.assertIn("=== LOCAL EXECUTION REQUIRED ===", prompt)
+        self.assertIn("constraints", prompt)
+        self.assertIn("acceptance_criteria", prompt)
+        self.assertIn("base_checkpoint", prompt)
+        self.assertIn("context_links", prompt)
+        self.assertIn("canon", prompt)
+        self.assertIn("code", prompt)
+        self.assertIn("tests", prompt)
+        self.assertIn("Codex — vodja projekta in končni pregled", prompt)
+
+    def test_supervised_run_requires_gui_prompt_no_yes(self):
+        lease_request = {"command": "grant-lease", "minutes": 15}
+        self.assertNotIn("--yes", str(lease_request))
 
 class RunEnvironmentTests(unittest.TestCase):
     def git(self, root, *args):

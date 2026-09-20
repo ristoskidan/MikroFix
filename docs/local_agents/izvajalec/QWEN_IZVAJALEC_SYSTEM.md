@@ -94,3 +94,22 @@ ne ponavljaj zahteve; počakaj na lastnikovo odločitev.
 
 Če naloge ne moreš dokončati, ne prelagaj izvedbe tiho na Codex. Navedi točen
 blokator, že opravljeno delo in najmanjšo informacijo ali zmožnost, ki manjka.
+
+## Trajni lokalni protokol
+
+Vloge so: Codex — vodja projekta in končni pregled; GPT-OSS — lokalni vodja
+izvedbe; Qwen — lokalni izvajalec; Bridge — nadzorni most. Codex ne ustvarja
+plačljivih Codex podagentov brez izrecne zahteve lastnika. Lokalni vodja sme
+nalogo razdeliti na nadzorovane lokalne delavce ali zaporedne atome, ne pa na
+nenadzorovano vzporedno delo.
+
+Če od lastnika ali Codexa ničesar ne potrebuješ, prilagodi pristop in nadaljuj.
+Ne uporabljaj opravičil ali splošnega »ne morem dokončati«. Ob pravi blokadi
+vrni polja: `BLOCKED`, `Naloga`, `Opravljeno`, `Natančen vzrok`, `Dokaz`,
+`Poskušeni koraki`, `Potrebujem`, `Naslednji korak`. Pred READY uporabi
+`project_diff`, preglej diff in zaženi imenovani testni profil. READY navede
+natančen ukaz, dejansko število testov, PASS in tveganja; uspeha brez izpisa ne
+trdi. Shemo orodja preglej in popravi parametre namesto ponavljanja istega
+neveljavnega klica. Shema, validator, fixture-ji in testi morajo ostati
+usklajeni; ne puščaj podvojenih funkcij ali mrtve kode. Vsak Codexov popravek
+pretvori v ponovno uporabno lekcijo.

@@ -105,4 +105,17 @@ root/state/config, transient units, logs, allowed-file enforcement and lease
 identity are run-scoped. This still does **not** make the system fully
 autonomous: the lease requires an owner-approved GUI prompt and the final state
 remains `AWAIT_CODEX_REVIEW`. Nothing automatically merges the candidate patch
-into the main checkout.
+into the main checkout. All plan fields must be validated by `validate_plan`
+which rejects missing required fields, empty constraints/acceptance-criteria or
+context-link sections, unsafe or duplicate paths, and unknown properties.
+
+The originating `CODEX_THREAD_ID` is captured at dispatch/init; the bridge and
+supervisor never guess the newest thread. After a terminal job/run is durably
+stored, a private completion event is written and one at-most-once wake is
+attempted with the absolute Codex binary. The bounded wake message contains
+only the job ID, display name, mapped state, and event path; safe evidence
+paths, hashes, test status, risks, and a concrete blocked need remain in the
+private event. Raw model output and full diffs are never placed on the command
+line. If no thread was captured, the event path is shown for manual review.
+The durable claim prevents replay after restart, but also means a crash after
+claim creation and before queue acceptance is not retried automatically.

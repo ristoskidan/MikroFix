@@ -30,6 +30,14 @@ from typing import Any, Callable, Protocol
 import urllib.error
 import urllib.request
 
+try:
+    from tools.mikrofix_completion import CompletionOutbox, validate_thread_id
+except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
+    from mikrofix_completion import (  # type: ignore[no-redef]
+        CompletionOutbox,
+        validate_thread_id,
+    )
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_STATE_DIR = Path.home() / ".local" / "state" / "mikrofix-supervisor"
@@ -39,10 +47,14 @@ DEFAULT_BRIDGE_CONFIG = (
 MAX_RETRIES_LIMIT = 3
 DEFAULT_JOB_TIMEOUT_SECONDS = 1800
 CONTROL_PLANE_FILES = {
+    "AGENTS.md",
     "tools/mikrofix_supervisor.py",
     "tools/mikrofix_bridge.py",
+    "tools/mikrofix_completion.py",
     "tools/mikrofix_local_agent.py",
     "tests/test_mikrofix_supervisor.py",
+    "tests/test_mikrofix_bridge.py",
+    "tests/test_mikrofix_completion.py",
     "tests/test_local_executor_server.py",
     "tests/test_mikrofix_local_agent.py",
     "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
@@ -113,6 +125,7 @@ def atomic_write_immutable_json(path: Path, value: dict[str, Any]) -> str:
         raise
     os.chmod(path, 0o400)
     return hashlib.sha256(payload).hexdigest()
+
 
 
 @dataclass(frozen=True)
@@ -738,55 +751,158 @@ def is_control_plane_path(path: str) -> bool:
 
 
 def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(plan, dict):
+        raise ValueError("plan must be an object")
+    allowed_keys = {
+        "run_id", "objective", "base_checkpoint", "allowed_files", "atoms",
+        "max_retries_per_atom", "job_timeout_seconds", "final_gate",
+        "constraints", "context_links", "acceptance_criteria",
+    }
+    unknown_keys = sorted(set(plan) - allowed_keys)
+    if unknown_keys:
+        raise ValueError("unknown plan fields: " + ", ".join(unknown_keys))
     required_strings = ("run_id", "objective", "base_checkpoint")
     for key in required_strings:
-        if not isinstance(plan.get(key), str) or not plan[key].strip():
+        if key not in plan:
+            raise ValueError(f"missing required field: {key}")
+        if not isinstance(plan[key], str):
+            raise ValueError(f"{key} must be a string")
+        if not plan[key].strip():
             raise ValueError(f"{key} must be a non-empty string")
     if not re.fullmatch(r"[A-Za-z0-9_-]+", plan["run_id"]):
         raise ValueError("run_id may contain only letters, digits, hyphen and underscore")
-    allowed_raw = plan.get("allowed_files")
-    if not isinstance(allowed_raw, list) or not allowed_raw:
+    if "allowed_files" not in plan:
+        raise ValueError("missing required field: allowed_files")
+    allowed_raw = plan["allowed_files"]
+    if not isinstance(allowed_raw, list):
+        raise ValueError("allowed_files must be a list")
+    if not allowed_raw:
         raise ValueError("allowed_files must be a non-empty list")
-    allowed = list(dict.fromkeys(safe_relative_path(item) for item in allowed_raw))
+    allowed = [safe_relative_path(item) for item in allowed_raw]
+    if len(set(allowed)) != len(allowed):
+        raise ValueError("allowed_files entries must be unique")
     protected = sorted(path for path in allowed if is_control_plane_path(path))
     if protected:
         raise ValueError("allowed_files contains protected control-plane paths: "
                          + ", ".join(protected))
-    atoms_raw = plan.get("atoms")
-    if not isinstance(atoms_raw, list) or not atoms_raw:
+    if "atoms" not in plan:
+        raise ValueError("missing required field: atoms")
+    atoms_raw = plan["atoms"]
+    if not isinstance(atoms_raw, list):
+        raise ValueError("atoms must be a list")
+    if not atoms_raw:
         raise ValueError("atoms must be a non-empty list")
     atoms: list[dict[str, Any]] = []
     atom_ids: set[str] = set()
     for raw in atoms_raw:
         if not isinstance(raw, dict):
             raise ValueError("each atom must be an object")
+        atom_unknown = sorted(set(raw) - {"id", "task", "checks", "expected_files"})
+        if atom_unknown:
+            raise ValueError("unknown atom fields: " + ", ".join(atom_unknown))
         atom_id = raw.get("id")
         task = raw.get("task")
-        if not isinstance(atom_id, str) or not atom_id.strip() or atom_id in atom_ids:
-            raise ValueError("atom ids must be unique non-empty strings")
-        if not isinstance(task, str) or not task.strip():
+        if not isinstance(atom_id, str):
+            raise ValueError("atom id must be a string")
+        atom_id = atom_id.strip()
+        if not atom_id:
+            raise ValueError("atom id must be a non-empty string")
+        if atom_id in atom_ids:
+            raise ValueError("atom ids must be unique")
+        if not isinstance(task, str):
+            raise ValueError(f"atom {atom_id} task must be a string")
+        if not task.strip():
             raise ValueError(f"atom {atom_id} task must be a non-empty string")
         checks = raw.get("checks", ["syntax_changed_python"])
-        if not isinstance(checks, list) or not checks:
+        if not isinstance(checks, list):
+            raise ValueError(f"atom {atom_id} checks must be a list")
+        if not checks:
             raise ValueError(f"atom {atom_id} checks must be a non-empty list")
+        if any(not isinstance(item, str) for item in checks):
+            raise ValueError(f"atom {atom_id} checks entries must be strings")
+        if len(set(checks)) != len(checks):
+            raise ValueError(f"atom {atom_id} checks must be unique")
         unknown = sorted(set(checks) - set(CHECK_COMMANDS))
         if unknown:
             raise ValueError(f"atom {atom_id} has unknown checks: {', '.join(unknown)}")
-        expected = [safe_relative_path(item) for item in raw.get("expected_files", [])]
+        expected_raw = raw.get("expected_files", [])
+        if not isinstance(expected_raw, list):
+            raise ValueError(f"atom {atom_id} expected_files must be a list")
+        expected = [safe_relative_path(item) for item in expected_raw]
+        if len(set(expected)) != len(expected):
+            raise ValueError(f"atom {atom_id} expected_files must be unique")
         outside = sorted(set(expected) - set(allowed))
         if outside:
             raise ValueError(f"atom {atom_id} expects files outside allowed_files: {outside}")
-        atoms.append({"id": atom_id, "task": task.strip(), "checks": checks,
+        atoms.append({"id": atom_id, "task": task.strip(), "checks": list(checks),
                       "expected_files": expected})
         atom_ids.add(atom_id)
-    retries = plan.get("max_retries_per_atom", MAX_RETRIES_LIMIT)
-    if not isinstance(retries, int) or not 1 <= retries <= MAX_RETRIES_LIMIT:
+    if "max_retries_per_atom" not in plan:
+        raise ValueError("missing required field: max_retries_per_atom")
+    retries = plan["max_retries_per_atom"]
+    if isinstance(retries, bool) or not isinstance(retries, int):
+        raise ValueError("max_retries_per_atom must be an integer")
+    if not 1 <= retries <= MAX_RETRIES_LIMIT:
         raise ValueError(f"max_retries_per_atom must be between 1 and {MAX_RETRIES_LIMIT}")
     job_timeout = plan.get("job_timeout_seconds", DEFAULT_JOB_TIMEOUT_SECONDS)
-    if not isinstance(job_timeout, int) or not 30 <= job_timeout <= 7200:
+    if isinstance(job_timeout, bool) or not isinstance(job_timeout, int):
+        raise ValueError("job_timeout_seconds must be an integer")
+    if not 30 <= job_timeout <= 7200:
         raise ValueError("job_timeout_seconds must be between 30 and 7200")
-    if plan.get("final_gate", Stage.AWAIT_CODEX_REVIEW.value) != Stage.AWAIT_CODEX_REVIEW.value:
+    if "final_gate" not in plan:
+        raise ValueError("missing required field: final_gate")
+    if plan["final_gate"] != Stage.AWAIT_CODEX_REVIEW.value:
         raise ValueError("final_gate must be AWAIT_CODEX_REVIEW")
+
+    def required_string_list(key: str) -> list[str]:
+        if key not in plan:
+            raise ValueError(f"missing required field: {key}")
+        value = plan[key]
+        if not isinstance(value, list):
+            raise ValueError(f"{key} must be a list")
+        if not value:
+            raise ValueError(f"{key} must be a non-empty list")
+        normalized = []
+        for index, item in enumerate(value):
+            if not isinstance(item, str):
+                raise ValueError(f"{key}[{index}] must be a string")
+            if not item.strip():
+                raise ValueError(f"{key}[{index}] must be non-empty")
+            normalized.append(item.strip())
+        return normalized
+
+    constraints = required_string_list("constraints")
+    acceptance = required_string_list("acceptance_criteria")
+
+    if "context_links" not in plan:
+        raise ValueError("missing required field: context_links")
+    context_raw = plan["context_links"]
+    if not isinstance(context_raw, dict):
+        raise ValueError("context_links must be an object")
+    context_unknown = sorted(set(context_raw) - {"canon", "code", "tests"})
+    if context_unknown:
+        raise ValueError("unknown context_links fields: " + ", ".join(context_unknown))
+    context: dict[str, list[str]] = {}
+    for key in ("canon", "code", "tests"):
+        if key not in context_raw:
+            raise ValueError(f"context_links missing required field: {key}")
+        values = context_raw[key]
+        if not isinstance(values, list):
+            raise ValueError(f"context_links.{key} must be a list")
+        if not values:
+            raise ValueError(f"context_links.{key} must be a non-empty list")
+        normalized = []
+        for index, item in enumerate(values):
+            try:
+                normalized.append(safe_relative_path(item))
+            except ValueError as exc:
+                raise ValueError(
+                    f"unsafe path in context_links.{key}[{index}]: {item!r}"
+                ) from exc
+        if len(set(normalized)) != len(normalized):
+            raise ValueError(f"context_links.{key} paths must be unique")
+        context[key] = normalized
+
     return {
         "run_id": plan["run_id"].strip(),
         "objective": plan["objective"].strip(),
@@ -796,6 +912,9 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "max_retries_per_atom": retries,
         "job_timeout_seconds": job_timeout,
         "final_gate": Stage.AWAIT_CODEX_REVIEW.value,
+        "constraints": constraints,
+        "context_links": context,
+        "acceptance_criteria": acceptance,
     }
 
 
@@ -803,10 +922,13 @@ def initial_run(
     plan: dict[str, Any],
     snapshot: dict[str, str],
     environment: RunEnvironment | None = None,
+    codex_thread_id: str | None = None,
 ) -> dict[str, Any]:
     run = {
         "schema_version": 1,
         "plan": validate_plan(plan),
+        "display_name": plan["objective"].strip()[:120],
+        "codex_thread_id": validate_thread_id(codex_thread_id),
         "stage": Stage.PLANNED.value,
         "atom_index": 0,
         "attempt": 0,
@@ -858,6 +980,7 @@ def qwen_prompt(run: dict[str, Any]) -> str:
     atom = plan["atoms"][run["atom_index"]]
     feedback = run.get("feedback") or "No earlier attempt."
     return (
+        "=== LOCAL EXECUTION REQUIRED ===\n"
         f"RUN {plan['run_id']} / ATOM {atom['id']} / attempt {run['attempt'] + 1}\n"
         f"Objective: {plan['objective']}\n"
         f"Task: {atom['task']}\n"
@@ -865,6 +988,16 @@ def qwen_prompt(run: dict[str, Any]) -> str:
         f"Expected files: {', '.join(atom['expected_files']) or '(not specified)'}\n"
         f"Checks that will run: {', '.join(atom['checks'])}\n"
         f"Earlier gate feedback: {feedback}\n\n"
+        f"constraints: {json.dumps(plan['constraints'], ensure_ascii=False)}\n"
+        f"acceptance_criteria: {json.dumps(plan['acceptance_criteria'], ensure_ascii=False)}\n"
+        f"base_checkpoint: {plan['base_checkpoint']}\n"
+        "context_links:\n"
+        f"  canon: {json.dumps(plan['context_links']['canon'], ensure_ascii=False)}\n"
+        f"  code: {json.dumps(plan['context_links']['code'], ensure_ascii=False)}\n"
+        f"  tests: {json.dumps(plan['context_links']['tests'], ensure_ascii=False)}\n"
+        "Roles: Codex — vodja projekta in končni pregled; GPT-OSS — lokalni vodja "
+        "izvedbe; Qwen — lokalni izvajalec; Bridge — nadzorni most. Follow the "
+        "persistent AGENTS.md rules loaded in the bridge system prompt. "
         "Make the smallest complete change. Do not modify any other file. "
         "Do not run git checkout, restore, reset, clean, commit, merge, push, "
         "or deploy. Use the project tools and report exactly what changed."
@@ -872,9 +1005,63 @@ def qwen_prompt(run: dict[str, Any]) -> str:
 
 
 class Supervisor:
-    def __init__(self, state_file: Path, adapter: Adapter):
+    def __init__(
+        self,
+        state_file: Path,
+        adapter: Adapter,
+        *,
+        completion_runner: Callable[..., Any] | None = None,
+        completion_notify_runner: Callable[..., Any] | None = None,
+    ):
         self.state_file = state_file
         self.adapter = adapter
+        self.completion_runner = completion_runner
+        self.completion_notify_runner = completion_notify_runner
+        self.last_completion: dict[str, str] | None = None
+
+    def notify_terminal(self, run: dict[str, Any]) -> dict[str, str] | None:
+        if run.get("stage") not in TERMINAL_STAGES:
+            return None
+        paths = [str(self.state_file.resolve())]
+        if run.get("checkpoint"):
+            paths.append(str(Path(run["checkpoint"]).resolve()))
+        hashes = {
+            path: file_sha256(Path(path))
+            for path in paths
+            if Path(path).is_file()
+        }
+        paths = list(hashes)
+        kwargs: dict[str, Any] = {}
+        if self.completion_runner is not None:
+            kwargs["runner"] = self.completion_runner
+        kwargs["notify_runner"] = self.completion_notify_runner or subprocess.run
+        outbox = CompletionOutbox(
+            self.state_file.parent / "completion-outbox",
+            thread_id=run.get("codex_thread_id"),
+            **kwargs,
+        )
+        blocked = run["stage"] == Stage.BLOCKED.value
+        accepted_count = len(run.get("completed_atoms", []))
+        self.last_completion = outbox.publish({
+            "job_id": run["plan"]["run_id"],
+            "display_name": run.get("display_name") or run["plan"]["objective"][:120],
+            "state": run["stage"],
+            "summary": "Inspect the durable supervisor evidence.",
+            "test_result": (
+                f"NOT COMPLETE; {accepted_count} earlier atom(s) accepted."
+                if blocked else
+                f"PASS gates recorded for {accepted_count} accepted atom(s); "
+                "exact commands and outputs are in the checkpoint manifest."
+            ),
+            "risks": (
+                "Candidate is not merged, pushed, or deployed."
+                if not blocked else "The blocked run may contain an unapproved partial change."
+            ),
+            "blocked_need": run.get("feedback", "")[:2048] if blocked else "",
+            "evidence_paths": paths,
+            "evidence_sha256": hashes,
+        })
+        return self.last_completion
 
     def load(self) -> dict[str, Any]:
         value = json.loads(self.state_file.read_text(encoding="utf-8"))
@@ -897,6 +1084,7 @@ class Supervisor:
         run = self.load()
         stage = Stage(run["stage"])
         if stage.value in TERMINAL_STAGES:
+            self.notify_terminal(run)
             return False
         if stage is Stage.NEEDS_WRITE_LEASE:
             if not self.adapter.lease_active():
@@ -927,6 +1115,7 @@ class Supervisor:
                     run["feedback"] = "Missing dispatch timestamp for active Qwen job"
                     record(run, Stage.BLOCKED, "Cannot enforce Qwen job timeout")
                     self.save(run)
+                    self.notify_terminal(run)
                     return True
                 if time.time() - dispatched_at >= timeout:
                     run["feedback"] = (
@@ -935,6 +1124,7 @@ class Supervisor:
                     )
                     record(run, Stage.BLOCKED, "Qwen job timeout reached")
                     self.save(run)
+                    self.notify_terminal(run)
                     return True
                 return False
             if status != "completed":
@@ -943,6 +1133,8 @@ class Supervisor:
                 run["qwen_result"] = result
                 record(run, Stage.DIFF_VERIFICATION, "Qwen job completed")
             self.save(run)
+            if run["stage"] in TERMINAL_STAGES:
+                self.notify_terminal(run)
             return True
         if stage is Stage.DIFF_VERIFICATION:
             current = self.adapter.snapshot()
@@ -967,6 +1159,8 @@ class Supervisor:
                     record(run, Stage.LOCAL_TESTS,
                            f"Diff accepted for files: {', '.join(sorted(changed))}")
             self.save(run)
+            if run["stage"] in TERMINAL_STAGES:
+                self.notify_terminal(run)
             return True
         if stage is Stage.LOCAL_TESTS:
             atom = run["plan"]["atoms"][run["atom_index"]]
@@ -977,6 +1171,8 @@ class Supervisor:
             else:
                 retry_or_block(run, f"Local checks failed: {result.summary}")
             self.save(run)
+            if run["stage"] in TERMINAL_STAGES:
+                self.notify_terminal(run)
             return True
         if stage is Stage.GPT_OSS_REVIEW:
             atom = run["plan"]["atoms"][run["atom_index"]]
@@ -992,6 +1188,8 @@ class Supervisor:
             if not result.ok:
                 retry_or_block(run, f"GPT-OSS rejected the atom: {result.summary}")
                 self.save(run)
+                if run["stage"] in TERMINAL_STAGES:
+                    self.notify_terminal(run)
                 return True
             run["completed_atoms"].append({
                 "id": atom["id"], "attempts": run["attempt"],
@@ -1008,6 +1206,8 @@ class Supervisor:
             else:
                 record(run, Stage.CHECKPOINT, "All atoms accepted")
             self.save(run)
+            if run["stage"] in TERMINAL_STAGES:
+                self.notify_terminal(run)
             return True
         if stage is Stage.CHECKPOINT:
             current = self.adapter.snapshot()
@@ -1022,6 +1222,7 @@ class Supervisor:
                 record(run, Stage.AWAIT_CODEX_REVIEW,
                        "Checkpoint artifact created; no merge, push, or deployment performed")
             self.save(run)
+            self.notify_terminal(run)
             return True
         raise RuntimeError(f"Unhandled stage: {stage.value}")
 
@@ -1379,7 +1580,12 @@ def main(argv: list[str] | None = None) -> int:
                 source_root=PROJECT_ROOT,
                 expected_lease=environment.lease_identity(),
             )
-            run = initial_run(validated, adapter.snapshot(), environment)
+            run = initial_run(
+                validated,
+                adapter.snapshot(),
+                environment,
+                codex_thread_id=os.environ.get("CODEX_THREAD_ID") or None,
+            )
             atomic_write_json(state_file, run)
             print(f"Initialized {run['plan']['run_id']} at {state_file}")
             print(f"Isolated worktree: {environment.worktree}")
@@ -1419,6 +1625,10 @@ def main(argv: list[str] | None = None) -> int:
             supervisor.step()
             stage = supervisor.load()["stage"]
         print(stage)
+        if supervisor.last_completion and supervisor.last_completion["status"] == "queued_no_thread":
+            event_id = supervisor.last_completion["event_id"]
+            print(f"Codex thread was not bound; durable event: "
+                  f"{state_file.parent / 'completion-outbox' / 'events' / (event_id + '.json')}")
         return 0
     require_resume_ready(manager)
     while True:
@@ -1427,6 +1637,10 @@ def main(argv: list[str] | None = None) -> int:
             progressed = supervisor.step()
             stage = supervisor.load()["stage"]
         print(f"{utc_timestamp()} {stage}", flush=True)
+        if supervisor.last_completion and supervisor.last_completion["status"] == "queued_no_thread":
+            event_id = supervisor.last_completion["event_id"]
+            print(f"Codex thread was not bound; durable event: "
+                  f"{state_file.parent / 'completion-outbox' / 'events' / (event_id + '.json')}")
         if stage in TERMINAL_STAGES or stage == Stage.NEEDS_WRITE_LEASE.value:
             return 0
         if not progressed:
