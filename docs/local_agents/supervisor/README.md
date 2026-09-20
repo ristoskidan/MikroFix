@@ -60,9 +60,10 @@ Initialization creates, but does not launch:
 - the exact per-run lease path.
 
 The bridge process is the versioned `tools/mikrofix_bridge.py` from the trusted
-source checkout, invoked by absolute path. The GPT-OSS reviewer is likewise the
-trusted source checkout's absolute `tools/mikrofix_local_agent.py`; neither is
-loaded from the agent-editable worktree.
+source checkout, invoked by absolute path. The executor module and GPT-OSS
+reviewer are likewise loaded from the trusted source checkout; none of these
+control-plane programs is imported from the agent-editable worktree. The
+executor's data root remains the isolated candidate worktree.
 
 `workers start` manages two transient `systemd --user` units. It starts the
 executor first, waits for a private non-symlink token and `/health` identifying

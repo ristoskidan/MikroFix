@@ -53,15 +53,18 @@ CONTROL_PLANE_FILES = {
     "tools/mikrofix_completion.py",
     "tools/mikrofix_local_agent.py",
     "tools/mikrofix_agent_workspace.py",
+    "tools/mikrofix_local_manager.py",
     "tests/test_mikrofix_supervisor.py",
     "tests/test_mikrofix_bridge.py",
     "tests/test_mikrofix_completion.py",
     "tests/test_local_executor_server.py",
     "tests/test_mikrofix_local_agent.py",
     "tests/test_mikrofix_agent_workspace.py",
+    "tests/test_mikrofix_local_manager.py",
     "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
     "docs/local_agents/LEKCIJE.md",
     "docs/local_agents/WORKSPACE.md",
+    "docs/local_agents/supervisor/PLANNER_SYSTEM.md",
 }
 CONTROL_PLANE_PREFIXES = (
     "tools/local_executor/",
@@ -255,7 +258,10 @@ class RunEnvironment:
             "executor": {
                 "argv": [str(server_python), "-m", "uvicorn", "tools.local_executor.server:app",
                          "--host", "127.0.0.1", "--port", str(port)],
-                "cwd": str(worktree),
+                # Import the executor implementation from the protected control
+                # checkout. MIKROFIX_EXECUTOR_ROOT still confines its data
+                # operations to the candidate worktree.
+                "cwd": str(source_root),
                 "env": {
                     "MIKROFIX_EXECUTOR_ROOT": str(worktree),
                     "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config_dir),
@@ -447,7 +453,7 @@ class WorkerManager:
                 "argv": [server_python, "-m", "uvicorn", "tools.local_executor.server:app",
                          "--host", "127.0.0.1", "--port",
                          self.environment.executor_url.rsplit(":", 1)[-1]],
-                "cwd": str(self.environment.worktree),
+                "cwd": str(self.environment.source_root),
                 "env": self.environment.executor_env(),
             },
             "bridge": {

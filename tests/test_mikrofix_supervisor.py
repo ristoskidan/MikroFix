@@ -509,7 +509,7 @@ class RunEnvironmentTests(unittest.TestCase):
 
             metadata = json.loads(environment.metadata_file.read_text(encoding="utf-8"))
             self.assertEqual(str(environment.worktree), metadata["bridge"]["cwd"])
-            self.assertEqual(str(environment.worktree), metadata["executor"]["cwd"])
+            self.assertEqual(str(source.resolve()), metadata["executor"]["cwd"])
             self.assertEqual(str(server_python), metadata["executor"]["argv"][0])
             self.assertEqual(str(trusted_bridge), metadata["bridge"]["argv"][1])
             executor_env = metadata["executor"]["env"]
@@ -582,6 +582,7 @@ class RunEnvironmentTests(unittest.TestCase):
             metadata = json.loads(environment.metadata_file.read_text(encoding="utf-8"))
             self.assertEqual(str(repository.resolve()), metadata["repository_root"])
             self.assertEqual(str(trusted.resolve()), metadata["trusted_control_root"])
+            self.assertEqual(str(trusted.resolve()), metadata["executor"]["cwd"])
             self.assertEqual(str(trusted_python), metadata["bridge"]["argv"][0])
             self.assertEqual(str(trusted_bridge), metadata["bridge"]["argv"][1])
 
