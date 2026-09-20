@@ -207,6 +207,19 @@ deleted file mode 100644
         require_lease.assert_not_called()
         run.assert_not_called()
 
+    def test_supervised_run_rejects_executor_check_before_lease_or_python(self):
+        request = server.CheckRequest(profile="syntax_changed_python")
+        with (
+            mock.patch.object(server, "EXPECTED_RUN_ID", "supervised-run"),
+            mock.patch.object(server, "require_lease") as require_lease,
+            mock.patch.object(server, "run_command") as run_command,
+        ):
+            with self.assertRaises(HTTPException) as error:
+                server.project_run_check(request)
+        self.assertEqual(error.exception.status_code, 403)
+        require_lease.assert_not_called()
+        run_command.assert_not_called()
+
     def test_supervised_run_rejects_desktop_action_before_lease_or_xdotool(self):
         request = server.DesktopActionRequest(action="press_key", key="F1")
         with (

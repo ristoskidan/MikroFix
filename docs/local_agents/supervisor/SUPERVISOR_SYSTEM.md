@@ -22,3 +22,18 @@
     “merged”. The checkpoint is an artifact, not approval.
 11. Bridge home/config and executor root/config/state are run-scoped. Never
     fall back to the global bridge or the main checkout for an isolated run.
+12. Invoke the versioned bridge and reviewer only from absolute trusted-source
+    paths. They and every loaded system prompt/rule are protected control-plane
+    files and cannot appear in an implementation plan.
+13. A queued/running job that exceeds its bounded wait stops in `BLOCKED`.
+    Never dispatch a replacement while the earlier worker may still mutate the
+    worktree.
+14. Start, stop and lease grant share one run-scoped lifecycle lock. Start the
+    executor, verify private token and exact health/identity, then start bridge.
+    Stop in reverse order and revoke the lease.
+15. Existing transient units are trusted only after matching immutable cwd,
+    environment identity and command. Logs are private non-symlink regular
+    files prepared before systemd-run.
+16. Lease grant requires `READY` workers and a human GUI decision. Resume
+    requires both `READY` and the exact bound lease; failed preconditions must
+    not modify supervisor state.

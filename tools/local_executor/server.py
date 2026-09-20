@@ -571,6 +571,14 @@ CHECKS: dict[str, tuple[list[str], int]] = {
 
 @app.post("/v1/project/run-check", dependencies=[Depends(authenticate)])
 def project_run_check(request: CheckRequest) -> dict[str, object]:
+    if EXPECTED_RUN_ID:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "project_run_check is disabled for supervised runs; "
+                "the supervisor owns the fail-closed sandboxed test gate"
+            ),
+        )
     require_lease()
     if request.profile == "syntax_changed_python":
         changed = run_command(["git", "diff", "--name-only", "--diff-filter=ACM", "--", "*.py"]).stdout.splitlines()

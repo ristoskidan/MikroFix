@@ -10,9 +10,9 @@ Restart=on-failure
 RestartSec=5
 
 # SAFETY BOUNDARY:
-# This example is documentation only. Per-run executor and bridge-monitor
-# processes must first be launched from the reviewed environment.json. The
-# supervisor pauses at NEEDS_WRITE_LEASE and never grants its own lease.
+# This example is documentation only. Before enabling it, initialize a run,
+# execute `workers start`, and approve `grant-lease`. `run` is a `resume` alias:
+# it verifies READY workers and the bound lease but never bypasses the GUI.
 
 [Install]
 WantedBy=default.target

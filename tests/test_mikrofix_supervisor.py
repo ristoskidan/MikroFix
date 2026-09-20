@@ -1,12 +1,15 @@
 import importlib.util
+import fcntl
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "mikrofix_supervisor.py"
@@ -20,6 +23,7 @@ SPEC.loader.exec_module(supervisor_module)
 GateResult = supervisor_module.GateResult
 LocalAdapter = supervisor_module.LocalAdapter
 RunEnvironment = supervisor_module.RunEnvironment
+WorkerManager = supervisor_module.WorkerManager
 Stage = supervisor_module.Stage
 Supervisor = supervisor_module.Supervisor
 atomic_write_json = supervisor_module.atomic_write_json
@@ -179,6 +183,16 @@ class SupervisorTests(unittest.TestCase):
 
 
 class PlanValidationTests(unittest.TestCase):
+    def test_worker_and_resume_cli_commands_are_available(self):
+        workers = supervisor_module.parse_args(["workers", "start"])
+        grant = supervisor_module.parse_args(["grant-lease", "--minutes", "5"])
+        resume = supervisor_module.parse_args(["resume"])
+        run_alias = supervisor_module.parse_args(["run"])
+        self.assertEqual(("workers", "start"), (workers.command, workers.action))
+        self.assertEqual(("grant-lease", 5), (grant.command, grant.minutes))
+        self.assertEqual("resume", resume.command)
+        self.assertEqual("run", run_alias.command)
+
     def test_rejects_path_escape(self):
         with self.assertRaises(ValueError):
             validate_plan(plan(allowed_files=["../outside.py"]))
@@ -230,8 +244,11 @@ class RunEnvironmentTests(unittest.TestCase):
         tools.mkdir(exist_ok=True)
         bridge = tools / "mikrofix_bridge.py"
         reviewer = tools / "mikrofix_local_agent.py"
+        control = tools / "local_executor" / "control.py"
+        control.parent.mkdir()
         bridge.write_text("# trusted bridge\n", encoding="utf-8")
         reviewer.write_text("# trusted reviewer\n", encoding="utf-8")
+        control.write_text("# trusted lease controller\n", encoding="utf-8")
         return bridge, reviewer
 
     def test_prepares_isolated_worktree_config_manifest_and_lease_path(self):
@@ -414,13 +431,20 @@ class LocalAdapterTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, output, "")
 
         adapter._run = fake_run
+        sandbox_commands = []
+
+        def fake_sandbox(command, timeout):
+            sandbox_commands.append(list(command))
+            return subprocess.CompletedProcess(command, 0, "syntax ok\n", "")
+
+        adapter._sandbox_check = fake_sandbox
         result = adapter.run_tests(["syntax_changed_python"])
 
         self.assertTrue(result.ok)
         self.assertEqual(
             [str(Path("/source/.venv/bin/python")), "-m", "py_compile",
              "modified.py", "new.py", "staged.py"],
-            calls[-1],
+            sandbox_commands[-1],
         )
         self.assertIn(
             ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM",
@@ -431,6 +455,410 @@ class LocalAdapterTests(unittest.TestCase):
             ["git", "ls-files", "--others", "--exclude-standard", "--", "*.py"],
             calls,
         )
+
+
+class SandboxRegressionTests(unittest.TestCase):
+    def adapter(self, project, state, **kwargs):
+        return LocalAdapter(
+            project, state,
+            source_root=MODULE_PATH.parents[1],
+            **kwargs,
+        )
+
+    def test_candidate_code_cannot_escape_or_observe_host_session(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            project = base / "candidate"
+            state = base / "state"
+            marker = base / "outside" / "marker.txt"
+            project.mkdir()
+            test_file = project / "test_candidate.py"
+            test_file.write_text(
+                """import os
+from pathlib import Path
+import socket
+import unittest
+
+class CandidateTest(unittest.TestCase):
+    def test_isolation(self):
+        self.assertIsNone(os.environ.get('MIKROFIX_TEST_SECRET'))
+        for name in ('DISPLAY', 'XAUTHORITY', 'SSH_AUTH_SOCK',
+                     'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR',
+                     'DOCKER_HOST', 'HTTP_PROXY', 'HTTPS_PROXY'):
+            self.assertIsNone(os.environ.get(name), name)
+        self.assertEqual('/home/sandbox', os.environ.get('HOME'))
+        marker = Path(%r)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text('sandbox only', encoding='utf-8')
+        Path(__file__).write_text('overlay mutation', encoding='utf-8')
+        sock = socket.socket()
+        sock.settimeout(0.2)
+        with self.assertRaises(OSError):
+            sock.connect(('1.1.1.1', 53))
+        sock.close()
+""" % str(marker),
+                encoding="utf-8",
+            )
+            before = test_file.read_bytes()
+            inherited = {
+                "MIKROFIX_TEST_SECRET": "must-not-leak",
+                "DISPLAY": ":99", "XAUTHORITY": "/host/xauth",
+                "SSH_AUTH_SOCK": "/run/user/1000/ssh-agent",
+                "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+                "XDG_RUNTIME_DIR": "/run/user/1000",
+                "DOCKER_HOST": "unix:///run/docker.sock",
+                "HTTP_PROXY": "http://127.0.0.1:8888",
+                "HTTPS_PROXY": "http://127.0.0.1:8888",
+            }
+            with mock.patch.dict(os.environ, inherited, clear=False):
+                result = self.adapter(project, state).run_tests(["desktop_unit_tests"])
+            self.assertTrue(result.ok, result.evidence)
+            self.assertFalse(marker.exists())
+            self.assertEqual(before, test_file.read_bytes())
+
+    def test_missing_bwrap_fails_closed_without_executing_candidate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            project = base / "candidate"
+            project.mkdir()
+            marker = base / "executed"
+            (project / "test_candidate.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n",
+                encoding="utf-8",
+            )
+            result = self.adapter(
+                project, base / "state", bwrap_path=base / "missing-bwrap"
+            ).run_tests(["desktop_unit_tests"])
+            self.assertFalse(result.ok)
+            self.assertIn("sandbox failed closed", result.summary)
+            self.assertFalse(marker.exists())
+
+    def test_unittest_and_syntax_checks_preserve_pass_fail_results(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            project = base / "candidate"
+            project.mkdir()
+            test_file = project / "test_candidate.py"
+            test_file.write_text(
+                "import unittest\nclass T(unittest.TestCase):\n"
+                "    def test_ok(self): self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+            adapter = self.adapter(project, base / "state")
+            self.assertTrue(adapter.run_tests(["desktop_unit_tests"]).ok)
+            test_file.write_text(
+                "import unittest\nclass T(unittest.TestCase):\n"
+                "    def test_bad(self): self.fail('expected failure')\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(adapter.run_tests(["desktop_unit_tests"]).ok)
+
+            subprocess.run(["git", "-C", str(project), "init", "-q"], check=True)
+            syntax_file = project / "candidate.py"
+            syntax_file.write_text("value = 1\n", encoding="utf-8")
+            self.assertTrue(adapter.run_tests(["syntax_changed_python"]).ok)
+            syntax_file.write_text("value =\n", encoding="utf-8")
+            self.assertFalse(adapter.run_tests(["syntax_changed_python"]).ok)
+
+
+class FakeWorkerRunner:
+    def __init__(self, environment, *, create_token=True):
+        self.environment = environment
+        self.create_token = create_token
+        self.active = set()
+        self.foreign = set()
+        self.calls = []
+
+    def run(self, args, *, cwd=None, env=None, timeout=30):
+        self.calls.append(list(args))
+        if args[:3] == ["systemctl", "--user", "is-active"]:
+            unit = args[3]
+            active = unit in self.active
+            return subprocess.CompletedProcess(args, 0 if active else 3,
+                                               "active\n" if active else "inactive\n", "")
+        if args[:3] == ["systemctl", "--user", "show"]:
+            unit = args[3]
+            role = "executor" if unit.endswith("-executor") else "bridge"
+            metadata = json.loads(self.environment.metadata_file.read_text(encoding="utf-8"))[role]
+            prop = next(item for item in args if item.startswith("--property="))
+            if prop == "--property=WorkingDirectory":
+                output = "/foreign\n" if unit in self.foreign else metadata["cwd"] + "\n"
+            elif prop == "--property=Environment":
+                output = " ".join(
+                    f"{key}={value}" for key, value in sorted(metadata["env"].items())
+                ) + "\n"
+            else:
+                output = "argv[]=" + shlex.join(metadata["argv"]) + " ; ignore_errors=no\n"
+            return subprocess.CompletedProcess(args, 0, output, "")
+        if args[:3] == ["systemctl", "--user", "stop"]:
+            self.active.discard(args[3])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:2] == ["systemd-run", "--user"]:
+            unit = next(item.split("=", 1)[1] for item in args if item.startswith("--unit="))
+            self.active.add(unit)
+            self.foreign.discard(unit)
+            if unit.endswith("-executor") and self.create_token:
+                token = self.environment.executor_config_dir / "token"
+                token.write_text("private-token\n", encoding="utf-8")
+                token.chmod(0o600)
+            return subprocess.CompletedProcess(args, 0, "started\n", "")
+        if "control.py" in " ".join(args):
+            if "revoke" in args:
+                self.environment.lease_file.unlink(missing_ok=True)
+            elif "grant" in args:
+                lease = self.environment.lease_identity()
+                lease["expires_at"] = time.time() + 300
+                self.environment.lease_file.write_text(json.dumps(lease), encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "ok\n", "")
+        return subprocess.CompletedProcess(args, 1, "unexpected command\n", "")
+
+
+class WorkerManagerTests(unittest.TestCase):
+    def git(self, root, *args):
+        return subprocess.run(
+            ["git", "-C", str(root), *args], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        ).stdout.strip()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name)
+        self.source = base / "source"
+        self.source.mkdir()
+        self.git(self.source, "init", "-q")
+        self.git(self.source, "config", "user.email", "test@example.invalid")
+        self.git(self.source, "config", "user.name", "Supervisor Test")
+        (self.source / "app.py").write_text("pass\n", encoding="utf-8")
+        server_python = self.source / ".venv-server/bin/python"
+        server_python.parent.mkdir(parents=True)
+        server_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        server_python.chmod(0o755)
+        tools = self.source / "tools"
+        (tools / "local_executor").mkdir(parents=True)
+        (tools / "mikrofix_bridge.py").write_text("# bridge\n", encoding="utf-8")
+        (tools / "mikrofix_local_agent.py").write_text("# reviewer\n", encoding="utf-8")
+        (tools / "local_executor/control.py").write_text("# control\n", encoding="utf-8")
+        self.git(self.source, "add", ".")
+        self.git(self.source, "commit", "-qm", "base")
+        self.environment = RunEnvironment.create(
+            self.source, base / "state",
+            plan(base_checkpoint=self.git(self.source, "rev-parse", "HEAD")), {},
+        )
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def manager(self, runner, probe=None, clock=None, sleeper=None, timeout=1):
+        return WorkerManager(
+            self.environment,
+            runner=runner,
+            probe=probe or (lambda _url: {
+                "status": "ok", "project": str(self.environment.worktree)
+            }),
+            clock=clock or time.monotonic,
+            sleeper=sleeper or (lambda _seconds: None),
+            startup_timeout=timeout,
+        )
+
+    def test_start_orders_executor_health_then_bridge_and_is_idempotent(self):
+        runner = FakeWorkerRunner(self.environment)
+        probes = []
+        manager = self.manager(runner, probe=lambda url: (
+            probes.append(url) or {
+                "status": "ok", "project": str(self.environment.worktree)
+            }
+        ))
+        self.assertEqual("READY", manager.start()["status"])
+        starts = [call for call in runner.calls if call[:2] == ["systemd-run", "--user"]]
+        self.assertEqual(2, len(starts))
+        self.assertIn("executor", next(item for item in starts[0] if item.startswith("--unit=")))
+        self.assertIn("bridge", next(item for item in starts[1] if item.startswith("--unit=")))
+        self.assertTrue(probes)
+        for role in ("executor", "bridge"):
+            log = manager.logs_dir / f"{role}.log"
+            self.assertTrue(log.is_file())
+            self.assertFalse(log.is_symlink())
+            self.assertEqual(0o600, os.stat(log).st_mode & 0o777)
+        manager.start()
+        self.assertEqual(2, len([call for call in runner.calls
+                                if call[:2] == ["systemd-run", "--user"]]))
+
+    def test_status_reports_stopped_partial_unhealthy_and_ready(self):
+        runner = FakeWorkerRunner(self.environment)
+        manager = self.manager(runner)
+        self.assertEqual("STOPPED", manager.status()["status"])
+        runner.active.add(manager.bridge_unit)
+        self.assertEqual("PARTIAL", manager.status()["status"])
+        runner.active.clear()
+        runner.active.add(manager.executor_unit)
+        runner.foreign.add(manager.executor_unit)
+        self.assertEqual("UNHEALTHY", manager.status()["status"])
+        runner.active.clear()
+        runner.foreign.clear()
+        manager.start()
+        status = manager.status()
+        self.assertEqual("READY", status["status"])
+        for field in (
+            "executor_active", "bridge_active", "executor_identity",
+            "bridge_identity", "health_ready", "lease_active",
+        ):
+            self.assertIn(field, status)
+
+    def test_token_or_health_failure_rolls_back_both_workers_and_lease(self):
+        runner = FakeWorkerRunner(self.environment, create_token=False)
+        lease = self.environment.lease_identity()
+        lease["expires_at"] = time.time() + 60
+        self.environment.lease_file.write_text(json.dumps(lease), encoding="utf-8")
+        now = [0.0]
+
+        def sleeper(seconds):
+            now[0] += seconds
+
+        manager = self.manager(runner, clock=lambda: now[0], sleeper=sleeper, timeout=0.5)
+        with self.assertRaisesRegex(RuntimeError, "Timed out"):
+            manager.start()
+        self.assertEqual(set(), runner.active)
+        self.assertFalse(self.environment.lease_file.exists())
+
+    def test_exact_health_project_is_required(self):
+        runner = FakeWorkerRunner(self.environment)
+        now = [0.0]
+        manager = self.manager(
+            runner,
+            probe=lambda _url: {"status": "ok", "project": "/wrong/worktree"},
+            clock=lambda: now[0], sleeper=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            timeout=0.5,
+        )
+        with self.assertRaisesRegex(RuntimeError, "Timed out"):
+            manager.start()
+        self.assertEqual(set(), runner.active)
+
+    def test_stop_orders_bridge_before_executor_and_revokes_lease(self):
+        runner = FakeWorkerRunner(self.environment)
+        manager = self.manager(runner)
+        runner.active.update({manager.executor_unit, manager.bridge_unit})
+        lease = self.environment.lease_identity()
+        lease["expires_at"] = time.time() + 60
+        self.environment.lease_file.write_text(json.dumps(lease), encoding="utf-8")
+        manager.stop()
+        stops = [call for call in runner.calls if call[:3] == ["systemctl", "--user", "stop"]]
+        self.assertEqual(
+            [["systemctl", "--user", "stop", manager.bridge_unit],
+             ["systemctl", "--user", "stop", manager.executor_unit]],
+            stops,
+        )
+        self.assertFalse(self.environment.lease_file.exists())
+
+    def test_lifecycle_lock_path_is_stable_and_exclusive(self):
+        first = self.manager(FakeWorkerRunner(self.environment))
+        second = self.manager(FakeWorkerRunner(self.environment))
+        self.assertEqual(first.lifecycle_lock_path, second.lifecycle_lock_path)
+        with first.lifecycle_lock():
+            contender = second.lifecycle_lock_path.open("a+")
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(contender.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                contender.close()
+
+    def test_unit_names_include_exact_identity_hash_and_do_not_slug_collide(self):
+        first = self.manager(FakeWorkerRunner(self.environment))
+        altered = self.environment.to_dict()
+        altered["run_id"] = "mf_run_test"
+        altered_environment = RunEnvironment(**{
+            key: (Path(value) if key in {
+                "source_root", "worktree", "run_dir", "bridge_home", "bridge_config",
+                "executor_config_dir", "executor_state_dir", "allowed_files_manifest",
+                "immutable_plan", "metadata_file", "lease_file",
+            } else value)
+            for key, value in altered.items()
+        })
+        second = WorkerManager(altered_environment, runner=FakeWorkerRunner(self.environment))
+        self.assertNotEqual(first.executor_unit, second.executor_unit)
+
+    def test_bridge_is_stopped_before_recovering_missing_executor(self):
+        runner = FakeWorkerRunner(self.environment)
+        manager = self.manager(runner)
+        runner.active.add(manager.bridge_unit)
+        manager.start()
+        stop_bridge = runner.calls.index(
+            ["systemctl", "--user", "stop", manager.bridge_unit]
+        )
+        starts = [index for index, call in enumerate(runner.calls)
+                  if call[:2] == ["systemd-run", "--user"]]
+        self.assertLess(stop_bridge, starts[0])
+        self.assertEqual("READY", manager.status()["status"])
+
+    def test_foreign_active_unit_is_not_adopted(self):
+        runner = FakeWorkerRunner(self.environment)
+        manager = self.manager(runner)
+        runner.active.add(manager.executor_unit)
+        runner.foreign.add(manager.executor_unit)
+        manager.start()
+        stop = ["systemctl", "--user", "stop", manager.executor_unit]
+        self.assertIn(stop, runner.calls)
+        self.assertEqual("READY", manager.status()["status"])
+
+    def test_grant_uses_exact_bound_argv_without_yes_and_verifies_lease(self):
+        runner = FakeWorkerRunner(self.environment)
+        manager = self.manager(runner)
+        manager.start()
+        runner.calls.clear()
+        manager.grant_lease(7)
+        grant = next(call for call in runner.calls if "grant" in call)
+        self.assertNotIn("--yes", grant)
+        self.assertEqual(str(self.source / ".venv-server/bin/python"), grant[0])
+        self.assertEqual(
+            str(self.environment.worktree / "tools/local_executor/control.py"),
+            grant[1],
+        )
+        identity = self.environment.lease_identity()
+        for option, value in (
+            ("--run-id", identity["run_id"]),
+            ("--project-root", identity["project_root"]),
+            ("--plan-sha256", identity["plan_sha256"]),
+            ("--allowed-files-sha256", identity["allowed_files_sha256"]),
+        ):
+            self.assertEqual(value, grant[grant.index(option) + 1])
+        self.assertTrue(manager.lease_active())
+
+    def test_grant_without_ready_workers_does_not_invoke_control_or_write_lease(self):
+        runner = FakeWorkerRunner(self.environment)
+        manager = self.manager(runner)
+        with self.assertRaisesRegex(RuntimeError, "not READY"):
+            manager.grant_lease(5)
+        self.assertFalse(self.environment.lease_file.exists())
+        self.assertFalse(any("control.py" in " ".join(call) for call in runner.calls))
+
+    def test_resume_precondition_failure_is_byte_identical(self):
+        state = Path(self.temp.name) / "resume-state.json"
+        atomic_write_json(state, initial_run(plan(), {}))
+        before = state.read_bytes()
+
+        class NotReady:
+            def status(self):
+                return {"status": "NOT_READY", "lease_active": False}
+
+        with self.assertRaisesRegex(RuntimeError, "not READY"):
+            supervisor_module.require_resume_ready(NotReady())
+        self.assertEqual(before, state.read_bytes())
+
+    def test_resume_existing_job_does_not_redispatch(self):
+        state = Path(self.temp.name) / "active-state.json"
+        adapter = FakeAdapter()
+        adapter.job_results = [("running", "")]
+        atomic_write_json(state, initial_run(plan(), adapter.snapshot()))
+        supervisor = Supervisor(state, adapter)
+        supervisor.step()
+        dispatched = len(adapter.jobs)
+
+        class Ready:
+            def status(self):
+                return {"status": "READY", "lease_active": True}
+
+        supervisor_module.require_resume_ready(Ready())
+        self.assertFalse(supervisor.step())
+        self.assertEqual(dispatched, len(adapter.jobs))
 
 
 if __name__ == "__main__":

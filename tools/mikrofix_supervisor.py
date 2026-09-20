@@ -10,6 +10,7 @@ machine can be tested without starting Ollama or touching a working tree.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 import fcntl
@@ -19,10 +20,14 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import secrets
+import shlex
+import stat
 import subprocess
 import tempfile
 import time
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
+import urllib.error
+import urllib.request
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -157,9 +162,11 @@ class RunEnvironment:
             )
         trusted_bridge = source_root / "tools" / "mikrofix_bridge.py"
         trusted_reviewer = source_root / "tools" / "mikrofix_local_agent.py"
+        trusted_control = source_root / "tools" / "local_executor" / "control.py"
         for label, trusted_path in (
             ("vendored bridge", trusted_bridge),
             ("local reviewer", trusted_reviewer),
+            ("lease controller", trusted_control),
         ):
             if not trusted_path.is_file():
                 raise RuntimeError(f"Trusted {label} is missing: {trusted_path}")
@@ -173,6 +180,11 @@ class RunEnvironment:
         )
         if result.returncode != 0:
             raise RuntimeError(f"Unable to create isolated worktree: {result.stdout[-4000:]}")
+        worktree_control = worktree / "tools" / "local_executor" / "control.py"
+        if not worktree_control.is_file():
+            raise RuntimeError(
+                f"Trusted worktree lease controller is missing: {worktree_control}"
+            )
 
         bridge_home = run_dir / "bridge"
         bridge_config = bridge_home / "config.json"
@@ -308,6 +320,360 @@ class Adapter(Protocol):
     def run_tests(self, checks: list[str]) -> GateResult: ...
     def review(self, prompt: str, material: str) -> GateResult: ...
     def checkpoint(self, run: dict[str, Any], diff: str) -> str: ...
+
+
+class CommandRunner(Protocol):
+    def run(
+        self, args: list[str], *, cwd: Path | None = None,
+        env: dict[str, str] | None = None, timeout: int = 30,
+    ) -> subprocess.CompletedProcess[str]: ...
+
+
+class SubprocessRunner:
+    def run(
+        self, args: list[str], *, cwd: Path | None = None,
+        env: dict[str, str] | None = None, timeout: int = 30,
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            args, cwd=cwd, env={**os.environ, **(env or {})},
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=timeout, check=False,
+        )
+
+
+def http_health_probe(url: str) -> dict[str, Any]:
+    request = urllib.request.Request(url.rstrip("/") + "/health", method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Executor health probe failed: {exc}") from exc
+
+
+class WorkerManager:
+    """Start and stop one run's executor/bridge as transient user services."""
+
+    EXECUTOR_ENV_KEYS = {
+        "MIKROFIX_EXECUTOR_ROOT", "MIKROFIX_EXECUTOR_CONFIG_DIR",
+        "MIKROFIX_EXECUTOR_STATE_DIR", "MIKROFIX_EXECUTOR_ALLOWED_FILES",
+        "MIKROFIX_EXECUTOR_RUN_ID", "MIKROFIX_EXECUTOR_PLAN_SHA256",
+        "MIKROFIX_EXECUTOR_ALLOWED_FILES_SHA256",
+    }
+    BRIDGE_ENV_KEYS = {"MIKROFIX_BRIDGE_HOME", "MIKROFIX_BRIDGE_CONFIG"}
+
+    def __init__(
+        self,
+        environment: RunEnvironment,
+        *,
+        runner: CommandRunner | None = None,
+        probe: Callable[[str], dict[str, Any]] = http_health_probe,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+        startup_timeout: float = 30.0,
+    ):
+        self.environment = environment
+        self.runner = runner or SubprocessRunner()
+        self.probe = probe
+        self.clock = clock
+        self.sleeper = sleeper
+        self.startup_timeout = startup_timeout
+        safe_id = environment.run_id.casefold().replace("_", "-")[:32]
+        identity_material = "\0".join((
+            environment.run_id,
+            str(environment.run_dir),
+            str(environment.worktree),
+            environment.plan_sha256,
+            environment.allowed_sha256,
+        ))
+        identity_suffix = hashlib.sha256(identity_material.encode()).hexdigest()[:12]
+        unit_prefix = f"mikrofix-supervisor-{safe_id}-{identity_suffix}"
+        self.executor_unit = f"{unit_prefix}-executor"
+        self.bridge_unit = f"{unit_prefix}-bridge"
+        self.logs_dir = environment.run_dir / "logs"
+        self.lifecycle_lock_path = environment.run_dir / "lifecycle.lock"
+
+    @contextmanager
+    def lifecycle_lock(self):
+        self.lifecycle_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(self.lifecycle_lock_path, flags, 0o600)
+        handle = os.fdopen(fd, "a+")
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            handle.close()
+            raise RuntimeError("Lifecycle lock must be a regular non-symlink file")
+        os.fchmod(handle.fileno(), 0o600)
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def _metadata(self) -> dict[str, Any]:
+        data = json.loads(self.environment.metadata_file.read_text(encoding="utf-8"))
+        server_python = str(self.environment.source_root / ".venv-server/bin/python")
+        expected = {
+            "executor": {
+                "argv": [server_python, "-m", "uvicorn", "tools.local_executor.server:app",
+                         "--host", "127.0.0.1", "--port",
+                         self.environment.executor_url.rsplit(":", 1)[-1]],
+                "cwd": str(self.environment.worktree),
+                "env": self.environment.executor_env(),
+            },
+            "bridge": {
+                "argv": [server_python,
+                         str(self.environment.source_root / "tools/mikrofix_bridge.py"),
+                         "monitor"],
+                "cwd": str(self.environment.worktree),
+                "env": self.environment.bridge_env(),
+            },
+        }
+        for role, required in expected.items():
+            actual = data.get(role)
+            if not isinstance(actual, dict):
+                raise RuntimeError(f"Immutable metadata is missing {role}")
+            if actual.get("argv") != required["argv"] or actual.get("cwd") != required["cwd"]:
+                raise RuntimeError(f"Immutable metadata has untrusted {role} command")
+            if actual.get("env") != required["env"]:
+                raise RuntimeError(f"Immutable metadata has untrusted {role} environment")
+            allowed = self.EXECUTOR_ENV_KEYS if role == "executor" else self.BRIDGE_ENV_KEYS
+            if set(actual["env"]) != allowed:
+                raise RuntimeError(f"Immutable metadata has non-allowlisted {role} environment")
+        return data
+
+    def _run(self, args: list[str], *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        return self.runner.run(args, timeout=timeout)
+
+    def _is_active(self, unit: str) -> bool:
+        result = self._run(["systemctl", "--user", "is-active", unit])
+        return result.returncode == 0 and result.stdout.strip() == "active"
+
+    def _unit_identity_ok(self, unit: str, role: str) -> bool:
+        definition = self._metadata()[role]
+        cwd = self._run([
+            "systemctl", "--user", "show", unit,
+            "--property=WorkingDirectory", "--value",
+        ])
+        environment = self._run([
+            "systemctl", "--user", "show", unit,
+            "--property=Environment", "--value",
+        ])
+        command = self._run([
+            "systemctl", "--user", "show", unit,
+            "--property=ExecStart", "--value",
+        ])
+        if any(result.returncode != 0 for result in (cwd, environment, command)):
+            return False
+        try:
+            actual_env = set(shlex.split(environment.stdout.strip()))
+        except ValueError:
+            return False
+        expected_env = {f"{key}={value}" for key, value in definition["env"].items()}
+        argv_match = re.search(r"(?:^| ; )argv\[\]=(.*?)(?: ;|$)", command.stdout.strip())
+        if not argv_match:
+            return False
+        try:
+            actual_argv = shlex.split(argv_match.group(1))
+        except ValueError:
+            return False
+        return (
+            cwd.stdout.strip() == definition["cwd"]
+            and actual_env == expected_env
+            and actual_argv == definition["argv"]
+        )
+
+    def _prepare_log(self, role: str) -> Path:
+        self.logs_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.logs_dir, 0o700)
+        log = self.logs_dir / f"{role}.log"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(log, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise RuntimeError(f"{role} log is not a regular file")
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+        if log.is_symlink():
+            raise RuntimeError(f"{role} log must not be a symlink")
+        return log
+
+    def _start_unit(self, unit: str, role: str, definition: dict[str, Any]) -> None:
+        log = self._prepare_log(role)
+        args = [
+            "systemd-run", "--user", f"--unit={unit}", "--collect",
+            "--property=Restart=on-failure",
+            f"--property=StandardOutput=append:{log}",
+            f"--property=StandardError=append:{log}",
+            f"--working-directory={definition['cwd']}",
+        ]
+        args.extend(f"--setenv={key}={value}" for key, value in sorted(definition["env"].items()))
+        args.extend(["--", *definition["argv"]])
+        result = self._run(args)
+        if result.returncode != 0:
+            raise RuntimeError(f"Unable to start {role}: {result.stdout[-2000:]}")
+
+    def _token(self) -> str:
+        token_file = self.environment.executor_config_dir / "token"
+        try:
+            info = token_file.lstat()
+        except OSError as exc:
+            raise RuntimeError("Per-run executor token is not ready") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("Per-run executor token must be a regular non-symlink file")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError("Per-run executor token permissions are not private")
+        token = token_file.read_text(encoding="utf-8").strip()
+        if not token:
+            raise RuntimeError("Per-run executor token is empty")
+        return token
+
+    def _health_ready(self) -> bool:
+        self._token()
+        health = self.probe(self.environment.executor_url)
+        return health.get("status") == "ok" and health.get("project") == str(self.environment.worktree)
+
+    def _wait_until(self, predicate: Callable[[], bool], description: str) -> None:
+        deadline = self.clock() + self.startup_timeout
+        last_error = ""
+        while self.clock() < deadline:
+            try:
+                if predicate():
+                    return
+            except (OSError, RuntimeError, ValueError) as exc:
+                last_error = str(exc)
+            self.sleeper(0.25)
+        detail = f": {last_error}" if last_error else ""
+        raise RuntimeError(f"Timed out waiting for {description}{detail}")
+
+    def status(self) -> dict[str, Any]:
+        executor_active = self._is_active(self.executor_unit)
+        bridge_active = self._is_active(self.bridge_unit)
+        executor_identity = executor_active and self._unit_identity_ok(
+            self.executor_unit, "executor"
+        )
+        bridge_identity = bridge_active and self._unit_identity_ok(
+            self.bridge_unit, "bridge"
+        )
+        health_ready = False
+        if executor_active and executor_identity:
+            try:
+                health_ready = self._health_ready()
+            except (OSError, RuntimeError, ValueError):
+                health_ready = False
+        ready = (executor_active and bridge_active and executor_identity
+                 and bridge_identity and health_ready)
+        if ready:
+            overall = "READY"
+        elif not executor_active and not bridge_active:
+            overall = "STOPPED"
+        elif ((executor_active and not executor_identity)
+              or (bridge_active and not bridge_identity)
+              or (executor_active and not health_ready)):
+            overall = "UNHEALTHY"
+        else:
+            overall = "PARTIAL"
+        return {
+            "status": overall,
+            "executor_active": executor_active,
+            "bridge_active": bridge_active,
+            "executor_identity": executor_identity,
+            "bridge_identity": bridge_identity,
+            "health_ready": health_ready,
+            "lease_active": self.lease_active(),
+        }
+
+    def start(self) -> dict[str, Any]:
+        with self.lifecycle_lock():
+            return self._start_locked()
+
+    def _start_locked(self) -> dict[str, Any]:
+        metadata = self._metadata()
+        current = self.status()
+        if current["status"] == "READY":
+            return current
+        try:
+            if current["bridge_active"] and (
+                not current["executor_active"] or not current["executor_identity"]
+                or not current["health_ready"]
+            ):
+                self._run(["systemctl", "--user", "stop", self.bridge_unit])
+                current["bridge_active"] = False
+            if current["executor_active"] and (
+                not current["executor_identity"] or not current["health_ready"]
+            ):
+                self._run(["systemctl", "--user", "stop", self.executor_unit])
+                current["executor_active"] = False
+            if not current["executor_active"]:
+                self._start_unit(self.executor_unit, "executor", metadata["executor"])
+            self._wait_until(self._health_ready, "private token and exact executor health")
+            if not current["bridge_active"]:
+                self._start_unit(self.bridge_unit, "bridge", metadata["bridge"])
+            self._wait_until(lambda: self._is_active(self.bridge_unit), "bridge service")
+            result = self.status()
+            if result["status"] != "READY":
+                raise RuntimeError("Workers did not reach READY")
+            return result
+        except BaseException:
+            self._stop_locked()
+            raise
+
+    def _control_command(self, action: str) -> list[str]:
+        return [
+            str(self.environment.source_root / ".venv-server/bin/python"),
+            str(self.environment.worktree / "tools/local_executor/control.py"),
+            action, "--state-dir", str(self.environment.executor_state_dir),
+        ]
+
+    def lease_active(self) -> bool:
+        try:
+            lease = json.loads(self.environment.lease_file.read_text(encoding="utf-8"))
+            return float(lease.get("expires_at", 0)) > time.time() and all(
+                str(lease.get(key) or "") == value
+                for key, value in self.environment.lease_identity().items()
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+
+    def grant_lease(self, minutes: int) -> None:
+        with self.lifecycle_lock():
+            if not 1 <= minutes <= 30:
+                raise ValueError("minutes must be between 1 and 30")
+            if self.status()["status"] != "READY":
+                raise RuntimeError("Cannot grant lease: per-run workers are not READY")
+            identity = self.environment.lease_identity()
+            args = [
+                *self._control_command("grant"), "--minutes", str(minutes),
+                "--run-id", identity["run_id"],
+                "--project-root", identity["project_root"],
+                "--plan-sha256", identity["plan_sha256"],
+                "--allowed-files-sha256", identity["allowed_files_sha256"],
+            ]
+            result = self._run(args, timeout=120)
+            if result.returncode != 0 or not self.lease_active():
+                self.revoke_lease()
+                raise RuntimeError("Run-specific write lease was not granted or did not match")
+
+    def revoke_lease(self) -> None:
+        result = self._run(self._control_command("revoke"))
+        if result.returncode != 0:
+            self.environment.lease_file.unlink(missing_ok=True)
+
+    def stop(self) -> dict[str, Any]:
+        with self.lifecycle_lock():
+            return self._stop_locked()
+
+    def _stop_locked(self) -> dict[str, Any]:
+        for unit in (self.bridge_unit, self.executor_unit):
+            if self._is_active(unit):
+                self._run(["systemctl", "--user", "stop", unit])
+        self.revoke_lease()
+        return self.status()
 
 
 def utc_timestamp() -> str:
@@ -671,6 +1037,7 @@ class LocalAdapter:
         bridge_env: dict[str, str] | None = None,
         source_root: Path | None = None,
         expected_lease: dict[str, str] | None = None,
+        bwrap_path: Path = Path("/usr/bin/bwrap"),
     ):
         self.project_root = project_root.resolve()
         self.state_dir = state_dir.resolve()
@@ -678,6 +1045,7 @@ class LocalAdapter:
         self._bridge_env = dict(bridge_env or {})
         self.source_root = (source_root or project_root).resolve()
         self.expected_lease = dict(expected_lease or {})
+        self.bwrap_path = bwrap_path
 
     def _run(self, args: list[str], timeout: int = 900, check: bool = True,
              env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -798,12 +1166,81 @@ class LocalAdapter:
                 if not changed:
                     outputs.append(f"{check_name}: no changed Python files")
                     continue
-            result = self._run(command, timeout=900, check=False)
+            try:
+                result = self._sandbox_check(command, timeout=900)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                outputs.append(f"{check_name}: sandbox failure: {exc}")
+                return GateResult(False, f"{check_name} sandbox failed closed",
+                                  "\n\n".join(outputs))
             outputs.append(f"$ {' '.join(command)}\n{result.stdout[-60000:]}")
             if result.returncode != 0:
                 return GateResult(False, f"{check_name} exited {result.returncode}",
                                   "\n\n".join(outputs))
         return GateResult(True, "All approved checks passed", "\n\n".join(outputs))
+
+    def _sandbox_check(
+        self, command: list[str], *, timeout: int
+    ) -> subprocess.CompletedProcess[str]:
+        bwrap = self.bwrap_path.resolve()
+        if bwrap != Path("/usr/bin/bwrap") or not bwrap.is_file() or not os.access(bwrap, os.X_OK):
+            raise RuntimeError("Required sandbox executable /usr/bin/bwrap is unavailable")
+        venv = self.source_root / ".venv"
+        server_venv = self.source_root / ".venv-server"
+        for label, path in (("desktop venv", venv), ("server venv", server_venv)):
+            if not path.is_dir():
+                raise RuntimeError(f"Required {label} is unavailable: {path}")
+
+        sandbox_root = self.state_dir / "sandboxes"
+        sandbox_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(sandbox_root, 0o700)
+        with tempfile.TemporaryDirectory(prefix="check-", dir=sandbox_root) as _temporary:
+            translated = list(command)
+            interpreter = Path(translated[0]).resolve()
+            desktop_python = (venv / "bin" / "python").resolve()
+            server_python = (server_venv / "bin" / "python").resolve()
+            if interpreter == desktop_python:
+                translated[0] = "/opt/venv/bin/python"
+            elif interpreter == server_python:
+                translated[0] = "/opt/venv-server/bin/python"
+            else:
+                raise RuntimeError("Check attempted to use an unapproved interpreter")
+
+            args = [
+                str(bwrap), "--die-with-parent", "--new-session", "--unshare-all",
+                "--clearenv", "--ro-bind", "/usr", "/usr",
+            ]
+            for system_path in ("/bin", "/lib", "/lib64"):
+                if Path(system_path).exists():
+                    args.extend(["--ro-bind", system_path, system_path])
+            args.extend([
+                "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+                "--dir", "/home", "--dir", "/home/sandbox", "--dir", "/opt",
+                "--ro-bind", str(venv), "/opt/venv",
+                "--ro-bind", str(server_venv), "/opt/venv-server",
+                "--dir", "/work", "--overlay-src", str(self.project_root),
+                "--tmp-overlay", "/work", "--chdir", "/work",
+                "--setenv", "HOME", "/home/sandbox",
+                "--setenv", "TMPDIR", "/tmp",
+                "--setenv", "TMP", "/tmp",
+                "--setenv", "TEMP", "/tmp",
+                "--setenv", "PATH", "/opt/venv/bin:/opt/venv-server/bin:/usr/bin:/bin",
+                "--setenv", "LANG", "C.UTF-8",
+                "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+                "--setenv", "PYTHONPYCACHEPREFIX", "/tmp/pycache",
+                "--setenv", "PYTHONNOUSERSITE", "1",
+                "--", *translated,
+            ])
+            return subprocess.run(
+                args,
+                cwd=self.project_root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+            )
 
     def review(self, prompt: str, material: str) -> GateResult:
         artifacts = self.state_dir / "artifacts"
@@ -872,11 +1309,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     init = subparsers.add_parser("init")
     init.add_argument("plan", type=Path)
     init.add_argument("--state", type=Path)
-    for name in ("step", "run", "status"):
+    for name in ("step", "run", "resume", "status"):
         command = subparsers.add_parser(name)
         command.add_argument("--state", type=Path)
-        if name == "run":
+        if name in {"run", "resume"}:
             command.add_argument("--interval", type=float, default=5.0)
+    workers = subparsers.add_parser("workers")
+    workers.add_argument("action", choices=("start", "status", "stop"))
+    workers.add_argument("--state", type=Path)
+    grant = subparsers.add_parser("grant-lease")
+    grant.add_argument("--minutes", type=int, required=True)
+    grant.add_argument("--state", type=Path)
     return parser.parse_args(argv)
 
 
@@ -893,6 +1336,22 @@ def isolated_adapter(state_file: Path, state_dir: Path) -> LocalAdapter:
         source_root=environment.source_root,
         expected_lease=environment.lease_identity(),
     )
+
+
+def load_run_environment(state_file: Path) -> RunEnvironment:
+    raw = json.loads(state_file.read_text(encoding="utf-8"))
+    if "environment" not in raw:
+        raise RuntimeError("Run has no isolated environment metadata")
+    return RunEnvironment.from_dict(raw["environment"])
+
+
+def require_resume_ready(manager: WorkerManager) -> dict[str, Any]:
+    status = manager.status()
+    if status["status"] != "READY":
+        raise RuntimeError("Cannot resume: per-run workers are not READY")
+    if not status["lease_active"]:
+        raise RuntimeError("Cannot resume: bound run-specific lease is not active")
+    return status
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -926,6 +1385,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Launch metadata: {environment.metadata_file}")
             print(f"Run-specific lease: {environment.lease_file}")
             return 0
+    environment = load_run_environment(state_file)
+    manager = WorkerManager(environment)
+    if args.command == "workers":
+        if args.action == "start":
+            result = manager.start()
+        elif args.action == "stop":
+            result = manager.stop()
+        else:
+            result = manager.status()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    if args.command == "grant-lease":
+        manager.grant_lease(args.minutes)
+        print("Run-specific write lease granted and verified.")
+        return 0
     adapter = isolated_adapter(state_file, state_dir)
     if args.command == "status":
         with state_lock(state_file):
@@ -942,6 +1416,7 @@ def main(argv: list[str] | None = None) -> int:
             stage = supervisor.load()["stage"]
         print(stage)
         return 0
+    require_resume_ready(manager)
     while True:
         with state_lock(state_file):
             supervisor = Supervisor(state_file, adapter)

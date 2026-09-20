@@ -32,8 +32,11 @@ Create a plan from `PLAN_SCHEMA.json`, then:
 
 ```bash
 python3 tools/mikrofix_supervisor.py init /path/to/plan.json
-python3 tools/mikrofix_supervisor.py status
-python3 tools/mikrofix_supervisor.py run
+python3 tools/mikrofix_supervisor.py workers start
+python3 tools/mikrofix_supervisor.py workers status
+python3 tools/mikrofix_supervisor.py grant-lease --minutes 15
+python3 tools/mikrofix_supervisor.py resume
+python3 tools/mikrofix_supervisor.py workers stop
 ```
 
 Initialization creates, but does not launch:
@@ -47,24 +50,44 @@ Initialization creates, but does not launch:
   directory, allowed-files manifest, run id and both manifest hashes;
 - the exact per-run lease path.
 
-Review `runs/<run-id>/environment.json`, then launch the listed processes with
-their listed environments in this order:
+The bridge process is the versioned `tools/mikrofix_bridge.py` from the trusted
+source checkout, invoked by absolute path. The GPT-OSS reviewer is likewise the
+trusted source checkout's absolute `tools/mikrofix_local_agent.py`; neither is
+loaded from the agent-editable worktree.
 
-1. start the **executor** first; its command uses
-   `source_root/.venv-server/bin/python` and creates the per-run API token;
-2. only after the token exists, start the **bridge monitor**, which reads that
-   token through its per-run `token_file` setting.
+`workers start` manages two transient `systemd --user` units. It starts the
+executor first, waits for a private non-symlink token and `/health` identifying
+the exact worktree, and only then starts the bridge monitor. Existing units are
+accepted only if their working directory, environment identity and command
+match the immutable metadata. Partial or foreign state is stopped and rebuilt
+in the safe order. Startup failure rolls both units back and revokes any lease.
 
-They must run as separate per-run processes; the global bridge
-monitor/executor are not used for an isolated run. Initialization fails closed
-if the server virtual-environment interpreter is absent or not executable.
+Worker lifecycle and grants share a run-scoped lock, so concurrent commands
+cannot create duplicate units or race a grant against shutdown. Logs are
+pre-created as private regular files (`0600`) under `runs/<run-id>/logs/` before
+systemd receives their paths.
 
-The supervisor deliberately does not mint its own lease. Until an
-owner-controlled helper creates a short lease containing the exact `run_id`,
-`project_root`, `plan_sha256` and `allowed_files_sha256` at the listed lease
-path, it persists `NEEDS_WRITE_LEASE` and exits safely. After such a lease is
-granted, start `run` again. Never edit the supervisor state JSON manually.
-`BLOCKED` requires Codex/owner inspection.
+`workers status` is read-only and reports `READY`, `PARTIAL`, `STOPPED` or
+`UNHEALTHY`, plus unit identity, health and lease fields. `workers stop` is
+idempotent, stops bridge before executor and always revokes the lease.
+
+`grant-lease` works only while workers are `READY`. It invokes the trusted
+control helper with the complete run/worktree/hash binding and intentionally
+never supplies `--yes`; the owner must approve the graphical prompt. `resume`
+(with `run` retained as an alias) requires both `READY` workers and the exact
+active lease. If either precondition fails, supervisor state remains byte-for-
+byte unchanged. Never edit the state JSON manually. `BLOCKED` requires
+Codex/owner inspection.
+
+Plans cannot place supervisor, bridge, executor, reviewer, their tests, or the
+loaded agent prompts/rules in `allowed_files`. In supervised executor mode the
+generic `system_command` and mutating `desktop_action` endpoints are disabled,
+even when a valid lease exists.
+
+Queued/running Qwen jobs have a bounded wait (`job_timeout_seconds`, default 30
+minutes, allowed 30–7200 seconds). A timed-out active job moves to `BLOCKED`
+instead of dispatching a potentially concurrent replacement. Inspect and stop
+the workers before starting any later attempt.
 
 Run the focused tests with:
 
@@ -77,9 +100,9 @@ service must not be enabled until the owner has reviewed this first version.
 
 ## Safety boundary
 
-Isolation preparation is real: bridge job storage, executor root/state/config,
-allowed-file enforcement and lease identity are run-scoped. This still does
-**not** make the system fully autonomous. Process launch and the short
-run-specific lease remain owner-controlled, and the final state remains
-`AWAIT_CODEX_REVIEW`. Nothing automatically merges the candidate patch into
-the main checkout.
+Isolation and lifecycle management are real: bridge job storage, executor
+root/state/config, transient units, logs, allowed-file enforcement and lease
+identity are run-scoped. This still does **not** make the system fully
+autonomous: the lease requires an owner-approved GUI prompt and the final state
+remains `AWAIT_CODEX_REVIEW`. Nothing automatically merges the candidate patch
+into the main checkout.
