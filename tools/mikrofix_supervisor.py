@@ -23,6 +23,7 @@ import secrets
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Any, Callable, Protocol
@@ -1385,6 +1386,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Launch metadata: {environment.metadata_file}")
             print(f"Run-specific lease: {environment.lease_file}")
             return 0
+    if not state_file.is_file():
+        print("No active supervisor run", file=sys.stderr)
+        return 2
     environment = load_run_environment(state_file)
     manager = WorkerManager(environment)
     if args.command == "workers":

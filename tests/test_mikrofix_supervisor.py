@@ -1,5 +1,7 @@
 import importlib.util
+import contextlib
 import fcntl
+import io
 import json
 import os
 from pathlib import Path
@@ -192,6 +194,26 @@ class PlanValidationTests(unittest.TestCase):
         self.assertEqual(("grant-lease", 5), (grant.command, grant.minutes))
         self.assertEqual("resume", resume.command)
         self.assertEqual("run", run_alias.command)
+
+    def test_status_without_active_run_is_friendly_and_nonzero(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                exit_code = supervisor_module.main([
+                    "--state-dir", temporary, "status",
+                ])
+        self.assertNotEqual(0, exit_code)
+        self.assertEqual("No active supervisor run\n", error.getvalue())
+
+    def test_workers_status_without_active_run_is_friendly_and_nonzero(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                exit_code = supervisor_module.main([
+                    "--state-dir", temporary, "workers", "status",
+                ])
+        self.assertNotEqual(0, exit_code)
+        self.assertEqual("No active supervisor run\n", error.getvalue())
 
     def test_rejects_path_escape(self):
         with self.assertRaises(ValueError):
