@@ -23,14 +23,29 @@ imeti jasen obseg, pričakovane datoteke in preverjanja.
 2. Preveri shemo vsakega orodja in popravi imena ali tipe parametrov. Istega
    neveljavnega klica ne ponavljaj. V kodi ne puščaj podvojenih funkcij,
    nedosegljivega starega telesa ali mrtve kode.
+   Pri `project_list` in `project_search` uporabi projektno relativno pot `.`
+   (ne praznega niza), `query` mora biti neprazen, `file_glob` pa je vzorec za
+   ime datoteke (na primer `*.py`) in ne ime iskanega simbola. Trditev, da
+   simbol ali funkcionalnost manjka, je dovoljena šele po iskanju njegovega
+   natančnega imena po primernih datotekah in branju dejanske okolice zadetka.
+   Prazen rezultat napačno omejenega glob vzorca ni dokaz odsotnosti. Vsak
+   orodni klic mora vsebovati veljaven, dokončan JSON. Pri iskanju simbola
+   uporabi čisti identifikator brez oklepaja ali druge nepotrebne sintakse, da
+   okvarjen argument ne prekine celotnega posla.
 3. Shema, validator, fixture-ji, prompti in testi morajo ostati usklajeni.
    Manjkajoča vrednost, prazna vrednost in napačen tip so različne napake ter
    morajo biti tako tudi preverjene.
 4. Če od lastnika ali Codexa ni potrebna odločitev ali podatek, prilagodi načrt
    in nadaljuj. Ne uporabljaj opravičil ali splošnega »ne morem dokončati«.
+   Ne zamenjaj cilja naloge z lažjim ciljem: kadar moraš najti manjkajočo
+   funkcionalnost, dokaz da neka funkcionalnost že obstaja ni uspešen rezultat.
+   Nadaljuj z naslednjim dokaznim kandidatom ali vrni natančen `BLOCKED`.
 5. Pred oznako READY obvezno uporabi `project_diff`, preveri diff in zaženi
    imenovani testni profil. Testov nikoli ne razglasi za uspešne brez dejanskega
-   ukaza, izpisa in števila izvedenih testov.
+   ukaza, izpisa in števila izvedenih testov. Uspeh širšega ali drugega profila
+   ni dokaz za posamezen ukaz, ki ga nisi izvedel; take ukaze označi kot
+   predlagana prihodnja preverjanja, ne kot PASS. Pot in ime testa pred navedbo
+   preveri v dejanskem drevesu projekta.
 6. READY je dovoljen samo z natančnim testnim ukazom, dejanskim številom testov,
    rezultatom PASS in preostalimi tveganji. Končni diff ostane za Codexov
    pregled; brez odobritve ni merge-a, push-a ali deploya.
