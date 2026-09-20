@@ -52,13 +52,16 @@ CONTROL_PLANE_FILES = {
     "tools/mikrofix_bridge.py",
     "tools/mikrofix_completion.py",
     "tools/mikrofix_local_agent.py",
+    "tools/mikrofix_agent_workspace.py",
     "tests/test_mikrofix_supervisor.py",
     "tests/test_mikrofix_bridge.py",
     "tests/test_mikrofix_completion.py",
     "tests/test_local_executor_server.py",
     "tests/test_mikrofix_local_agent.py",
+    "tests/test_mikrofix_agent_workspace.py",
     "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
     "docs/local_agents/LEKCIJE.md",
+    "docs/local_agents/WORKSPACE.md",
 }
 CONTROL_PLANE_PREFIXES = (
     "tools/local_executor/",
@@ -138,6 +141,7 @@ class RunEnvironment:
 
     run_id: str
     source_root: Path
+    repository_root: Path
     worktree: Path
     run_dir: Path
     bridge_home: Path
@@ -159,10 +163,13 @@ class RunEnvironment:
         state_dir: Path,
         plan: dict[str, Any],
         bridge_template: dict[str, Any],
+        *,
+        repository_root: Path | None = None,
     ) -> "RunEnvironment":
         validated = validate_plan(plan)
         run_id = validated["run_id"]
         source_root = source_root.resolve()
+        repository_root = (repository_root or source_root).resolve()
         state_dir = state_dir.resolve()
         worktree = state_dir / "worktrees" / run_id
         run_dir = state_dir / "runs" / run_id
@@ -187,7 +194,7 @@ class RunEnvironment:
         worktree.parent.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, mode=0o700)
         result = subprocess.run(
-            ["git", "-C", str(source_root), "worktree", "add", "--detach",
+            ["git", "-C", str(repository_root), "worktree", "add", "--detach",
              str(worktree), validated["base_checkpoint"]],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, check=False,
@@ -233,6 +240,8 @@ class RunEnvironment:
         atomic_write_immutable_json(bridge_config, config)
         metadata = {
             "run_id": run_id,
+            "repository_root": str(repository_root),
+            "trusted_control_root": str(source_root),
             "worktree": str(worktree),
             "lease_file": str(lease_file),
             "bridge": {
@@ -266,7 +275,7 @@ class RunEnvironment:
         }
         atomic_write_immutable_json(metadata_file, metadata)
         return cls(
-            run_id, source_root, worktree, run_dir, bridge_home, bridge_config,
+            run_id, source_root, repository_root, worktree, run_dir, bridge_home, bridge_config,
             executor_config_dir, executor_state_dir, allowed_manifest,
             immutable_plan, metadata_file, lease_file, executor_url,
             plan_sha, allowed_sha,
@@ -274,7 +283,7 @@ class RunEnvironment:
 
     def to_dict(self) -> dict[str, str]:
         return {field: str(getattr(self, field)) for field in (
-            "run_id", "source_root", "worktree", "run_dir", "bridge_home",
+            "run_id", "source_root", "repository_root", "worktree", "run_dir", "bridge_home",
             "bridge_config", "executor_config_dir", "executor_state_dir",
             "allowed_files_manifest", "immutable_plan", "metadata_file",
             "lease_file", "executor_url", "plan_sha256", "allowed_sha256",
@@ -282,8 +291,11 @@ class RunEnvironment:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RunEnvironment":
+        value = dict(value)
+        # State created before the repository/control-plane split used one root.
+        value.setdefault("repository_root", value.get("source_root"))
         path_fields = {
-            "source_root", "worktree", "run_dir", "bridge_home", "bridge_config",
+            "source_root", "repository_root", "worktree", "run_dir", "bridge_home", "bridge_config",
             "executor_config_dir", "executor_state_dir", "allowed_files_manifest",
             "immutable_plan", "metadata_file", "lease_file",
         }
@@ -1509,6 +1521,14 @@ def state_lock(state_file: Path):
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MikroFIX local agent supervisor")
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    parser.add_argument(
+        "--repository-root", type=Path, default=PROJECT_ROOT,
+        help="Agent-owned Git repository used only as the candidate baseline",
+    )
+    parser.add_argument(
+        "--notify-codex", action="store_true",
+        help="Explicitly bind CODEX_THREAD_ID; owner-only local completion is the default",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
     init = subparsers.add_parser("init")
     init.add_argument("plan", type=Path)
@@ -1568,11 +1588,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(f"State already exists: {state_file}")
             plan = json.loads(args.plan.read_text(encoding="utf-8"))
             validated = validate_plan(plan)
-            source_adapter = LocalAdapter(PROJECT_ROOT, state_dir)
+            repository_root = args.repository_root.expanduser().resolve()
+            source_adapter = LocalAdapter(repository_root, state_dir)
             source_adapter.verify_base_checkpoint(validated["base_checkpoint"])
             bridge_template = json.loads(DEFAULT_BRIDGE_CONFIG.read_text(encoding="utf-8"))
             environment = RunEnvironment.create(
-                PROJECT_ROOT, state_dir, validated, bridge_template
+                PROJECT_ROOT, state_dir, validated, bridge_template,
+                repository_root=repository_root,
             )
             adapter = LocalAdapter(
                 environment.worktree,
@@ -1586,7 +1608,10 @@ def main(argv: list[str] | None = None) -> int:
                 validated,
                 adapter.snapshot(),
                 environment,
-                codex_thread_id=os.environ.get("CODEX_THREAD_ID") or None,
+                codex_thread_id=(
+                    os.environ.get("CODEX_THREAD_ID")
+                    if args.notify_codex else None
+                ),
             )
             atomic_write_json(state_file, run)
             print(f"Initialized {run['plan']['run_id']} at {state_file}")

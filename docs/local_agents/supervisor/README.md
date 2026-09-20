@@ -4,6 +4,12 @@ Supervisor is the fail-closed coordinator above the existing Qwen bridge. It
 turns an owner-approved JSON plan into bounded implementation attempts, local
 checks, a GPT-OSS review and an immutable candidate patch for Codex review.
 
+The trusted control checkout and the agent-owned candidate repository may be
+different paths. Pass `--repository-root /path/to/agent/repository` before the
+subcommand. Trusted bridge, reviewer, executor controller and Python
+environments still come from the protected checkout containing this script;
+only the detached candidate worktree comes from the agent repository.
+
 It never merges, pushes, deploys, changes business rules, or bypasses the
 executor write lease. Every initialized run gets a detached Git worktree under
 `~/.local/state/mikrofix-supervisor/worktrees/<run-id>`. The main checkout is
@@ -31,7 +37,10 @@ merge, push and deployment to a human-reviewed workflow.
 Create a plan from `PLAN_SCHEMA.json`, then:
 
 ```bash
-python3 tools/mikrofix_supervisor.py init /path/to/plan.json
+python3 tools/mikrofix_supervisor.py \
+  --state-dir /home/mikrofix/MikroFIX_Agent_Workspace \
+  --repository-root /home/mikrofix/MikroFIX_Agent_Workspace/repository \
+  init /path/to/plan.json
 python3 tools/mikrofix_supervisor.py workers start
 python3 tools/mikrofix_supervisor.py workers status
 python3 tools/mikrofix_supervisor.py grant-lease --minutes 15
@@ -109,10 +118,11 @@ into the main checkout. All plan fields must be validated by `validate_plan`
 which rejects missing required fields, empty constraints/acceptance-criteria or
 context-link sections, unsafe or duplicate paths, and unknown properties.
 
-The originating `CODEX_THREAD_ID` is captured at dispatch/init; the bridge and
-supervisor never guess the newest thread. After a terminal job/run is durably
-stored, a private completion event is written and one at-most-once wake is
-attempted with the absolute Codex binary. The bounded wake message contains
+The originating `CODEX_THREAD_ID` is only used when explicitly supplied for a
+run; the bridge and supervisor never guess the newest thread. In the owner-only
+default no thread is supplied, so completion remains a durable local event and
+does not consume Codex usage. If a thread is explicitly bound, one at-most-once
+wake is attempted with the absolute Codex binary. The bounded wake message contains
 only the job ID, display name, mapped state, and event path; safe evidence
 paths, hashes, test status, risks, and a concrete blocked need remain in the
 private event. Raw model output and full diffs are never placed on the command

@@ -544,6 +544,47 @@ class RunEnvironmentTests(unittest.TestCase):
             environment.lease_file.write_text(json.dumps(lease), encoding="utf-8")
             self.assertTrue(adapter.lease_active())
 
+    def test_agent_repository_is_separate_from_trusted_control_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            trusted = base / "trusted"
+            repository = base / "agent-repository"
+            state_dir = base / "state"
+            trusted.mkdir()
+            self.git(trusted, "init", "-q")
+            self.git(trusted, "config", "user.email", "test@example.invalid")
+            self.git(trusted, "config", "user.name", "Supervisor Test")
+            (trusted / "app.py").write_text("print('trusted')\n", encoding="utf-8")
+            trusted_python = self.add_server_python(trusted)
+            trusted_bridge, _ = self.add_trusted_agent_tools(trusted)
+            self.git(trusted, "add", ".")
+            self.git(trusted, "commit", "-qm", "base")
+            subprocess.run(
+                ["git", "clone", "-q", "--no-hardlinks", str(trusted), str(repository)],
+                check=True,
+            )
+            (repository / "app.py").write_text("print('agent baseline')\n", encoding="utf-8")
+            self.git(repository, "config", "user.email", "test@example.invalid")
+            self.git(repository, "config", "user.name", "Agent Repository")
+            self.git(repository, "add", "app.py")
+            self.git(repository, "commit", "-qm", "agent baseline")
+            head = self.git(repository, "rev-parse", "HEAD")
+
+            environment = RunEnvironment.create(
+                trusted, state_dir, plan(base_checkpoint=head), {},
+                repository_root=repository,
+            )
+
+            self.assertEqual(repository.resolve(), environment.repository_root)
+            self.assertEqual("print('agent baseline')\n", (
+                environment.worktree / "app.py"
+            ).read_text(encoding="utf-8"))
+            metadata = json.loads(environment.metadata_file.read_text(encoding="utf-8"))
+            self.assertEqual(str(repository.resolve()), metadata["repository_root"])
+            self.assertEqual(str(trusted.resolve()), metadata["trusted_control_root"])
+            self.assertEqual(str(trusted_python), metadata["bridge"]["argv"][0])
+            self.assertEqual(str(trusted_bridge), metadata["bridge"]["argv"][1])
+
     def test_tampered_immutable_manifest_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -970,7 +1011,7 @@ class WorkerManagerTests(unittest.TestCase):
         altered["run_id"] = "mf_run_test"
         altered_environment = RunEnvironment(**{
             key: (Path(value) if key in {
-                "source_root", "worktree", "run_dir", "bridge_home", "bridge_config",
+                "source_root", "repository_root", "worktree", "run_dir", "bridge_home", "bridge_config",
                 "executor_config_dir", "executor_state_dir", "allowed_files_manifest",
                 "immutable_plan", "metadata_file", "lease_file",
             } else value)

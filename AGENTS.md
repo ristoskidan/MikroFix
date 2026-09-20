@@ -99,15 +99,15 @@ Naslednji korak: <kaj se izvede takoj po razrešitvi>
 
 ## Zaključek in povratni klic
 
-Ob terminalnem stanju nadzorni sloj enkrat obvesti izvorno Codex nit, ki je bila
-vezana ob dispatchu oziroma inicializaciji. Ne ugiba »zadnje« niti. Obvestilo
-vsebuje ID posla, človeku prijazno prikazno ime, stanje, varne poti in zgoščene
-vrednosti dokazov, dejanski testni rezultat oziroma mesto dokaza ter tveganja;
-pri BLOCKED tudi konkretno potrebo. Surov modelni izhod, celoten diff in
-skrivnosti ne sodijo v sporočilo.
+Ob terminalnem stanju nadzorni sloj enkrat ustvari zaseben trajni dogodek za
+lastnika. Privzeto ne kliče Codexa: lastnik lahko z lokalno ekipo pripravi več
+kandidatov in jih pozneje paketno pošlje v končni pregled. Codex nit se sme
+vezati samo z izrecno nastavitvijo za posamezen tek. Nikoli se ne ugiba »zadnje«
+niti.
 
-Če izvorna nit ni bila vezana, mora ostati zaseben trajni dogodek in uporabniku
-vidna pot do njega. At-most-once zahtevek prepreči dvojni klic tudi po ponovnem
-zagonu. Po ustvarjenem zahtevku se neuspešen klic namenoma ne ponovi samodejno,
-zato lahko redka prekinitev med zahtevkom in sprejemom pomeni, da je potreben
-ročni pregled trajnega dogodka.
+Dogodek vsebuje ID posla, človeku prijazno prikazno ime, stanje, varne poti in
+zgoščene vrednosti dokazov, dejanski testni rezultat oziroma mesto dokaza ter
+tveganja; pri BLOCKED tudi konkretno potrebo. Surov modelni izhod, celoten diff
+in skrivnosti ne sodijo v obvestilo. At-most-once zapis prepreči podvajanje po
+ponovnem zagonu. APPROVE, REVISE in REJECT so Codexove odločitve nad kandidatom,
+ne terminalne trditve lokalnega modela.
