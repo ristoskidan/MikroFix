@@ -173,7 +173,8 @@ def run_bridge_monitor(
 ) -> None:
     """Run the planner monitor visibly when a desktop terminal is available."""
     terminal = shutil.which("xfce4-terminal")
-    if not terminal or not os.environ.get("DISPLAY"):
+    visible = os.environ.get("MIKROFIX_VISIBLE_PLANNER", "1") != "0"
+    if not visible or not terminal or not os.environ.get("DISPLAY"):
         command(bridge + ["monitor", "--once"], cwd=PROJECT_ROOT,
                 env=bridge_env, timeout=1800)
         return
@@ -291,15 +292,22 @@ def new_run_id(workspace: Path) -> str:
 
 def submit(task: str, *, workspace: Path = DEFAULT_WORKSPACE,
            generator: Callable[..., str] = run_planner,
-           initialize: bool = True) -> dict[str, Any]:
+           initialize: bool = True,
+           parent_run_id: str | None = None) -> dict[str, Any]:
     workspace = workspace.expanduser().resolve()
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()
+    if parent_run_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+            raise ManagerError("Unsafe parent run id")
+        if not (workspace / "jobs" / parent_run_id / "request.json").is_file():
+            raise ManagerError(f"Parent run does not exist: {parent_run_id}")
     run_id = new_run_id(workspace)
     job_dir = workspace / "jobs" / run_id
     job_dir.mkdir(parents=True, mode=0o700)
     atomic_write_immutable_json(job_dir / "request.json", {
         "schema_version": 1, "run_id": run_id, "task": task,
+        "parent_run_id": parent_run_id,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
     state = {"schema_version": 1, "run_id": run_id, "state": "PLANNING"}
@@ -328,19 +336,90 @@ def submit(task: str, *, workspace: Path = DEFAULT_WORKSPACE,
     return state
 
 
+def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
+                lease_minutes: int = 30) -> dict[str, Any]:
+    """Execute one planned run locally through the trusted supervisor."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ManagerError("Unsafe run id")
+    job_dir = workspace / "jobs" / run_id
+    manager_file = job_dir / "manager.json"
+    state = json.loads(manager_file.read_text(encoding="utf-8"))
+    if state.get("state") != "READY_FOR_OWNER_LEASE":
+        raise ManagerError(
+            f"Run {run_id} is not ready for execution: {state.get('state')}"
+        )
+    config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    repository = Path(config["repository"]).resolve()
+    supervisor_state = Path(state["supervisor_state"]).resolve()
+    base = [
+        sys.executable, str(PROJECT_ROOT / "tools/mikrofix_supervisor.py"),
+        "--state-dir", str(workspace), "--repository-root", str(repository),
+    ]
+    state["state"] = "WAITING_FOR_OWNER_LEASE"
+    atomic_write_json(manager_file, state)
+    workers_started = False
+    try:
+        command(base + ["workers", "start", "--state", str(supervisor_state)],
+                cwd=PROJECT_ROOT, timeout=120)
+        workers_started = True
+        command(base + ["grant-lease", "--minutes", str(lease_minutes),
+                        "--state", str(supervisor_state)],
+                cwd=PROJECT_ROOT, timeout=360)
+        state["state"] = "RUNNING_LOCAL"
+        atomic_write_json(manager_file, state)
+        command(base + ["resume", "--state", str(supervisor_state)],
+                cwd=PROJECT_ROOT, timeout=7200)
+        supervisor = json.loads(supervisor_state.read_text(encoding="utf-8"))
+        stage = supervisor.get("stage")
+        state["state"] = (
+            "READY_FOR_CODEX_REVIEW"
+            if stage == "AWAIT_CODEX_REVIEW" else "BLOCKED"
+        )
+        state["local_stage"] = stage
+        state["checkpoint"] = supervisor.get("checkpoint")
+        state["exact_reason"] = supervisor.get("feedback", "")
+    except Exception as exc:
+        state["state"] = "BLOCKED"
+        state["exact_reason"] = str(exc)
+        raise
+    finally:
+        if workers_started:
+            try:
+                command(base + ["workers", "stop", "--state", str(supervisor_state)],
+                        cwd=PROJECT_ROOT, timeout=120)
+            except Exception as stop_error:
+                state["stop_warning"] = str(stop_error)
+        atomic_write_json(manager_file, state)
+    return state
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MikroFix local work manager")
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     sub = parser.add_subparsers(dest="command_name", required=True)
     submit_parser = sub.add_parser("submit")
     submit_parser.add_argument("--task", required=True)
+    submit_parser.add_argument("--parent")
+    execute_parser = sub.add_parser("execute")
+    execute_parser.add_argument("run_id")
+    execute_parser.add_argument("--lease-minutes", type=int, default=30)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        result = submit(args.task, workspace=args.workspace)
+        if args.command_name == "submit":
+            result = submit(
+                args.task, workspace=args.workspace,
+                parent_run_id=args.parent,
+            )
+        else:
+            result = execute_run(
+                args.run_id, workspace=args.workspace,
+                lease_minutes=args.lease_minutes,
+            )
     except Exception as exc:
         print(json.dumps({"state": "BLOCKED", "exact_reason": str(exc)},
                          ensure_ascii=False, indent=2), file=sys.stderr)

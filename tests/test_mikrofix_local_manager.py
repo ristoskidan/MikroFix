@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "mikrofix_local_manager.py"
@@ -140,6 +141,57 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual("Owner task", request["task"])
         self.assertEqual(request["run_id"], plan["run_id"])
         self.assertEqual(0, (job_dir / "plan.json").stat().st_mode & 0o222)
+
+    def test_follow_up_requires_existing_parent_and_persists_link(self):
+        with self.assertRaisesRegex(manager.ManagerError, "Parent run does not exist"):
+            manager.submit(
+                "Clarification", workspace=self.workspace,
+                generator=lambda *_args, **_kwargs: json.dumps(model_plan()),
+                initialize=False, parent_run_id="MF-MISSING",
+            )
+        parent = self.workspace / "jobs" / "MF-PARENT"
+        parent.mkdir()
+        (parent / "request.json").write_text("{}\n", encoding="utf-8")
+        state = manager.submit(
+            "Clarification", workspace=self.workspace,
+            generator=lambda *_args, **_kwargs: json.dumps(model_plan()),
+            initialize=False, parent_run_id="MF-PARENT",
+        )
+        request = json.loads(
+            (Path(state["plan"]).parent / "request.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("MF-PARENT", request["parent_run_id"])
+
+    def test_execute_run_reaches_review_gate_and_stops_workers(self):
+        run_id = "MF-READY"
+        job_dir = self.workspace / "jobs" / run_id
+        job_dir.mkdir()
+        supervisor_state = job_dir / "supervisor.json"
+        supervisor_state.write_text(json.dumps({
+            "stage": "PLANNED", "checkpoint": None, "feedback": "",
+        }), encoding="utf-8")
+        (job_dir / "manager.json").write_text(json.dumps({
+            "schema_version": 1, "run_id": run_id,
+            "state": "READY_FOR_OWNER_LEASE",
+            "supervisor_state": str(supervisor_state),
+        }), encoding="utf-8")
+        calls = []
+
+        def fake_command(args, **_kwargs):
+            calls.append(args)
+            if "resume" in args:
+                supervisor_state.write_text(json.dumps({
+                    "stage": "AWAIT_CODEX_REVIEW",
+                    "checkpoint": "/candidate/manifest.json", "feedback": "",
+                }), encoding="utf-8")
+            return "ok"
+
+        with mock.patch.object(manager, "command", side_effect=fake_command):
+            state = manager.execute_run(run_id, workspace=self.workspace)
+        self.assertEqual("READY_FOR_CODEX_REVIEW", state["state"])
+        self.assertEqual("/candidate/manifest.json", state["checkpoint"])
+        self.assertTrue(any("grant-lease" in call for call in calls))
+        self.assertTrue(any("stop" in call for call in calls))
 
 
 if __name__ == "__main__":
