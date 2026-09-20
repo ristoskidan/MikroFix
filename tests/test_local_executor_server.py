@@ -84,6 +84,59 @@ deleted file mode 100644
             ):
                 self.assertEqual(server.validate_patch(patch), ["example.py"])
 
+    def test_create_file_accepts_only_exact_approved_new_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "allowed.json"
+            manifest.write_text(
+                json.dumps({"allowed_files": ["docs/local_agents/OWNER_WORKFLOW.md"]}),
+                encoding="utf-8",
+            )
+            request = server.CreateRequest(
+                path="docs/local_agents/OWNER_WORKFLOW.md",
+                content="# Owner workflow\n",
+                summary="create approved workflow documentation",
+            )
+            with (
+                mock.patch.object(server, "PROJECT_ROOT", root),
+                mock.patch.object(server, "ALLOWED_FILES_MANIFEST", str(manifest)),
+                mock.patch.object(
+                    server, "require_lease", return_value={"lease_id": "test"}
+                ),
+                mock.patch.object(server, "_audit"),
+            ):
+                result = server.project_create(request)
+            target = root / "docs/local_agents/OWNER_WORKFLOW.md"
+            self.assertTrue(result["created"])
+            self.assertEqual("# Owner workflow\n", target.read_text(encoding="utf-8"))
+
+    def test_create_file_rejects_outside_manifest_and_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "allowed.json"
+            manifest.write_text(
+                json.dumps({"allowed_files": ["approved.md"]}), encoding="utf-8"
+            )
+            with (
+                mock.patch.object(server, "PROJECT_ROOT", root),
+                mock.patch.object(server, "ALLOWED_FILES_MANIFEST", str(manifest)),
+                mock.patch.object(
+                    server, "require_lease", return_value={"lease_id": "test"}
+                ),
+            ):
+                with self.assertRaises(HTTPException) as outside:
+                    server.project_create(server.CreateRequest(
+                        path="other.md", content="no\n", summary="reject other path"
+                    ))
+                self.assertEqual(403, outside.exception.status_code)
+                (root / "approved.md").write_text("keep\n", encoding="utf-8")
+                with self.assertRaises(HTTPException) as existing:
+                    server.project_create(server.CreateRequest(
+                        path="approved.md", content="replace\n", summary="reject overwrite"
+                    ))
+                self.assertEqual(409, existing.exception.status_code)
+                self.assertEqual("keep\n", (root / "approved.md").read_text(encoding="utf-8"))
+
     def test_exact_replace_requires_one_match_and_preserves_other_text(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

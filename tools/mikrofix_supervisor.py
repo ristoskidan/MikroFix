@@ -242,6 +242,7 @@ class RunEnvironment:
             "max_steps": int(bridge_template.get("max_steps", 30)),
             "keep_alive": str(bridge_template.get("worker_keep_alive", "5m")),
             "agent_role": "Qwen — lokalni izvajalec",
+            "completion_policy": "supervisor_only",
         }
         atomic_write_immutable_json(bridge_config, config)
         metadata = {

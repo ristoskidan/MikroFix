@@ -106,6 +106,17 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertIsNone(self.bridge.notify_job_completion(job, runner=runner))
         self.assertEqual([], runner.calls)
 
+    def test_supervisor_only_policy_suppresses_inner_job_event(self):
+        job = self.bridge.create_job("Inner worker", codex_thread_id=THREAD_ID)
+        job.update(status="completed", result="done", finished_at=self.bridge.now())
+        self.bridge.save_job(job)
+        runner = FakeRunner()
+        with mock.patch.object(self.bridge, "COMPLETION_POLICY", "supervisor_only"):
+            result = self.bridge.notify_job_completion(job, runner=runner)
+        self.assertEqual("suppressed_supervisor_only", result["status"])
+        self.assertEqual([], runner.calls)
+        self.assertFalse(self.bridge.COMPLETION_OUTBOX.exists())
+
     def test_no_thread_replay_keeps_one_stable_event(self):
         job = self.bridge.create_job("No origin thread")
         job.update(status="failed", error="bounded failure", finished_at=self.bridge.now())

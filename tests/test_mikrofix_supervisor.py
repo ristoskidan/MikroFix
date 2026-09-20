@@ -498,6 +498,7 @@ class RunEnvironmentTests(unittest.TestCase):
             self.assertEqual(32768, bridge["num_ctx"])
             self.assertEqual("2m", bridge["keep_alive"])
             self.assertEqual("Qwen — lokalni izvajalec", bridge["agent_role"])
+            self.assertEqual("supervisor_only", bridge["completion_policy"])
             self.assertEqual(str(environment.executor_config_dir / "token"),
                              bridge["token_file"])
             allowed = json.loads(

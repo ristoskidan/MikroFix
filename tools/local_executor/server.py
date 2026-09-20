@@ -285,6 +285,12 @@ class PatchRequest(BaseModel):
     summary: str = Field(min_length=3, max_length=300)
 
 
+class CreateRequest(BaseModel):
+    path: str
+    content: str = Field(min_length=1, max_length=MAX_PATCH_BYTES)
+    summary: str = Field(min_length=3, max_length=300)
+
+
 class ReplaceRequest(BaseModel):
     path: str
     old: str = Field(min_length=1, max_length=MAX_PATCH_BYTES)
@@ -514,6 +520,51 @@ def project_apply_patch(request: PatchRequest) -> dict[str, object]:
         },
     )
     return {"applied": True, "paths": paths, "patch_sha256": patch_sha256, "status": after[-20_000:]}
+
+
+@app.post("/v1/project/create", dependencies=[Depends(authenticate)])
+def project_create(request: CreateRequest) -> dict[str, object]:
+    """Create one approved text file without exposing a shell or overwriting data."""
+    lease = require_lease()
+    path = safe_path(request.path)
+    relative = path.relative_to(PROJECT_ROOT).as_posix()
+    if path.suffix.casefold() not in READABLE_SUFFIXES:
+        raise HTTPException(status_code=403, detail=f"File type is not writable: {relative}")
+    require_approved_paths({relative})
+    if path.exists():
+        raise HTTPException(status_code=409, detail="Approved file already exists; use patch or replace")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(request.content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except FileExistsError as exc:
+        raise HTTPException(
+            status_code=409, detail="Approved file already exists; use patch or replace"
+        ) from exc
+    directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    content_sha256 = hashlib.sha256(request.content.encode("utf-8")).hexdigest()
+    _audit(
+        "create_file",
+        ok=True,
+        details={
+            "summary": request.summary,
+            "path": relative,
+            "content_sha256": content_sha256,
+            "lease_id": lease.get("lease_id"),
+        },
+    )
+    return {
+        "created": True,
+        "path": relative,
+        "content_sha256": content_sha256,
+    }
 
 
 @app.post("/v1/project/replace", dependencies=[Depends(authenticate)])

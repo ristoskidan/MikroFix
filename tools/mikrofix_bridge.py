@@ -63,6 +63,7 @@ MAX_STEPS = int(CFG.get("max_steps", 30))
 NUM_CTX = int(CFG.get("num_ctx", 65536))
 KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
 AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
+COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
 
 
 TOOLS = [
@@ -189,6 +190,25 @@ TOOLS = [
                     }
                 },
                 "required": ["patch", "summary"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_create",
+            "description": (
+                "Varno ustvari eno novo besedilno datoteko na poti, ki jo je "
+                "supervisor izrecno dovolil. Obstoječe datoteke ne prepiše."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string", "minLength": 1, "maxLength": 128000},
+                    "summary": {"type": "string", "minLength": 3, "maxLength": 300}
+                },
+                "required": ["path", "content", "summary"]
             }
         }
     },
@@ -338,6 +358,7 @@ TOOL_ENDPOINTS = {
     "project_search": ("POST", "/v1/project/search"),
     "project_diff": ("GET", "/v1/project/diff"),
     "project_apply_patch": ("POST", "/v1/project/apply-patch"),
+    "project_create": ("POST", "/v1/project/create"),
     "project_replace": ("POST", "/v1/project/replace"),
     "project_run_check": ("POST", "/v1/project/run-check"),
     "system_command": ("POST", "/v1/system/command"),
@@ -584,6 +605,8 @@ def notify_job_completion(job, *, runner=None, notify_runner=None):
     """Persist one terminal event and attempt the bound thread wake at most once."""
     if job.get("status") not in {"completed", "failed"}:
         return None
+    if COMPLETION_POLICY == "supervisor_only":
+        return {"status": "suppressed_supervisor_only"}
     paths, hashes = _evidence_payload(job)
     kwargs = {}
     if runner is not None:
