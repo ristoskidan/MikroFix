@@ -428,6 +428,29 @@ def executor_request(method, path, data=None):
     )
 
 
+def normalize_tool_arguments(name, arguments):
+    """Repair harmless bounded model argument mistakes before executor validation."""
+    normalized = dict(arguments) if isinstance(arguments, dict) else {}
+
+    if name in {"project_list", "project_search"}:
+        path = normalized.get("path")
+        if path is None or (isinstance(path, str) and not path.strip()):
+            normalized["path"] = "."
+
+    limits = {
+        "project_list": ("max_entries", 500),
+        "project_search": ("max_results", 200),
+    }
+    limit = limits.get(name)
+    if limit:
+        key, maximum = limit
+        value = normalized.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            normalized[key] = min(max(value, 1), maximum)
+
+    return normalized
+
+
 def execute_tool(name, arguments):
     if name not in TOOL_ENDPOINTS:
         raise RuntimeError(f"Neznano orodje: {name}")
@@ -437,7 +460,9 @@ def execute_tool(name, arguments):
     if method == "GET":
         return executor_request(method, path)
 
-    return executor_request(method, path, arguments)
+    return executor_request(
+        method, path, normalize_tool_arguments(name, arguments)
+    )
 
 
 def call_qwen(messages):

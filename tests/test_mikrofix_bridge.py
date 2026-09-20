@@ -155,6 +155,32 @@ class BridgeCompletionTests(unittest.TestCase):
         ):
             self.assertIn(required, prompt)
 
+    def test_normalizes_empty_project_paths_and_bounded_limits(self):
+        self.assertEqual(
+            {"path": ".", "max_entries": 500},
+            self.bridge.normalize_tool_arguments(
+                "project_list", {"path": "", "max_entries": 1000}
+            ),
+        )
+        self.assertEqual(
+            {"path": ".", "query": "Office", "max_results": 200},
+            self.bridge.normalize_tool_arguments(
+                "project_search",
+                {"path": "   ", "query": "Office", "max_results": 999},
+            ),
+        )
+
+    def test_execute_tool_sends_normalized_arguments(self):
+        with mock.patch.object(
+            self.bridge, "executor_request", return_value={"ok": True}
+        ) as request:
+            self.bridge.execute_tool(
+                "project_list", {"path": "", "max_entries": 1000}
+            )
+        request.assert_called_once_with(
+            "POST", "/v1/project/list", {"path": ".", "max_entries": 500}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
