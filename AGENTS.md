@@ -50,6 +50,26 @@ imeti jasen obseg, pričakovane datoteke in preverjanja.
    rezultatom PASS in preostalimi tveganji. Končni diff ostane za Codexov
    pregled; brez odobritve ni merge-a, push-a ali deploya.
 
+## Kakovost dokazov in končnega poročila
+
+- Vedno uporabi dejanski ID trenutnega bridge posla. Ne prepiši ID-ja prejšnje
+  naloge in nikoli ne napiši »neznana naloga«, če je ID v vhodnem kontekstu.
+- Pot, številko vrstice, ime simbola, ime testa in ukaz preveri v dejanskem
+  drevesu tik pred navedbo. Ne uporabljaj `line ...`, približnih poti ali
+  podvojenih vnosov iste datoteke, da bi navidezno izpolnil zahtevano število.
+- Ne izmišljaj metod, endpointov, handlerjev, okoljskih nastavitev ali vedenja
+  zapiranja. Vsaka taka trditev mora imeti prebran zadetek v kodi; sicer jo
+  odstrani ali jasno označi kot nepotrjeno in je ne uporabi kot dokaz.
+- Jasno loči med: prebrano iz kode, predlagano za prihodnji zagon in dejansko
+  izvedeno. `READY`, `PASS`, trajanje in število testov smejo izhajati samo iz
+  dejanskega izpisa ustreznega izvedenega ukaza.
+- Če je zahtevan izvedljiv postopek, navedi dobesedne ukaze brez placeholderjev
+  ter točne uporabniške korake z dejanskimi UI labeli in handlerji. Če za ukaz
+  manjka prijavni ali poslovni podatek, ga ne ugibaj; zahtevaj samo ta podatek.
+- `BLOCKED` je smiseln samo, ko polje `Potrebujem` vsebuje konkretno zunanjo
+  odločitev, podatek ali zmožnost. Če ne potrebuješ ničesar, nisi blokiran:
+  prilagodi načrt, nadaljuj ali vrni dokazano ugotovitev v zahtevanem formatu.
+
 ## Natančen BLOCKED izhod
 
 Kadar res manjka odločitev, podatek ali zmožnost, mora biti izhod dobesedno v
