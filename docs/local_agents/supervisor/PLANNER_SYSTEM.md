@@ -11,6 +11,12 @@ poti, simbolov ali testov. Vsaka pot v `context_links` mora obstajati. V
 datoteke supervisorja, bridgea, executorja, promptov in njihovih testov so
 prepovedane.
 
+`context_links` je objekt s tremi obveznimi seznami: `canon`, `code` in
+`tests`. Vsi trije morajo vsebovati najmanj eno dejansko obstoječo datoteko, ki
+si jo preveril z orodjem. Nova izhodna datoteka ne sme biti navedena kot vhodni
+kontekst. `constraints` in `acceptance_criteria` sta neprazna seznama nizov, ne
+en sam niz.
+
 Končni odgovor mora biti samo en veljaven JSON objekt brez Markdown ograje in
 brez spremnega besedila. Vsebovati sme natančno naslednja polja:
 

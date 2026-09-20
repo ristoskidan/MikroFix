@@ -84,7 +84,7 @@ class LocalManagerTests(unittest.TestCase):
             "id": "A1", "task": "Write documentation",
             "checks": [], "expected_files": ["app.py"],
         }])
-        with self.assertRaisesRegex(ValueError, "checks must be a non-empty list"):
+        with self.assertRaisesRegex(manager.ManagerError, "checks must be a non-empty list"):
             manager.normalize_plan(
                 json.dumps(invalid), run_id="MF-LOCAL-1",
                 repository=self.repository,
@@ -92,7 +92,28 @@ class LocalManagerTests(unittest.TestCase):
         prompt = manager.planner_prompt("Write documentation", "checks are empty")
         self.assertIn("PREJŠNJI IZHOD JE BIL ZAVRNJEN", prompt)
         self.assertIn("checks are empty", prompt)
-        with self.assertRaisesRegex(manager.ManagerError, "missing context"):
+
+    def test_semantic_feedback_reports_all_shape_and_context_errors(self):
+        invalid = model_plan(
+            constraints="not a list",
+            acceptance_criteria="not a list",
+            context_links={
+                "canon": ["missing-canon.md"],
+                "code": ["app.py"],
+                "tests": ["missing-test.py"],
+            },
+        )
+        with self.assertRaises(manager.ManagerError) as raised:
+            manager.normalize_plan(
+                json.dumps(invalid), run_id="MF-LOCAL-1",
+                repository=self.repository,
+            )
+        message = str(raised.exception)
+        self.assertIn("constraints must be a non-empty list", message)
+        self.assertIn("acceptance_criteria must be a non-empty list", message)
+        self.assertIn("missing-canon.md", message)
+        self.assertIn("missing-test.py", message)
+        with self.assertRaisesRegex(manager.ManagerError, "missing file"):
             manager.normalize_plan(
                 json.dumps(model_plan(context_links={
                     "canon": ["missing.md"], "code": ["app.py"],

@@ -35,6 +35,7 @@ MODEL_PLAN_FIELDS = {
     "objective", "allowed_files", "atoms", "constraints", "context_links",
     "acceptance_criteria",
 }
+MAX_PLANNER_ATTEMPTS = 3
 
 
 class ManagerError(RuntimeError):
@@ -71,8 +72,40 @@ def parse_model_json(raw: str) -> dict[str, Any]:
     return value
 
 
+def model_plan_errors(value: dict[str, Any], repository: Path) -> list[str]:
+    """Return all cheap semantic errors so one retry can fix them together."""
+    errors: list[str] = []
+    for key in ("constraints", "acceptance_criteria"):
+        items = value.get(key)
+        if not isinstance(items, list) or not items:
+            errors.append(f"{key} must be a non-empty list")
+        elif any(not isinstance(item, str) or not item.strip() for item in items):
+            errors.append(f"{key} entries must be non-empty strings")
+    atoms = value.get("atoms")
+    if isinstance(atoms, list):
+        for index, atom in enumerate(atoms):
+            if isinstance(atom, dict) and not atom.get("checks"):
+                errors.append(f"atoms[{index}].checks must be a non-empty list")
+    context = value.get("context_links")
+    if not isinstance(context, dict):
+        errors.append("context_links must be an object with canon, code and tests lists")
+    else:
+        for section in ("canon", "code", "tests"):
+            paths = context.get(section)
+            if not isinstance(paths, list) or not paths:
+                errors.append(f"context_links.{section} must be a non-empty list")
+                continue
+            for relative in paths:
+                if not isinstance(relative, str) or not (repository / relative).is_file():
+                    errors.append(f"context_links.{section} missing file: {relative}")
+    return errors
+
+
 def normalize_plan(raw: str, *, run_id: str, repository: Path) -> dict[str, Any]:
     model_plan = parse_model_json(raw)
+    preliminary_errors = model_plan_errors(model_plan, repository)
+    if preliminary_errors:
+        raise ManagerError("; ".join(preliminary_errors))
     head = command(["git", "rev-parse", "HEAD"], cwd=repository, timeout=30)
     plan = {
         **model_plan,
@@ -216,7 +249,7 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
     try:
         wait_for_executor(executor_url, token_file, process)
         last_error = ""
-        for attempt in range(2):
+        for attempt in range(MAX_PLANNER_ATTEMPTS):
             job_id = command(
                 bridge + ["dispatch", "--name", "Načrt lokalnega vodje",
                           "--task", planner_prompt(task, last_error)],
@@ -232,7 +265,10 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
                 return raw
             except (ManagerError, ValueError) as exc:
                 last_error = str(exc)
-        raise ManagerError("Planner returned invalid JSON twice: " + last_error)
+        raise ManagerError(
+            f"Planner remained invalid after {MAX_PLANNER_ATTEMPTS} attempts: "
+            + last_error
+        )
     finally:
         process.terminate()
         try:
