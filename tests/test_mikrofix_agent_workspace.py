@@ -58,6 +58,7 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.workspace / "repository" / "app.py"
         ).read_text(encoding="utf-8"))
         self.assertEqual(0, (self.workspace / "knowledge" / "AGENTS.md").stat().st_mode & 0o222)
+        self.assertEqual(0, (self.workspace / "knowledge").stat().st_mode & 0o222)
         self.assertEqual("owner_only", result["notification_policy"])
         dirty_report = self.workspace / "reports" / "SOURCE_DIRTY_AT_CREATION.txt"
         self.assertIn("app.py", dirty_report.read_text(encoding="utf-8"))
@@ -72,6 +73,18 @@ class AgentWorkspaceTests(unittest.TestCase):
         result = workspace_module.verify_workspace(self.workspace)
         self.assertEqual("INVALID", result["status"])
         self.assertEqual(["AGENTS.md"], result["knowledge_mismatches"])
+
+    def test_verify_detects_unexpected_knowledge_file_and_writable_root(self):
+        workspace_module.init_workspace(self.source, self.workspace)
+        knowledge = self.workspace / "knowledge"
+        knowledge.chmod(0o700)
+        (knowledge / "injected.md").write_text("not canonical\n", encoding="utf-8")
+        result = workspace_module.verify_workspace(self.workspace)
+        self.assertEqual("INVALID", result["status"])
+        self.assertEqual(
+            ["UNEXPECTED:injected.md", "WRITABLE:."],
+            result["knowledge_mismatches"],
+        )
 
     def test_init_refuses_existing_workspace(self):
         self.workspace.mkdir()

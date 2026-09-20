@@ -80,6 +80,7 @@ def copy_knowledge(source: Path, destination: Path) -> dict[str, str]:
             hashes[path.relative_to(destination).as_posix()] = sha256(path)
         elif path.is_dir():
             path.chmod(0o500)
+    destination.chmod(0o500)
     return hashes
 
 
@@ -178,10 +179,22 @@ def verify_workspace(workspace: Path) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     mismatches = []
     knowledge = workspace / "knowledge"
-    for relative, expected in manifest.get("files", {}).items():
+    expected_files = manifest.get("files", {})
+    for relative, expected in expected_files.items():
         path = knowledge / relative
         if not path.is_file() or sha256(path) != expected:
             mismatches.append(relative)
+    actual_files = {
+        path.relative_to(knowledge).as_posix()
+        for path in knowledge.rglob("*") if path.is_file()
+    }
+    mismatches.extend(
+        f"UNEXPECTED:{relative}"
+        for relative in sorted(actual_files - set(expected_files))
+    )
+    if knowledge.stat().st_mode & 0o222:
+        mismatches.append("WRITABLE:.")
+    mismatches = sorted(set(mismatches))
     repository = Path(config["repository"])
     repository_head = run(["git", "-C", str(repository), "rev-parse", "HEAD"])
     checkpoint = json.loads(
