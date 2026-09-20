@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=MikroFix – lokalni vodja projekta
-Comment=Pogovor, naloge in pregled lokalne ekipe GPT-OSS in Qwen
-Icon=chat
-Exec=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/.venv/bin/python /home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/tools/mikrofix_local_manager_ui.py
+Comment=Lokalni spletni pogovor, naloge in pregled ekipe GPT-OSS in Qwen
+Icon=web-browser
+Exec=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/.venv/bin/python /home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/tools/mikrofix_local_web.py --open
 Path=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV
 Categories=Utility;
-Keywords=MikroFix;GPT-OSS;Qwen;lokalni agent;projekt;
+Keywords=MikroFix;GPT-OSS;Qwen;lokalni agent;projekt;Brave;
 StartupNotify=true
 Terminal=false

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MikroFix – lokalni vodja v ozadju
+Comment=Lokalni spletni vmesnik za varno delo z GPT-OSS in Qwen
+Exec=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/.venv/bin/python /home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/tools/mikrofix_local_web.py --serve
+Path=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV
+Icon=web-browser
+Terminal=false
+X-GNOME-Autostart-enabled=true

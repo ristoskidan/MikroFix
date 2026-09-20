@@ -55,6 +55,8 @@ CONTROL_PLANE_FILES = {
     "tools/mikrofix_agent_workspace.py",
     "tools/mikrofix_local_manager.py",
     "tools/mikrofix_local_manager_ui.py",
+    "tools/mikrofix_local_web.py",
+    "tools/mikrofix_local_manager_web.html",
     "tests/test_mikrofix_supervisor.py",
     "tests/test_mikrofix_bridge.py",
     "tests/test_mikrofix_completion.py",
@@ -63,11 +65,13 @@ CONTROL_PLANE_FILES = {
     "tests/test_mikrofix_agent_workspace.py",
     "tests/test_mikrofix_local_manager.py",
     "tests/test_mikrofix_local_manager_ui.py",
+    "tests/test_mikrofix_local_web.py",
     "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
     "docs/local_agents/LEKCIJE.md",
     "docs/local_agents/WORKSPACE.md",
     "docs/local_agents/supervisor/PLANNER_SYSTEM.md",
     "desktop/mikrofix-local-manager.desktop",
+    "desktop/mikrofix-local-manager-autostart.desktop",
 }
 CONTROL_PLANE_PREFIXES = (
     "tools/local_executor/",

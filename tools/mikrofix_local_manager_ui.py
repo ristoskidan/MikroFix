@@ -18,6 +18,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
 MANAGER = PROJECT_ROOT / "tools" / "mikrofix_local_manager.py"
+WINDOW_TITLE = "MikroFix – lokalni vodja projekta"
 
 STATE_LABELS = {
     "PLANNING": "Lokalni vodja pregleduje projekt in pripravlja načrt",
@@ -118,6 +119,34 @@ def render_job(job: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def activate_existing_window() -> bool:
+    """Raise the already-running manager when the desktop shortcut is clicked again."""
+    try:
+        search = subprocess.run(
+            ["xdotool", "search", "--name", WINDOW_TITLE],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        window_ids = [line.strip() for line in search.stdout.splitlines() if line.strip()]
+        if search.returncode != 0 or not window_ids:
+            return False
+        activated = subprocess.run(
+            ["xdotool", "windowactivate", "--sync", window_ids[-1]],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+        return activated.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 class LocalManagerUI:
     def __init__(self, root: tk.Tk, workspace: Path = DEFAULT_WORKSPACE):
         self.root = root
@@ -125,7 +154,7 @@ class LocalManagerUI:
         self.jobs: list[dict[str, Any]] = []
         self.selected_run_id: str | None = None
         self.last_render = ""
-        root.title("MikroFix – lokalni vodja projekta")
+        root.title(WINDOW_TITLE)
         root.geometry("1180x760")
         root.minsize(900, 620)
         root.configure(bg="#17212b")
@@ -311,6 +340,8 @@ def main() -> int:
     try:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        activate_existing_window()
+        lock.close()
         return 0
     root = tk.Tk()
     LocalManagerUI(root)

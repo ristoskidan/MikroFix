@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "mikrofix_local_manager_ui.py"
@@ -15,6 +16,16 @@ SPEC.loader.exec_module(ui)
 
 
 class LocalManagerUIPureTests(unittest.TestCase):
+    def test_existing_window_is_raised_by_second_shortcut_click(self):
+        search = mock.Mock(returncode=0, stdout="111\n222\n")
+        activate = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(ui.subprocess, "run", side_effect=[search, activate]) as run:
+            self.assertTrue(ui.activate_existing_window())
+        self.assertEqual(
+            ["xdotool", "windowactivate", "--sync", "222"],
+            run.call_args_list[1].args[0],
+        )
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.workspace = Path(self.temp.name)
