@@ -472,7 +472,10 @@ class RunEnvironmentTests(unittest.TestCase):
                 {
                     "ollama_url": "http://127.0.0.1:11434/api/chat",
                     "model": "fake-model",
+                    "worker_model": "fake-worker-model",
                     "num_ctx": 65536,
+                    "worker_num_ctx": 32768,
+                    "worker_keep_alive": "2m",
                     "max_steps": 12,
                 },
             )
@@ -491,7 +494,10 @@ class RunEnvironmentTests(unittest.TestCase):
 
             bridge = json.loads(environment.bridge_config.read_text(encoding="utf-8"))
             self.assertEqual(str(environment.worktree), bridge["project"])
-            self.assertEqual("fake-model", bridge["model"])
+            self.assertEqual("fake-worker-model", bridge["model"])
+            self.assertEqual(32768, bridge["num_ctx"])
+            self.assertEqual("2m", bridge["keep_alive"])
+            self.assertEqual("Qwen — lokalni izvajalec", bridge["agent_role"])
             self.assertEqual(str(environment.executor_config_dir / "token"),
                              bridge["token_file"])
             allowed = json.loads(

@@ -61,6 +61,8 @@ PROJECT = Path(CFG["project"])
 SYSTEM_PROMPT = Path(CFG["system_prompt"])
 MAX_STEPS = int(CFG.get("max_steps", 30))
 NUM_CTX = int(CFG.get("num_ctx", 65536))
+KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
+AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
 
 
 TOOLS = [
@@ -472,7 +474,7 @@ def call_qwen(messages):
         data={
             "model": MODEL,
             "stream": False,
-            "keep_alive": "30m",
+            "keep_alive": KEEP_ALIVE,
             "options": {"num_ctx": NUM_CTX},
             "messages": messages,
             "tools": TOOLS
@@ -906,6 +908,7 @@ def render_monitor(job=None):
     print("                    MikroFIX - lokalni agenti")
     print("=" * 74)
     print()
+    print(f"Vloga:     {AGENT_ROLE}")
     print(f"Model:     {MODEL}")
     print(f"Ollama:    {OLLAMA}")
     print(f"Executor:  {EXECUTOR}")

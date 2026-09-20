@@ -220,13 +220,15 @@ class RunEnvironment:
         executor_url = f"http://127.0.0.1:{port}"
         config = {
             "ollama_url": bridge_template.get("ollama_url", "http://172.17.0.1:11434/api/chat"),
-            "model": bridge_template.get("model", "qwen3.5:9b"),
+            "model": bridge_template.get("worker_model", "qwen3.5:9b"),
             "executor_url": executor_url,
             "token_file": str(executor_config_dir / "token"),
             "project": str(worktree),
             "system_prompt": str(worktree / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"),
-            "num_ctx": int(bridge_template.get("num_ctx", 65536)),
+            "num_ctx": int(bridge_template.get("worker_num_ctx", 65536)),
             "max_steps": int(bridge_template.get("max_steps", 30)),
+            "keep_alive": str(bridge_template.get("worker_keep_alive", "5m")),
+            "agent_role": "Qwen — lokalni izvajalec",
         }
         atomic_write_immutable_json(bridge_config, config)
         metadata = {
