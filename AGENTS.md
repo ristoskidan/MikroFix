@@ -49,6 +49,11 @@ imeti jasen obseg, pričakovane datoteke in preverjanja.
 6. READY je dovoljen samo z natančnim testnim ukazom, dejanskim številom testov,
    rezultatom PASS in preostalimi tveganji. Končni diff ostane za Codexov
    pregled; brez odobritve ni merge-a, push-a ali deploya.
+7. GPT-OSS pregledovalec mora zaključiti z natanko eno samostojno zadnjo vrstico
+   `VERDICT: APPROVE` ali `VERDICT: REJECT`. Razsodbe ne prevajaj, ne zapisuj kot
+   naslovno obliko `Verdict:` in ji ne dodajaj ločil ali pojasnila v isti vrstici.
+   Vse ugotovitve in razloge napiši pred končno vrstico. Napaka v obliki razsodbe
+   ni razlog, da Qwen ponovno izvaja že uspešno spremembo.
 
 ## Kakovost dokazov in končnega poročila
 

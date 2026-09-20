@@ -630,6 +630,46 @@ class RunEnvironmentTests(unittest.TestCase):
 
 
 class LocalAdapterTests(unittest.TestCase):
+    def test_reviewer_accepts_one_case_insensitive_valid_verdict(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            adapter = LocalAdapter(
+                base / "worktree", base / "state", source_root=base / "source"
+            )
+
+            def fake_run(args, timeout=900, check=True, env=None):
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    "Findings:\nEverything is in scope.\n\nVerdict: APPROVE\n", ""
+                )
+
+            adapter._run = fake_run
+            result = adapter.review("review it", "diff")
+        self.assertTrue(result.ok)
+        self.assertEqual("approved", result.summary)
+
+    def test_reviewer_still_rejects_multiple_or_unknown_verdicts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            adapter = LocalAdapter(
+                base / "worktree", base / "state", source_root=base / "source"
+            )
+            outputs = iter([
+                "VERDICT: APPROVE\nverdict: reject\n",
+                "Verdict: MAYBE\n",
+            ])
+
+            def fake_run(args, timeout=900, check=True, env=None):
+                return subprocess.CompletedProcess(args, 0, next(outputs), "")
+
+            adapter._run = fake_run
+            multiple = adapter.review("review it", "diff")
+            unknown = adapter.review("review it", "diff")
+        self.assertFalse(multiple.ok)
+        self.assertEqual("ambiguous multiple verdicts", multiple.summary)
+        self.assertFalse(unknown.ok)
+        self.assertEqual("missing valid verdict", unknown.summary)
+
     def test_bridge_and_reviewer_use_absolute_trusted_source_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

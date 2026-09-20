@@ -1492,8 +1492,15 @@ class LocalAdapter:
         finally:
             path.unlink(missing_ok=True)
         output = result.stdout.strip()
-        verdicts = [line.strip() for line in output.splitlines()
-                    if line.strip().startswith("VERDICT:")]
+        verdicts = []
+        for line in output.splitlines():
+            match = re.fullmatch(
+                r"\s*VERDICT\s*:\s*(APPROVE|REJECT)\s*",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                verdicts.append(f"VERDICT: {match.group(1).upper()}")
         approved = result.returncode == 0 and verdicts == ["VERDICT: APPROVE"]
         if approved:
             summary = "approved"
