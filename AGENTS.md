@@ -69,6 +69,17 @@ imeti jasen obseg, pričakovane datoteke in preverjanja.
 - `BLOCKED` je smiseln samo, ko polje `Potrebujem` vsebuje konkretno zunanjo
   odločitev, podatek ali zmožnost. Če ne potrebuješ ničesar, nisi blokiran:
   prilagodi načrt, nadaljuj ali vrni dokazano ugotovitev v zahtevanem formatu.
+- Ne enači poslovnih dogodkov samo zato, ker imajo podobna imena. Servisni
+  prevzem naprave, fizično vračilo artikla in karantena vračil so različni tokovi.
+  Zahtevani UI tok dokaži neprekinjeno: dejanski label ali kontrola -> handler ->
+  runtime/transport operacija -> pričakovani poslovni rezultat.
+- Sam import razreda ali obstoj modula ne dokazuje, da je storitev dosegljiva ali
+  da UI funkcija deluje. Dosegljivost mora potrditi obstoječi ne-destruktivni
+  runtime klic ali dejanski izvedeni smoke korak.
+- Kadar naloga zajema več aplikacij, navedi zagonski, uporabniški in zapiralni
+  tok za vsako aplikacijo posebej. Dokaz za Office ne šteje samodejno za
+  Blagajno. Absolutnih trditev, kot je »drugih prijavnih podatkov ni«, ne podaj
+  brez celovitega dokaza iz konfiguracije in prijavnega toka.
 
 ## Natančen BLOCKED izhod
 
