@@ -20,8 +20,10 @@ objective, allowed_files, atoms, constraints, context_links, acceptance_criteria
 
 Vsak atom vsebuje `id`, `task`, `checks` in `expected_files`. Dovoljeni checks:
 `syntax_changed_python`, `local_agent_tests`, `desktop_unit_tests`,
-`central_api_tests`. Ne dodajaj `run_id`, `base_checkpoint`, retryjev, timeouta
-ali končnega gatea; te vrednosti določi zaupanja vredni manager.
+`central_api_tests`. `checks` mora vsebovati najmanj eno preverjanje tudi pri
+dokumentacijski spremembi; izberi najmanjši obstoječi profil, ki lahko zazna
+regresijo. Ne dodajaj `run_id`, `base_checkpoint`, retryjev, timeouta ali
+končnega gatea; te vrednosti določi zaupanja vredni manager.
 
 Če varnega načrta ni mogoče izdelati, vrni JSON z istimi polji in naj bo
 `objective` začet z `BLOCKED:` ter v `constraints` natančno navedi manjkajočo

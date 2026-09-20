@@ -8,6 +8,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -132,6 +134,40 @@ def planner_prompt(task: str, previous_error: str = "") -> str:
     )
 
 
+def run_bridge_monitor(
+    bridge: list[str], bridge_env: dict[str, str], bridge_home: Path,
+    job_id: str,
+) -> None:
+    """Run the planner monitor visibly when a desktop terminal is available."""
+    terminal = shutil.which("xfce4-terminal")
+    if not terminal or not os.environ.get("DISPLAY"):
+        command(bridge + ["monitor", "--once"], cwd=PROJECT_ROOT,
+                env=bridge_env, timeout=1800)
+        return
+    env_prefix = " ".join(
+        f"{key}={shlex.quote(value)}" for key, value in bridge_env.items()
+    )
+    monitor_command = shlex.join(bridge + ["monitor", "--once"])
+    shell_command = f"{env_prefix} {monitor_command}"
+    subprocess.Popen(
+        [terminal, "--hold", "--title=MikroFix - GPT-OSS lokalni vodja",
+         "--maximize", "--command", f"bash -lc {shlex.quote(shell_command)}"],
+        cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    job_file = bridge_home / "jobs" / job_id / "job.json"
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline:
+        try:
+            status = json.loads(job_file.read_text(encoding="utf-8"))["status"]
+        except (OSError, KeyError, json.JSONDecodeError):
+            status = "queued"
+        if status in {"completed", "failed"}:
+            return
+        time.sleep(0.5)
+    raise ManagerError(f"Planner job {job_id} exceeded 1800 seconds")
+
+
 def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
     runtime = job_dir / "planner-runtime"
@@ -186,14 +222,15 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
                           "--task", planner_prompt(task, last_error)],
                 cwd=PROJECT_ROOT, env=bridge_env, timeout=30,
             ).splitlines()[-1]
-            command(bridge + ["monitor", "--once"], cwd=PROJECT_ROOT,
-                    env=bridge_env, timeout=1800)
+            run_bridge_monitor(bridge, bridge_env, bridge_home, job_id)
             raw = command(bridge + ["result", job_id], cwd=PROJECT_ROOT,
                           env=bridge_env, timeout=30)
             try:
-                parse_model_json(raw)
+                # Validate schema, paths and all semantic gates while the
+                # planner still has its one bounded correction opportunity.
+                normalize_plan(raw, run_id=job_dir.name, repository=repository)
                 return raw
-            except ManagerError as exc:
+            except (ManagerError, ValueError) as exc:
                 last_error = str(exc)
         raise ManagerError("Planner returned invalid JSON twice: " + last_error)
     finally:

@@ -78,6 +78,20 @@ class LocalManagerTests(unittest.TestCase):
                 json.dumps({**model_plan(), "run_id": "MODEL-CONTROLLED"}),
                 run_id="MF-LOCAL-1", repository=self.repository,
             )
+
+    def test_empty_atom_checks_are_semantic_failure_for_retry(self):
+        invalid = model_plan(atoms=[{
+            "id": "A1", "task": "Write documentation",
+            "checks": [], "expected_files": ["app.py"],
+        }])
+        with self.assertRaisesRegex(ValueError, "checks must be a non-empty list"):
+            manager.normalize_plan(
+                json.dumps(invalid), run_id="MF-LOCAL-1",
+                repository=self.repository,
+            )
+        prompt = manager.planner_prompt("Write documentation", "checks are empty")
+        self.assertIn("PREJŠNJI IZHOD JE BIL ZAVRNJEN", prompt)
+        self.assertIn("checks are empty", prompt)
         with self.assertRaisesRegex(manager.ManagerError, "missing context"):
             manager.normalize_plan(
                 json.dumps(model_plan(context_links={
