@@ -225,7 +225,14 @@ class CompletionOutbox:
         self.events = self.root / "events"
         self.claims = self.root / "claims"
         self.receipts = self.root / "receipts"
-        for directory in (self.root, self.events, self.claims, self.receipts):
+        self.notifications = self.root / "notifications"
+        for directory in (
+            self.root,
+            self.events,
+            self.claims,
+            self.receipts,
+            self.notifications,
+        ):
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
 
@@ -243,10 +250,11 @@ class CompletionOutbox:
 
     def publish(self, payload: Mapping[str, Any]) -> dict[str, str]:
         event_id = self.enqueue(payload)
+        event = _read_private_json(self.events / f"{event_id}.json")
         if self.thread_id is None:
+            self._notify_terminal_once(event_id, event["payload"])
             return {"event_id": event_id, "status": "queued_no_thread"}
 
-        event = _read_private_json(self.events / f"{event_id}.json")
         event_path = self.events / f"{event_id}.json"
         message = self._message(event_id, event_path, event["payload"])
 
@@ -256,7 +264,13 @@ class CompletionOutbox:
             receipt_path = self.receipts / f"{event_id}.json"
             if receipt_path.exists():
                 receipt = _read_private_json(receipt_path)
+                self._notify_terminal_once(
+                    event_id,
+                    event["payload"],
+                    delivery_failed=receipt.get("status") == "failed",
+                )
                 return {"event_id": event_id, "status": str(receipt["status"])}
+            self._notify_terminal_once(event_id, event["payload"])
             return {"event_id": event_id, "status": "claimed"}
 
         argv = [
@@ -294,8 +308,9 @@ class CompletionOutbox:
             "version": 1,
         }
         _write_exclusive_json(self.receipts / f"{event_id}.json", receipt)
-        if status == "failed":
-            self._notify_failure(event_id)
+        self._notify_terminal_once(
+            event_id, event["payload"], delivery_failed=status == "failed"
+        )
         return {"event_id": event_id, "status": status}
 
     @staticmethod
@@ -317,20 +332,63 @@ class CompletionOutbox:
             raise CompletionError("generated completion message is too large")
         return message
 
-    def _notify_failure(self, event_id: str) -> None:
+    def _notify_terminal_once(
+        self,
+        event_id: str,
+        payload: Mapping[str, Any],
+        *,
+        delivery_failed: bool = False,
+    ) -> None:
         if self.notify_runner is None:
             return
+        notification_path = self.notifications / f"{event_id}.json"
+        notification = {
+            "event_id": event_id,
+            "state": payload["state"],
+            "version": 1,
+        }
+        if not _write_exclusive_json(notification_path, notification):
+            return
+
+        state = str(payload["state"])
+        if state in {"COMPLETED", "READY_FOR_CODEX_REVIEW"}:
+            title = "MikroFIX: naloga je končana"
+        elif state == "BLOCKED":
+            title = "MikroFIX: naloga potrebuje pozornost"
+        else:
+            title = "MikroFIX: naloga ni uspela"
+        body = f"{payload['display_name']}\nStanje: {state}"
+        if delivery_failed:
+            body += "\nObvestilo Codexu ni bilo dostavljeno; dokaz je varno shranjen."
+
+        environment = {
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        }
+        for name in (
+            "DBUS_SESSION_BUS_ADDRESS",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "XDG_RUNTIME_DIR",
+        ):
+            value = os.environ.get(name)
+            if value:
+                environment[name] = value
         try:
             self.notify_runner(
                 [
                     NOTIFY_BINARY,
-                    "MikroFIX completion delivery failed",
-                    f"Durable event {event_id} requires manual review.",
+                    "--app-name=MikroFIX",
+                    "--urgency=normal",
+                    title,
+                    body,
                 ],
                 shell=False,
                 check=False,
                 timeout=min(self.timeout_seconds, 10),
-                env={"LANG": "C.UTF-8", "LC_ALL": "C.UTF-8", "PATH": "/usr/bin:/bin"},
+                env=environment,
                 capture_output=True,
                 text=True,
             )

@@ -85,6 +85,36 @@ class CompletionOutboxTests(unittest.TestCase):
             self.assertEqual(runner.calls, [])
             self.assertEqual(list((Path(directory) / "claims").iterdir()), [])
 
+    def test_desktop_notification_is_sent_once_without_configured_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifications = FakeRunner()
+            first = completion.CompletionOutbox(
+                directory, notify_runner=notifications
+            )
+            result = first.publish(self.payload(
+                display_name="Preizkus lokalne naloge",
+                state="COMPLETED",
+            ))
+            restarted = completion.CompletionOutbox(
+                directory, notify_runner=notifications
+            )
+            restarted.publish(self.payload(
+                display_name="Preizkus lokalne naloge",
+                state="COMPLETED",
+            ))
+
+            self.assertEqual(result["status"], "queued_no_thread")
+            self.assertEqual(len(notifications.calls), 1)
+            argv, kwargs = notifications.calls[0]
+            self.assertEqual(argv[0], "/usr/bin/notify-send")
+            self.assertIn("MikroFIX: naloga je končana", argv)
+            self.assertIn("Preizkus lokalne naloge\nStanje: COMPLETED", argv)
+            self.assertFalse(kwargs["shell"])
+            marker = (
+                Path(directory) / "notifications" / f"{result['event_id']}.json"
+            )
+            self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+
     def test_invalid_or_noncanonical_thread_uuid_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             for invalid in ("not-a-uuid", "12345678-1234-5678-9234-56781234567A"):
@@ -167,6 +197,10 @@ class CompletionOutboxTests(unittest.TestCase):
             self.assertEqual(replay_runner.calls, [])
             self.assertEqual(len(notifications.calls), 1)
             self.assertFalse(notifications.calls[0][1]["shell"])
+            self.assertIn(
+                "Obvestilo Codexu ni bilo dostavljeno",
+                notifications.calls[0][0][-1],
+            )
 
     def test_review_state_is_mapped_in_event_and_message(self):
         with tempfile.TemporaryDirectory() as directory:
