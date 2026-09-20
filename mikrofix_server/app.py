@@ -54,6 +54,7 @@ from .models import (
     purchase_receipts,
     receipt_document_types,
     service_orders,
+    technical_completions,
     workstations,
 )
 from .operations import (
@@ -362,6 +363,7 @@ def create_app(
         requirements = {
             "CreateServiceOrder": ("MODULE_SERVICE", "SERVICE"),
             "CompleteServiceTechnically": ("MODULE_SERVICE", "SERVICE"),
+            "ConfirmServiceDevicePickup": ("MODULE_CASHIER", "CASHIER"),
             "CreatePartner": ("MODULE_CASHIER", "CASHIER"),
             "CreateOfficePartner": ("MODULE_OFFICE", "OFFICE"),
             "UpdatePartner": ("MODULE_OFFICE", "OFFICE"),
@@ -598,6 +600,86 @@ def create_app(
                 for row in rows
             ]
         }
+
+    @app.get(
+        "/v1/cashier/service-pickups",
+        dependencies=[Depends(cashier_identity)],
+    )
+    def list_ready_service_pickups(
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict:
+        """List technically completed devices still held by MikroFIX."""
+        source = (
+            service_orders
+            .join(
+                technical_completions,
+                technical_completions.c.service_order_uuid
+                == service_orders.c.sync_uuid,
+            )
+            .outerjoin(
+                invoice_drafts,
+                invoice_drafts.c.service_order_uuid == service_orders.c.sync_uuid,
+            )
+            .outerjoin(
+                invoices,
+                invoices.c.service_order_uuid == service_orders.c.sync_uuid,
+            )
+        )
+        statement = (
+            select(
+                service_orders,
+                invoice_drafts.c.draft_uuid.label("pickup_draft_uuid"),
+                invoice_drafts.c.status.label("pickup_draft_status"),
+                invoices.c.invoice_uuid.label("pickup_invoice_uuid"),
+                invoices.c.invoice_number.label("pickup_invoice_number"),
+                invoices.c.status.label("pickup_invoice_status"),
+                invoices.c.payment_status.label("pickup_payment_status"),
+            )
+            .select_from(source)
+            .where(
+                service_orders.c.ready_for_pickup_at.is_not(None),
+                service_orders.c.custody_status == "AT_MIKROFIX",
+            )
+            .order_by(
+                service_orders.c.ready_for_pickup_at,
+                service_orders.c.sync_uuid,
+            )
+            .limit(limit)
+        )
+        with database_engine.connect() as connection:
+            rows = connection.execute(statement).all()
+        pickups = []
+        for row in rows:
+            payload = dict(row.payload_json)
+            service_no = (
+                str(payload.get("service_no") or "").strip()
+                or str(payload.get("order_no") or "").strip()
+                or str(row.sync_uuid)
+            )
+            pickups.append({
+                "service_order_id": row.sync_uuid,
+                "row_version": row.row_version,
+                "service_no": service_no,
+                "ready_for_pickup_at": row.ready_for_pickup_at,
+                "custody_status": row.custody_status,
+                "customer": {
+                    "name": str(payload.get("customer_name") or ""),
+                    "phone": str(payload.get("customer_phone") or ""),
+                },
+                "device": {
+                    "model": str(payload.get("device_model") or ""),
+                    "serial": str(payload.get("device_serial") or ""),
+                },
+                "billing": {
+                    "draft_id": row.pickup_draft_uuid,
+                    "draft_status": row.pickup_draft_status,
+                    "invoice_id": row.pickup_invoice_uuid,
+                    "invoice_number": row.pickup_invoice_number,
+                    "invoice_status": row.pickup_invoice_status,
+                    "payment_status": row.pickup_payment_status,
+                },
+            })
+        return {"pickups": pickups}
 
     def public_cash_session(connection, row, *, include_entries: bool) -> dict:
         entries = connection.execute(

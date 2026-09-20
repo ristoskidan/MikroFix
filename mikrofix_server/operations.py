@@ -20,6 +20,7 @@ from mikrofix_sync_contracts import (
     validated_begin_full_inventory_payload,
     validated_cancel_full_inventory_payload,
     validated_close_cash_session_payload,
+    validated_confirm_service_device_pickup_payload,
     validated_confirm_receipt_payload,
     validated_create_inventory_item_payload,
     validated_create_partner_payload,
@@ -3235,7 +3236,9 @@ def _complete_service_technically(
         update(service_orders)
         .where(service_orders.c.sync_uuid == aggregate_uuid)
         .values(
-            row_version=new_version, payload_json=updated_order_payload,
+            row_version=new_version,
+            ready_for_pickup_at=payload["completed_at"],
+            payload_json=updated_order_payload,
             updated_at=datetime.now().astimezone(),
         )
     )
@@ -3262,6 +3265,100 @@ def _complete_service_technically(
         },
         sequence,
     )
+
+
+def _confirm_service_device_pickup(
+    connection: Connection, envelope: SyncOperationEnvelope,
+    aggregate_uuid: UUID, operation_uuid: UUID,
+) -> tuple[str, dict, int | None]:
+    if envelope.aggregate_type != "SERVICE_ORDER":
+        return _reject(
+            "INVALID_AGGREGATE_TYPE",
+            "ConfirmServiceDevicePickup requires SERVICE_ORDER.",
+        )
+    try:
+        payload = validated_confirm_service_device_pickup_payload(envelope.payload)
+    except ContractError as exc:
+        return _reject("INVALID_PAYLOAD", str(exc))
+    if payload["service_order_id"] != envelope.aggregate_id:
+        return _reject(
+            "AGGREGATE_ID_MISMATCH",
+            "payload.service_order_id must equal aggregate_id.",
+        )
+    if payload["expected_version"] != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            "payload.expected_version must equal envelope.expected_version.",
+        )
+
+    order = connection.execute(
+        select(service_orders)
+        .where(service_orders.c.sync_uuid == aggregate_uuid)
+        .with_for_update()
+    ).one_or_none()
+    if order is None:
+        return _reject("AGGREGATE_NOT_FOUND", "The service order does not exist.")
+    if int(order.row_version) != envelope.expected_version:
+        return _reject(
+            "VERSION_CONFLICT",
+            f"Expected version {envelope.expected_version}, current version is "
+            f"{order.row_version}.",
+        )
+    if order.custody_status == "RETURNED":
+        return _reject(
+            "DEVICE_ALREADY_RETURNED",
+            "The service device has already been returned.",
+        )
+    completion_exists = connection.execute(
+        select(technical_completions.c.service_order_uuid).where(
+            technical_completions.c.service_order_uuid == aggregate_uuid
+        )
+    ).scalar_one_or_none()
+    if order.ready_for_pickup_at is None or completion_exists is None:
+        return _reject(
+            "DEVICE_NOT_READY_FOR_PICKUP",
+            "The service device is not technically completed for pickup.",
+        )
+    if order.custody_status != "AT_MIKROFIX":
+        return _reject(
+            "INVALID_CUSTODY_STATUS",
+            "The service device is not in MikroFIX custody.",
+        )
+
+    picked_up_at = datetime.now().astimezone()
+    new_version = int(order.row_version) + 1
+    connection.execute(
+        update(service_orders)
+        .where(service_orders.c.sync_uuid == aggregate_uuid)
+        .values(
+            row_version=new_version,
+            custody_status="RETURNED",
+            picked_up_at=picked_up_at,
+            pickup_operation_id=operation_uuid,
+            updated_at=picked_up_at,
+        )
+    )
+    event_payload = {
+        "service_order_id": envelope.aggregate_id,
+        "custody_status": "RETURNED",
+        "ready_for_pickup_at": order.ready_for_pickup_at.isoformat(
+            timespec="seconds"
+        ),
+        "picked_up_at": picked_up_at.isoformat(timespec="seconds"),
+    }
+    sequence = _publish_change(
+        connection,
+        event_type="ServiceDevicePickedUp",
+        aggregate_uuid=aggregate_uuid,
+        aggregate_version=new_version,
+        payload=event_payload,
+        occurred_at=picked_up_at.isoformat(timespec="seconds"),
+    )
+    return "ACCEPTED", {
+        "aggregate_version": new_version,
+        "central_sequence": sequence,
+        **event_payload,
+    }, sequence
 
 
 def _begin_full_inventory_preparation(
@@ -3672,6 +3769,10 @@ def process_operation(
         )
     elif envelope.operation_type == "CompleteServiceTechnically":
         result_code, response, central_sequence = _complete_service_technically(
+            connection, envelope, aggregate_uuid, operation_uuid
+        )
+    elif envelope.operation_type == "ConfirmServiceDevicePickup":
+        result_code, response, central_sequence = _confirm_service_device_pickup(
             connection, envelope, aggregate_uuid, operation_uuid
         )
     elif envelope.operation_type == "IssueServiceInvoice":

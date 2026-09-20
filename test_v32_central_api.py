@@ -129,9 +129,9 @@ class CentralApiIntegrationTests(unittest.TestCase):
             connection.execute(delete(service_part_consumptions))
             connection.execute(delete(technical_completions))
             connection.execute(delete(full_inventory_sessions))
-            connection.execute(delete(accepted_operations))
             connection.execute(delete(change_feed))
             connection.execute(delete(service_orders))
+            connection.execute(delete(accepted_operations))
             connection.execute(delete(inventory_items))
             connection.execute(delete(partners))
             connection.execute(delete(workstations))
@@ -270,6 +270,31 @@ class CentralApiIntegrationTests(unittest.TestCase):
                     "confirmed": confirmed,
                 }] if settlement_mode == "STANDARD" else [],
                 "settlement_mode": settlement_mode,
+            },
+            "contract_version": 1,
+        }
+
+    def pickup_operation(
+        self, order, *, sequence, expected_version=2,
+        operation_id=None, aggregate_id=None, payload_service_order_id=None,
+    ):
+        service_order_id = str(aggregate_id or order["aggregate_id"])
+        return {
+            "operation_id": str(operation_id or uuid4()),
+            "operation_type": "ConfirmServiceDevicePickup",
+            "aggregate_type": "SERVICE_ORDER",
+            "aggregate_id": service_order_id,
+            "expected_version": expected_version,
+            "actor_id": "blagajnik-a",
+            "device_id": "POS-PC-A",
+            "device_sequence": sequence,
+            "occurred_at": "2026-09-12T09:30:00+02:00",
+            "payload": {
+                "service_order_id": str(
+                    payload_service_order_id or service_order_id
+                ),
+                "expected_version": expected_version,
+                "confirmed": True,
             },
             "contract_version": 1,
         }
@@ -1193,6 +1218,153 @@ class CentralApiIntegrationTests(unittest.TestCase):
             draft["locked_payload"]["service_no"], "MF-SN-2026-0051"
         )
         self.assertEqual(draft["locked_payload"]["customer"]["name"], "Testna stranka")
+
+    def test_completed_device_is_ready_and_listed_before_any_invoice(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import service_orders
+
+        order, draft_id = self.prepared_draft(
+            sequence=52, barcode="PICKUP-LIST", order_no="MF-SN-2026-0052",
+        )
+        with self.engine.connect() as connection:
+            service = connection.execute(select(service_orders).where(
+                service_orders.c.sync_uuid == order["aggregate_id"]
+            )).one()
+        self.assertEqual(service.custody_status, "AT_MIKROFIX")
+        self.assertIsNotNone(service.ready_for_pickup_at)
+        self.assertIsNone(service.picked_up_at)
+        self.assertIsNone(service.pickup_operation_id)
+
+        response = self.client.get(
+            "/v1/cashier/service-pickups", headers=self.headers
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        pickup = response.json()["pickups"][0]
+        self.assertEqual(pickup["service_order_id"], order["aggregate_id"])
+        self.assertEqual(pickup["row_version"], 2)
+        self.assertEqual(pickup["service_no"], "MF-SN-2026-0052")
+        self.assertEqual(pickup["custody_status"], "AT_MIKROFIX")
+        self.assertEqual(pickup["customer"], {
+            "name": "Testna stranka", "phone": "040000000",
+        })
+        self.assertEqual(set(pickup["device"]), {"model", "serial"})
+        self.assertNotIn("email", pickup["customer"])
+        self.assertNotIn("address", pickup["customer"])
+        self.assertEqual(pickup["billing"]["draft_id"], draft_id)
+        self.assertEqual(pickup["billing"]["draft_status"], "READY")
+        self.assertIsNone(pickup["billing"]["invoice_id"])
+
+    def test_pickup_before_invoice_is_idempotent_and_invoice_preserves_returned(self):
+        from sqlalchemy import select
+        from mikrofix_server.models import change_feed, invoice_drafts, service_orders
+
+        order, draft_id = self.prepared_draft(
+            sequence=53, barcode="PICKUP-FIRST",
+        )
+        pickup = self.pickup_operation(order, sequence=55)
+        first = self.client.post(
+            "/v1/sync/operations", json=pickup, headers=self.headers
+        )
+        retry = self.client.post(
+            "/v1/sync/operations", json=pickup, headers=self.headers
+        )
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json(), retry.json())
+        self.assertEqual(first.json()["result_code"], "ACCEPTED")
+        self.assertEqual(first.json()["result"]["custody_status"], "RETURNED")
+        self.assertIn("ready_for_pickup_at", first.json()["result"])
+        self.assertIn("picked_up_at", first.json()["result"])
+        with self.engine.connect() as connection:
+            service = connection.execute(select(service_orders).where(
+                service_orders.c.sync_uuid == order["aggregate_id"]
+            )).one()
+            self.assertEqual(service.row_version, 3)
+            self.assertEqual(service.custody_status, "RETURNED")
+            self.assertEqual(str(service.pickup_operation_id), pickup["operation_id"])
+            self.assertEqual(connection.execute(select(
+                invoice_drafts.c.status
+            )).scalar_one(), "READY")
+            events = connection.execute(select(change_feed).where(
+                change_feed.c.event_type == "ServiceDevicePickedUp"
+            )).all()
+            self.assertEqual(len(events), 1)
+
+        issued = self.client.post(
+            "/v1/sync/operations",
+            json=self.issue_operation(draft_id, sequence=56),
+            headers=self.headers,
+        )
+        self.assertEqual(issued.json()["result_code"], "ACCEPTED", issued.text)
+        with self.engine.connect() as connection:
+            service = connection.execute(select(service_orders).where(
+                service_orders.c.sync_uuid == order["aggregate_id"]
+            )).one()
+        self.assertEqual(service.custody_status, "RETURNED")
+        self.assertIsNotNone(service.picked_up_at)
+
+    def test_pickup_rejects_wrong_stale_not_ready_and_already_returned(self):
+        not_ready = self.operation(sequence=57)
+        created = self.client.post(
+            "/v1/sync/operations", json=not_ready, headers=self.headers
+        )
+        self.assertEqual(created.json()["result_code"], "ACCEPTED")
+        not_ready_result = self.client.post(
+            "/v1/sync/operations",
+            json=self.pickup_operation(
+                not_ready, sequence=58, expected_version=1,
+            ),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(
+            not_ready_result["error_code"], "DEVICE_NOT_READY_FOR_PICKUP"
+        )
+
+        order, _ = self.prepared_draft(sequence=59, barcode="PICKUP-REJECT")
+        stale = self.client.post(
+            "/v1/sync/operations",
+            json=self.pickup_operation(order, sequence=61, expected_version=1),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(stale["error_code"], "VERSION_CONFLICT")
+        wrong = self.client.post(
+            "/v1/sync/operations",
+            json=self.pickup_operation(
+                order, sequence=62,
+                payload_service_order_id=str(uuid4()),
+            ),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(wrong["error_code"], "AGGREGATE_ID_MISMATCH")
+        accepted = self.client.post(
+            "/v1/sync/operations",
+            json=self.pickup_operation(order, sequence=63),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(accepted["result_code"], "ACCEPTED")
+        repeated = self.client.post(
+            "/v1/sync/operations",
+            json=self.pickup_operation(order, sequence=64, expected_version=3),
+            headers=self.headers,
+        ).json()
+        self.assertEqual(repeated["error_code"], "DEVICE_ALREADY_RETURNED")
+
+    def test_pickup_endpoint_and_operation_require_cashier_permission(self):
+        office_login = self.central_login(role="OFFICE", application="OFFICE")
+        self.assertEqual(office_login.status_code, 200, office_login.text)
+        office_headers = {
+            "Authorization": f"Bearer {office_login.json()['access_token']}"
+        }
+        self.assertEqual(self.client.get(
+            "/v1/cashier/service-pickups", headers=office_headers
+        ).status_code, 403)
+
+        order, _ = self.prepared_draft(sequence=65, barcode="PICKUP-AUTH")
+        denied = self.client.post(
+            "/v1/sync/operations",
+            json=self.pickup_operation(order, sequence=1),
+            headers=office_headers,
+        )
+        self.assertEqual(denied.status_code, 403)
 
     def test_bank_transfer_issues_once_and_billing_closes_service(self):
         from sqlalchemy import func, select

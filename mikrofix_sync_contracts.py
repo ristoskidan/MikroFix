@@ -788,6 +788,39 @@ def validated_technical_completion_payload(
     return completion.payload()
 
 
+def validated_confirm_service_device_pickup_payload(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the intentionally minimal physical-device pickup command."""
+    raw = dict(value)
+    allowed = {"service_order_id", "expected_version", "confirmed"}
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ContractError(
+            "service pickup contains unsupported fields: " + ", ".join(unexpected)
+        )
+    if set(raw) != allowed:
+        missing = sorted(allowed - set(raw))
+        raise ContractError(
+            "service pickup is missing required fields: " + ", ".join(missing)
+        )
+    service_order_id = normalized_uuid(
+        raw["service_order_id"], field="service_order_id"
+    )
+    expected_version = raw["expected_version"]
+    if isinstance(expected_version, bool) or not isinstance(expected_version, int):
+        raise ContractError("expected_version must be an integer.")
+    if expected_version < 1:
+        raise ContractError("expected_version must be at least 1.")
+    if raw["confirmed"] is not True:
+        raise ContractError("confirmed must be true.")
+    return {
+        "service_order_id": service_order_id,
+        "expected_version": expected_version,
+        "confirmed": True,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PaymentContract:
     method: str

@@ -76,6 +76,9 @@ class CentralCashierWorkflow:
     def ready_service_drafts(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.transport.list_ready_service_drafts(limit=limit)
 
+    def service_pickups(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.transport.list_service_pickups(limit=limit)
+
     def invoices(
         self, query: str = "", *, invoice_status: str | None = None,
         payment_status: str | None = None,
@@ -187,6 +190,18 @@ class CentralCashierWorkflow:
         identity = self.journal.prepare_close_cash_session({
             "session_id": session_id, "expected_version": expected_version,
             "counted_cash": str(counted_cash), "note": note,
+        }, operation_id=operation_id)
+        return self._dispatch_command(identity)
+
+    def confirm_service_device_pickup(
+        self, *, service_order_id: str, expected_version: int,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._assert_command_order(operation_id)
+        identity = self.journal.prepare_confirm_service_device_pickup({
+            "service_order_id": service_order_id,
+            "expected_version": expected_version,
+            "confirmed": True,
         }, operation_id=operation_id)
         return self._dispatch_command(identity)
 

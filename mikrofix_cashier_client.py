@@ -17,6 +17,7 @@ from mikrofix_sync_contracts import (
     SyncOperationEnvelope,
     validated_create_partner_payload,
     validated_close_cash_session_payload,
+    validated_confirm_service_device_pickup_payload,
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
     validated_manual_cash_entry_payload,
@@ -65,6 +66,13 @@ class RequestsCashierTransport(RequestsSyncTransport):
         if not isinstance(drafts, list):
             raise SyncTransportError("Central API returned an invalid draft list.")
         return drafts
+
+    def list_service_pickups(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        response = self._get("/v1/cashier/service-pickups", limit=limit)
+        pickups = response.get("pickups")
+        if not isinstance(pickups, list):
+            raise SyncTransportError("Central API returned an invalid service-pickup list.")
+        return pickups
 
     def search_partners(self, query: str, *, limit: int = 30) -> list[dict[str, Any]]:
         response = self._get("/v1/cashier/partners", q=query, limit=limit)
@@ -229,6 +237,19 @@ class CashierCommandJournal:
             aggregate_id=normalized["session_id"],
             expected_version=normalized["expected_version"],
             payload=normalized, operation_id=operation_id,
+        )
+
+    def prepare_confirm_service_device_pickup(
+        self, payload: Mapping[str, Any], *, operation_id: str | None = None
+    ) -> str:
+        normalized = validated_confirm_service_device_pickup_payload(payload)
+        return self._prepare(
+            operation_type="ConfirmServiceDevicePickup",
+            aggregate_type="SERVICE_ORDER",
+            aggregate_id=normalized["service_order_id"],
+            expected_version=normalized["expected_version"],
+            payload=normalized,
+            operation_id=operation_id,
         )
 
     def prepare_manual_cash_entry(

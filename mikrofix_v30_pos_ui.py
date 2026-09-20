@@ -67,6 +67,44 @@ PAYMENT_LABELS = {
 }
 
 
+def service_pickup_display_rows(rows):
+    """Keep billing details informative and optional in the handoff view."""
+    result = []
+    for source in rows:
+        row = dict(source)
+        customer = dict(row.get("customer") or {})
+        device = dict(row.get("device") or {})
+        billing_info = dict(row.get("billing") or {})
+        invoice = dict(row.get("invoice") or {})
+        invoice_no = str(
+            billing_info.get("invoice_number") or invoice.get("invoice_number")
+            or row.get("invoice_number") or ""
+        ).strip()
+        billing_status = str(
+            row.get("billing_status") or billing_info.get("invoice_status")
+            or billing_info.get("draft_status") or invoice.get("status")
+            or row.get("invoice_status") or ""
+        ).strip()
+        billing = " / ".join(value for value in (invoice_no, billing_status) if value)
+        result.append({
+            "service_order_id": str(row.get("service_order_id") or ""),
+            "row_version": int(
+                row.get("aggregate_version") or row.get("row_version") or 0
+            ),
+            "service_no": str(
+                row.get("service_no") or row.get("order_no")
+                or row.get("service_order_id") or ""
+            ),
+            "customer": str(customer.get("name") or row.get("customer_name") or ""),
+            "device": str(device.get("model") or row.get("device_model") or ""),
+            "serial": str(device.get("serial") or row.get("device_serial") or ""),
+            "billing": billing or "BREZ RAČUNA",
+            "ready_at": str(row.get("ready_for_pickup_at") or "")[:19],
+            "custody": str(row.get("custody_status") or "AT_MIKROFIX"),
+        })
+    return result
+
+
 def zero_balance_preview_lines(lines):
     """Mirror the server's public order: all originals, then all reversals."""
     originals = list(lines)
@@ -299,6 +337,10 @@ class PosWindow:
             ("F9  STRANKA", self.open_customer_dialog),
             ("F10 PREGLED / IZDAJA", self.on_f10),
         ]
+        if self.central_mode:
+            rail_actions.append(
+                ("PRI MIKROFIX / IZROČITEV", self.manage_service_pickups)
+            )
         if self._can_storno():
             rail_actions.insert(5, ("⇄ VEŽI NA STORNO", self.choose_replacement_source))
         for text_value, command in rail_actions:
@@ -4269,6 +4311,142 @@ class PosWindow:
         if first:
             tree.selection_set(first[0])
             tree.focus(first[0])
+
+    def manage_service_pickups(self):
+        """Explicit physical handoff, separate from invoice preparation/issue."""
+        if not self.central_mode:
+            messagebox.showinfo(
+                "Izročitev naprave",
+                "Evidenca fizičnih izročitev je na voljo samo v centralnem načinu.",
+                parent=self.win,
+            )
+            return
+        dialog = tk.Toplevel(self.win)
+        dialog.title("Pri MikroFix / izročitev")
+        dialog.transient(self.win)
+        dialog.grab_set()
+        dialog.geometry("1180x500")
+        dialog.minsize(820, 400)
+        ttk.Label(
+            dialog,
+            text=(
+                "Naprave, ki so tehnično zaključene in so še fizično pri MikroFix. "
+                "Podatek o računu je samo informativen."
+            ),
+        ).pack(anchor="w", padx=14, pady=(14, 8))
+        status = tk.StringVar()
+        ttk.Label(dialog, textvariable=status, foreground=RED).pack(
+            anchor="w", padx=14, pady=(0, 6)
+        )
+        columns = (
+            "service", "customer", "device", "serial", "billing", "ready", "custody",
+        )
+        tree = ttk.Treeview(dialog, columns=columns, show="headings", selectmode="browse")
+        for key, label, width in (
+            ("service", "Servis", 150), ("customer", "Stranka", 180),
+            ("device", "Naprava", 170), ("serial", "Serijska", 130),
+            ("billing", "Račun / obračun", 160),
+            ("ready", "Pripravljeno", 150), ("custody", "Hramba", 115),
+        ):
+            tree.heading(key, text=label)
+            tree.column(key, width=width, stretch=key in {"customer", "device"})
+        tree.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        current = {"rows": {}, "pending": None}
+
+        def refresh():
+            try:
+                rows = service_pickup_display_rows(
+                    self.central_cashier.service_pickups(limit=500)
+                )
+                pending = self.central_cashier.unresolved_commands(limit=1)
+            except Exception as exc:
+                messagebox.showerror("Izročitev naprave", str(exc), parent=dialog)
+                return
+            current["rows"] = {row["service_order_id"]: row for row in rows}
+            current["pending"] = pending[0] if pending else None
+            for iid in tree.get_children():
+                tree.delete(iid)
+            for row in rows:
+                tree.insert("", "end", iid=row["service_order_id"], values=(
+                    row["service_no"], row["customer"], row["device"], row["serial"],
+                    row["billing"], row["ready_at"], row["custody"],
+                ))
+            if current["pending"]:
+                status.set(
+                    "NEDOKONČAN ZAHTEVEK: "
+                    f"{current['pending']['operation_type']} • ponovljen bo isti ukaz "
+                    f"{current['pending']['operation_id']}"
+                )
+            else:
+                status.set("")
+
+        def confirm_handoff():
+            pending = current["pending"]
+            selection = tree.selection()
+            if pending and pending["operation_type"] == "ConfirmServiceDevicePickup":
+                if not messagebox.askyesno(
+                    "Potrditev dejanske izročitve",
+                    "Prejšnji rezultat ni bil jasen. Ponovim popolnoma isti zahtevek "
+                    f"{pending['operation_id']}?",
+                    parent=dialog,
+                ):
+                    return
+                try:
+                    self.central_cashier.retry_command(str(pending["operation_id"]))
+                except CashierResultUncertain as exc:
+                    messagebox.showwarning(
+                        "Izročitev še ni usklajena",
+                        "Rezultat še vedno ni jasen. Naprave ne označuj ponovno; "
+                        f"ponovi isti ukaz {exc.operation_id}.", parent=dialog,
+                    )
+                except Exception as exc:
+                    messagebox.showerror("Izročitev naprave", str(exc), parent=dialog)
+                refresh()
+                return
+            if pending:
+                messagebox.showwarning(
+                    "Izročitev naprave",
+                    "Najprej uskladi starejši centralni zahtevek.", parent=dialog,
+                )
+                return
+            if not selection:
+                messagebox.showinfo(
+                    "Izročitev naprave", "Najprej označi napravo.", parent=dialog
+                )
+                return
+            row = current["rows"][selection[0]]
+            if not messagebox.askyesno(
+                "Potrditev dejanske izročitve",
+                f"Potrjuješ, da je bila naprava servisa {row['service_no']} "
+                "dejansko fizično izročena stranki?",
+                parent=dialog,
+            ):
+                return
+            try:
+                self.central_cashier.confirm_service_device_pickup(
+                    service_order_id=row["service_order_id"],
+                    expected_version=row["row_version"],
+                )
+            except CashierResultUncertain as exc:
+                messagebox.showwarning(
+                    "Izročitev še ni usklajena",
+                    "Rezultat ni jasen. Naprave ne označuj ponovno; "
+                    f"ponovi isti ukaz {exc.operation_id}.", parent=dialog,
+                )
+            except CashierCommandRejected as exc:
+                messagebox.showerror("Izročitev zavrnjena", str(exc), parent=dialog)
+            except Exception as exc:
+                messagebox.showerror("Izročitev naprave", str(exc), parent=dialog)
+            refresh()
+
+        buttons = ttk.Frame(dialog)
+        buttons.pack(fill="x", padx=14, pady=(0, 14))
+        ttk.Button(
+            buttons, text="POTRDI DEJANSKO IZROČITEV", command=confirm_handoff
+        ).pack(side="right")
+        ttk.Button(buttons, text="OSVEŽI", command=refresh).pack(side="right", padx=8)
+        ttk.Button(buttons, text="ZAPRI", command=dialog.destroy).pack(side="right")
+        refresh()
 
     def _load_service(self, service_id, replace_current=False):
         try:

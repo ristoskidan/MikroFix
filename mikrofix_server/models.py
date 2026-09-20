@@ -163,6 +163,13 @@ service_orders = Table(
     Column("row_version", Integer, nullable=False),
     Column("origin_device_id", String(200), nullable=False),
     Column("payload_json", JSONB, nullable=False),
+    Column("custody_status", String(20), nullable=False, server_default="AT_MIKROFIX"),
+    Column("ready_for_pickup_at", DateTime(timezone=True)),
+    Column("picked_up_at", DateTime(timezone=True)),
+    Column(
+        "pickup_operation_id", UUID(as_uuid=True),
+        ForeignKey("accepted_operations_v32.operation_id"), unique=True,
+    ),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column(
         "updated_at",
@@ -171,6 +178,26 @@ service_orders = Table(
         server_default=func.now(),
     ),
     CheckConstraint("row_version >= 1", name="row_version_positive"),
+    CheckConstraint(
+        "custody_status IN ('AT_MIKROFIX','RETURNED')",
+        name="service_order_custody_status",
+    ),
+    CheckConstraint(
+        "(custody_status='AT_MIKROFIX' AND picked_up_at IS NULL "
+        "AND pickup_operation_id IS NULL) OR "
+        "(custody_status='RETURNED' AND ready_for_pickup_at IS NOT NULL "
+        "AND picked_up_at IS NOT NULL AND pickup_operation_id IS NOT NULL)",
+        name="service_order_custody_shape",
+    ),
+)
+Index(
+    "ix_service_orders_ready_pickup_v32",
+    service_orders.c.ready_for_pickup_at,
+    service_orders.c.sync_uuid,
+    postgresql_where=(
+        service_orders.c.ready_for_pickup_at.is_not(None)
+        & (service_orders.c.custody_status == "AT_MIKROFIX")
+    ),
 )
 
 

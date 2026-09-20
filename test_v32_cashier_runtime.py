@@ -44,6 +44,12 @@ class FakeCashierTransport:
                 "return_id": operation["aggregate_id"],
                 "status": "QUARANTINED", "stock_effect": "NONE",
             }
+        elif operation["operation_type"] == "ConfirmServiceDevicePickup":
+            result = {
+                "service_order_id": operation["aggregate_id"],
+                "custody_status": "RETURNED",
+                "picked_up_at": "2026-09-20T12:00:00+02:00",
+            }
         else:
             result = {"invoice_id": invoice_id}
         return {
@@ -68,6 +74,12 @@ class FakeCashierTransport:
 
     def list_ready_service_drafts(self, *, limit):
         return [{"draft_id": str(uuid4())}]
+
+    def list_service_pickups(self, *, limit):
+        return [{
+            "service_order_id": str(uuid4()), "aggregate_version": 2,
+            "custody_status": "AT_MIKROFIX", "invoice_number": None,
+        }]
 
     def returnable_stock(self, invoice_id):
         return [{"invoice_id": invoice_id, "returnable_quantity": "1.0000"}]
@@ -159,6 +171,54 @@ class CentralCashierWorkflowTests(unittest.TestCase):
         with self.assertRaises(CashierCommandRejected) as raised:
             workflow.issue_direct_sale(**direct_payload())
         self.assertEqual(raised.exception.code, "INSUFFICIENT_STOCK")
+
+    def test_device_pickup_read_and_accept_are_separate_from_invoice(self):
+        transport = FakeCashierTransport()
+        workflow = self.workflow(transport)
+        pickup = workflow.service_pickups()[0]
+
+        result = workflow.confirm_service_device_pickup(
+            service_order_id=pickup["service_order_id"],
+            expected_version=pickup["aggregate_version"],
+        )
+
+        operation = transport.submissions[0]
+        self.assertEqual(operation["operation_type"], "ConfirmServiceDevicePickup")
+        self.assertEqual(operation["aggregate_type"], "SERVICE_ORDER")
+        self.assertEqual(operation["aggregate_id"], pickup["service_order_id"])
+        self.assertEqual(operation["expected_version"], 2)
+        self.assertEqual(operation["payload"], {
+            "service_order_id": pickup["service_order_id"],
+            "expected_version": 2, "confirmed": True,
+        })
+        self.assertEqual(result["custody_status"], "RETURNED")
+        self.assertIsNone(pickup["invoice_number"])
+
+    def test_device_pickup_rejection_is_explicit(self):
+        workflow = self.workflow(FakeCashierTransport("REJECTED"))
+        with self.assertRaises(CashierCommandRejected):
+            workflow.confirm_service_device_pickup(
+                service_order_id=str(uuid4()), expected_version=2,
+            )
+
+    def test_uncertain_device_pickup_reuses_same_operation_id(self):
+        transport = FakeCashierTransport("UNCERTAIN")
+        workflow = self.workflow(transport)
+        service_order_id = str(uuid4())
+        with self.assertRaises(CashierResultUncertain) as raised:
+            workflow.confirm_service_device_pickup(
+                service_order_id=service_order_id, expected_version=2,
+            )
+
+        transport.result = "ACCEPTED"
+        result = workflow.confirm_service_device_pickup(
+            service_order_id=service_order_id, expected_version=2,
+            operation_id=raised.exception.operation_id,
+        )
+
+        self.assertEqual(result["custody_status"], "RETURNED")
+        self.assertEqual(len(transport.submissions), 2)
+        self.assertEqual(transport.submissions[0], transport.submissions[1])
 
     def test_pos_lines_are_reduced_to_server_owned_pricing_inputs(self):
         article = PosLine(

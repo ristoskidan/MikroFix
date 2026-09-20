@@ -30,6 +30,7 @@ from mikrofix_sync_contracts import (
     validated_create_partner_payload,
     validated_begin_full_inventory_payload,
     validated_cancel_full_inventory_payload,
+    validated_confirm_service_device_pickup_payload,
     validated_issue_service_invoice_payload,
     validated_issue_direct_sale_invoice_payload,
     validated_inventory_readiness_payload,
@@ -211,6 +212,39 @@ class SyncContractTests(unittest.TestCase):
         invalid = dict(payload, customer_phone="", customer_email="")
         with self.assertRaisesRegex(ContractError, "customer_phone"):
             validated_create_service_order_payload(invalid)
+
+    def test_service_device_pickup_contract_is_exact_and_confirmed(self):
+        service_id = str(uuid4())
+        self.assertEqual(
+            validated_confirm_service_device_pickup_payload({
+                "service_order_id": service_id,
+                "expected_version": 2,
+                "confirmed": True,
+            }),
+            {
+                "service_order_id": service_id,
+                "expected_version": 2,
+                "confirmed": True,
+            },
+        )
+        invalid_payloads = (
+            {"service_order_id": service_id, "expected_version": 2},
+            {
+                "service_order_id": service_id, "expected_version": 2,
+                "confirmed": False,
+            },
+            {
+                "service_order_id": service_id, "expected_version": 0,
+                "confirmed": True,
+            },
+            {
+                "service_order_id": service_id, "expected_version": 2,
+                "confirmed": True, "recipient": "Ne sme obstajati",
+            },
+        )
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload), self.assertRaises(ContractError):
+                validated_confirm_service_device_pickup_payload(payload)
 
     def test_envelope_requires_offset_time_and_has_stable_hash(self):
         payload = {"service_order_id": str(uuid4()), "state": "OPEN"}

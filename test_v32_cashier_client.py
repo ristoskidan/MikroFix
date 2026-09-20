@@ -123,6 +123,42 @@ class CashierCommandJournalTests(unittest.TestCase):
         self.assertEqual(row["aggregate_type"], "INVOICE")
         self.assertEqual(row["aggregate_uuid"], invoice_id)
 
+    def test_device_pickup_has_the_exact_versioned_service_envelope(self):
+        service_order_id = str(uuid4())
+        operation_id = self.journal.prepare_confirm_service_device_pickup({
+            "service_order_id": service_order_id,
+            "expected_version": 7,
+            "confirmed": True,
+        })
+
+        row = outbox_operation(self.connection, operation_id)
+        self.assertEqual(row["operation_type"], "ConfirmServiceDevicePickup")
+        self.assertEqual(row["aggregate_type"], "SERVICE_ORDER")
+        self.assertEqual(row["aggregate_uuid"], service_order_id)
+        self.assertEqual(row["expected_version"], 7)
+        self.assertEqual(json.loads(row["payload_json"]), {
+            "service_order_id": service_order_id,
+            "expected_version": 7,
+            "confirmed": True,
+        })
+
+    def test_lost_pickup_response_retries_the_same_command_identity(self):
+        service_order_id = str(uuid4())
+        operation_id = self.journal.prepare_confirm_service_device_pickup({
+            "service_order_id": service_order_id,
+            "expected_version": 3,
+            "confirmed": True,
+        })
+
+        first = self.journal.dispatch(operation_id)
+        second = self.journal.dispatch(operation_id)
+
+        self.assertTrue(first.uncertain)
+        self.assertFalse(second.uncertain)
+        self.assertEqual(len(self.transport.requests), 2)
+        self.assertEqual(self.transport.requests[0], self.transport.requests[1])
+        self.assertEqual(self.transport.requests[0]["operation_id"], operation_id)
+
     def test_storno_is_durably_prepared_without_a_stock_instruction(self):
         invoice_id = str(uuid4())
         operation_id = self.journal.prepare_storno_invoice({
@@ -203,6 +239,24 @@ class CashierCommandJournalTests(unittest.TestCase):
             "https://central.example/v1/cashier/partners/ajpes/12345678",
             params={},
             headers={"Authorization": "Bearer token"},
+            timeout=15.0,
+        )
+
+    @patch("requests.get")
+    def test_service_pickup_read_uses_the_dedicated_endpoint(self, get):
+        pickup = {
+            "service_order_id": str(uuid4()), "aggregate_version": 2,
+            "custody_status": "AT_MIKROFIX",
+        }
+        response = Mock(status_code=200)
+        response.json.return_value = {"pickups": [pickup]}
+        get.return_value = response
+        transport = RequestsCashierTransport("https://central.example", "token")
+
+        self.assertEqual(transport.list_service_pickups(limit=25), [pickup])
+        get.assert_called_once_with(
+            "https://central.example/v1/cashier/service-pickups",
+            params={"limit": 25}, headers={"Authorization": "Bearer token"},
             timeout=15.0,
         )
 

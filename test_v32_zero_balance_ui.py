@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from mikrofix_v30_pos import PosError, PosLine, generate_pos_preview_pdfs
-from mikrofix_v30_pos_ui import PosWindow, zero_balance_preview_lines
+from mikrofix_v30_pos_ui import (
+    PosWindow, service_pickup_display_rows, zero_balance_preview_lines,
+)
 
 
 class _Value:
@@ -195,6 +197,33 @@ class ZeroBalanceUiPolicyTests(unittest.TestCase):
         self.assertIn('"status", "total"', source)
         self.assertIn('row.get("status", "")', source)
         self.assertIn('row.get("total", "")', source)
+
+    def test_physical_handoff_is_a_separate_central_action(self):
+        class_source = inspect.getsource(PosWindow)
+        invoice_source = inspect.getsource(PosWindow._issue_central_invoice)
+        pickup_source = inspect.getsource(PosWindow.manage_service_pickups)
+
+        self.assertIn("PRI MIKROFIX / IZROČITEV", class_source)
+        self.assertIn("POTRDI DEJANSKO IZROČITEV", pickup_source)
+        self.assertIn("confirm_service_device_pickup", pickup_source)
+        self.assertIn("retry_command", pickup_source)
+        self.assertNotIn("confirm_service_device_pickup", invoice_source)
+        self.assertNotIn("picked_up", invoice_source)
+
+    def test_pickup_view_does_not_require_an_invoice(self):
+        rows = service_pickup_display_rows([{
+            "service_order_id": "11111111-1111-1111-1111-111111111111",
+            "aggregate_version": 4, "service_no": "MF-SN-44",
+            "customer": {"name": "Testna stranka"},
+            "device": {"model": "Prenosnik", "serial": "SER-44"},
+            "ready_for_pickup_at": "2026-09-20T11:30:00+02:00",
+            "custody_status": "AT_MIKROFIX",
+            "billing": {"invoice_number": None, "draft_status": "READY"},
+        }])
+
+        self.assertEqual(rows[0]["billing"], "READY")
+        self.assertEqual(rows[0]["custody"], "AT_MIKROFIX")
+        self.assertEqual(rows[0]["row_version"], 4)
 
 
 if __name__ == "__main__":
