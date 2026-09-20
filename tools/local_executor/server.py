@@ -372,16 +372,17 @@ def project_read(request: ReadRequest) -> dict[str, object]:
     path = safe_path(request.path, require_file=True)
     if path.stat().st_size > MAX_READ_BYTES:
         raise HTTPException(status_code=413, detail="File is too large for this tool")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    start = min(request.start_line, len(lines) + 1)
-    end = min(max(start - 1, request.end_line), start + MAX_READ_LINES - 1, len(lines))
-    content = "\n".join(f"{index}: {lines[index - 1]}" for index in range(start, end + 1))
+    content_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    start = min(request.start_line, len(content_lines) + 1)
+    end = min(max(start - 1, request.end_line), start + MAX_READ_LINES - 1, len(content_lines))
+    raw_content = "\n".join(content_lines[start - 1 : end])
     return {
         "path": str(path.relative_to(PROJECT_ROOT)),
         "start_line": start,
         "end_line": end,
-        "total_lines": len(lines),
-        "content": content,
+        "total_lines": len(content_lines),
+        "content": raw_content,
+        "raw_content": raw_content,
     }
 
 
