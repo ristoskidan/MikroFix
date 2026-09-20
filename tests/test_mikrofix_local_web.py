@@ -42,7 +42,7 @@ class LocalWebPayloadTests(unittest.TestCase):
 
     def test_html_is_local_and_exposes_required_owner_actions(self):
         html = web.HTML_FILE.read_text(encoding="utf-8")
-        for label in ("Nova naloga", "Pošlji lokalnemu vodji", "Dovoli in izvedi", "Kopiraj za Codex"):
+        for label in ("Nova naloga", "Pošlji lokalnemu vodji", "Dovoli in izvedi", "Kopiraj za Codex", "Živi potek"):
             self.assertIn(label, html)
         self.assertIn("grid-template-rows:auto minmax(0,1fr) auto", html)
         self.assertEqual("127.0.0.1", web.HOST)
@@ -62,6 +62,36 @@ class LocalWebPayloadTests(unittest.TestCase):
             ["/usr/bin/xdotool", "windowfocus", "--sync", "202"],
             run.call_args_list[-1].args[0],
         )
+
+    def test_trace_combines_supervisor_qwen_review_and_redacts_secrets(self):
+        directory = self.workspace / "jobs" / "MF-TRACE"
+        directory.mkdir()
+        run_dir = self.workspace / "runs" / "MF-TRACE"
+        qwen = run_dir / "bridge" / "jobs" / "MF-2026-0001"
+        qwen.mkdir(parents=True)
+        (qwen / "log.txt").write_text("Qwen korak 1\nBearer topsecret\n", encoding="utf-8")
+        (qwen / "result.txt").write_text("READY\n", encoding="utf-8")
+        supervisor = directory / "supervisor.json"
+        supervisor.write_text(json.dumps({
+            "stage": "GPT_OSS_REVIEW", "attempt": 1,
+            "feedback": "missing valid verdict",
+            "test_evidence": "1 test PASS",
+            "review_evidence": "Verdict: APPROVE",
+            "events": [{"at": "now", "stage": "LOCAL_TESTS", "message": "passed"}],
+            "environment": {"run_dir": str(run_dir)},
+        }), encoding="utf-8")
+        (directory / "request.json").write_text(json.dumps({
+            "run_id": "MF-TRACE", "task": "Trace", "created_at": "now",
+        }), encoding="utf-8")
+        (directory / "manager.json").write_text(json.dumps({
+            "run_id": "MF-TRACE", "state": "RUNNING_LOCAL",
+            "supervisor_state": str(supervisor),
+        }), encoding="utf-8")
+        trace = web.build_trace(self.workspace, "MF-TRACE")
+        for expected in ("QWEN · IZVEDBA", "Qwen korak 1", "1 test PASS", "Verdict: APPROVE", "missing valid verdict"):
+            self.assertIn(expected, trace)
+        self.assertNotIn("topsecret", trace)
+        self.assertIn("Bearer <skrito>", trace)
 
 
 if __name__ == "__main__":

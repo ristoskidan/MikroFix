@@ -8,11 +8,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
 import time
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 import urllib.request
 
 try:
@@ -43,6 +45,7 @@ HOST = "127.0.0.1"
 PORT = 8765
 URL = f"http://{HOST}:{PORT}"
 MAX_BODY = 64_000
+MAX_TRACE_BYTES = 1_000_000
 
 
 def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +71,94 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
 
 def jobs_payload(workspace: Path) -> dict[str, Any]:
     return {"jobs": [serialize_job(job) for job in list_jobs(workspace)]}
+
+
+def _read_trace_file(path: Path, limit: int = 200_000) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    prefix = ""
+    if len(data) > limit:
+        data = data[-limit:]
+        prefix = "[... starejši izpis te datoteke je skrajšan ...]\n"
+    return prefix + data.decode("utf-8", errors="replace").strip()
+
+
+def redact_trace(text: str) -> str:
+    text = re.sub(r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <skrito>", text)
+    text = re.sub(
+        r'(?i)("(?:password|secret|api[_-]?key|access[_-]?token|refresh[_-]?token)"\s*:\s*)"[^"]*"',
+        r'\1"<skrito>"',
+        text,
+    )
+    return text
+
+
+def build_trace(workspace: Path, run_id: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError("Neveljaven ID naloge")
+    job_dir = (workspace / "jobs" / run_id).resolve()
+    try:
+        job_dir.relative_to((workspace / "jobs").resolve())
+    except ValueError as exc:
+        raise ValueError("Neveljavna pot naloge") from exc
+    if not job_dir.is_dir():
+        raise ValueError("Naloga ne obstaja")
+
+    sections: list[str] = []
+    planner_jobs = job_dir / "planner-runtime" / "bridge" / "jobs"
+    for directory in sorted(planner_jobs.glob("MF-*")):
+        log = _read_trace_file(directory / "log.txt")
+        result = _read_trace_file(directory / "result.txt")
+        body = "\n".join(part for part in (log, "\nKONČNI ODGOVOR:\n" + result if result else "") if part)
+        if body:
+            sections.append(f"=== GPT-OSS · NAČRTOVANJE · {directory.name} ===\n{body}")
+
+    manager = read_json(job_dir / "manager.json")
+    supervisor_path = Path(manager.get("supervisor_state", job_dir / "supervisor.json"))
+    supervisor = read_json(supervisor_path)
+    events = supervisor.get("events") or []
+    if events:
+        event_lines = [
+            f"[{event.get('at', '')}] {event.get('stage', '')}: {event.get('message', '')}"
+            for event in events if isinstance(event, dict)
+        ]
+        sections.append("=== SUPERVISOR · ODLOČITVE ===\n" + "\n".join(event_lines))
+
+    environment = supervisor.get("environment") or {}
+    run_dir_raw = environment.get("run_dir")
+    if run_dir_raw:
+        run_dir = Path(str(run_dir_raw))
+        qwen_jobs = run_dir / "bridge" / "jobs"
+        for directory in sorted(qwen_jobs.glob("MF-*")):
+            log = _read_trace_file(directory / "log.txt")
+            result = _read_trace_file(directory / "result.txt")
+            body = "\n".join(
+                part for part in (
+                    log,
+                    "\nQWENOV KONČNI ODGOVOR:\n" + result if result else "[Qwen še dela ali ni vrnil končnega odgovora]",
+                ) if part
+            )
+            sections.append(f"=== QWEN · IZVEDBA · {directory.name} ===\n{body}")
+
+    if supervisor.get("test_evidence"):
+        sections.append("=== LOKALNI TESTI ===\n" + str(supervisor["test_evidence"]))
+    if supervisor.get("review_evidence"):
+        sections.append("=== GPT-OSS · LOKALNI PREGLED ===\n" + str(supervisor["review_evidence"]))
+    sections.append(
+        "=== TRENUTNO STANJE ===\n"
+        f"Stopnja: {supervisor.get('stage', manager.get('state', 'UNKNOWN'))}\n"
+        f"Poskus: {supervisor.get('attempt', 0)}\n"
+        f"Razlog / povratna informacija: {supervisor.get('feedback') or manager.get('exact_reason') or '-'}"
+    )
+    trace = redact_trace("\n\n".join(sections))
+    if len(trace.encode("utf-8")) > MAX_TRACE_BYTES:
+        encoded = trace.encode("utf-8")[-MAX_TRACE_BYTES:]
+        trace = "[... najstarejši del celotnega izpisa je skrajšan ...]\n" + encoded.decode(
+            "utf-8", errors="replace"
+        )
+    return trace
 
 
 def spawn_manager(workspace: Path, arguments: list[str]) -> Path:
@@ -122,12 +213,19 @@ class LocalWebHandler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/":
+        parsed = urlparse(self.path)
+        if parsed.path == "/":
             self.send_bytes(200, HTML_FILE.read_bytes(), "text/html; charset=utf-8")
-        elif self.path == "/api/health":
+        elif parsed.path == "/api/health":
             self.send_json(200, {"ok": True})
-        elif self.path == "/api/jobs":
+        elif parsed.path == "/api/jobs":
             self.send_json(200, jobs_payload(self.server.workspace))
+        elif parsed.path == "/api/trace":
+            try:
+                run_id = (parse_qs(parsed.query).get("run_id") or [""])[0]
+                self.send_json(200, {"run_id": run_id, "trace": build_trace(self.server.workspace, run_id)})
+            except ValueError as exc:
+                self.send_json(400, {"error": str(exc)})
         else:
             self.send_json(404, {"error": "Not found"})
 

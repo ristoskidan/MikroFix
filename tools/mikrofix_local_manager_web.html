@@ -13,6 +13,7 @@
     #jobs{overflow:auto;padding:10px;flex:1}.job{width:100%;text-align:left;background:transparent;border:1px solid transparent;padding:12px;color:var(--text);margin-bottom:7px}.job:hover{background:var(--panel)}.job.active{background:var(--panel2);border-color:#31516d}.job-title{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.job-state{font-size:12px;color:var(--blue);margin-top:5px}
     main{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0}.top{padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}.badge{font-weight:700;color:var(--blue)}
     .content{overflow:auto;padding:24px;min-height:0}.card{max-width:1000px;margin:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:22px}.transcript{white-space:pre-wrap;font-size:16px}.events{margin-top:20px;border-top:1px solid var(--border);padding-top:15px}.event{color:var(--muted);padding:4px 0}.event b{color:var(--text)}
+    .views{display:flex;gap:7px;margin-left:auto;margin-right:18px}.view{padding:7px 11px;background:#26384a;color:var(--muted)}.view.active{background:#075985;color:white}.terminal{margin:0;white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;color:#c8f7d4;background:#07120d;border:1px solid #1f4933;border-radius:10px;padding:16px;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;min-height:300px;max-height:calc(100vh - 330px)}
     .composer{border-top:1px solid var(--border);padding:15px 24px;background:#0e1620}.compose-inner{max-width:1000px;margin:auto}textarea{width:100%;height:110px;resize:vertical;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:13px;font:inherit;outline:none}textarea:focus{border-color:var(--blue)}
     .actions{display:flex;gap:9px;align-items:center;margin-top:10px}.status{margin-left:auto;color:var(--muted);font-size:13px}.empty{color:var(--muted);padding:40px;text-align:center}@media(max-width:850px){.app{grid-template-columns:1fr}.side{display:none}}
   </style>
@@ -20,24 +21,30 @@
 <body>
 <div class="app">
   <aside class="side"><header><h1>MikroFix – lokalni vodja</h1><div class="sub">GPT‑OSS načrtuje · Qwen izvaja · ti odločaš</div><button class="new" id="new">+ Nova naloga</button></header><div id="jobs"></div></aside>
-  <main><div class="top"><strong id="title">Nova naloga</strong><span class="badge" id="badge">Pripravljen</span></div><div class="content"><div class="card" id="card"><div class="empty">Napiši nalogo spodaj. Lokalni vodja bo najprej pripravil načrt, izvedba pa se ne začne brez tvojega dovoljenja.</div></div></div>
+  <main><div class="top"><strong id="title">Nova naloga</strong><div class="views"><button class="view active" id="conversation">Pogovor</button><button class="view" id="live">Živi potek</button></div><span class="badge" id="badge">Pripravljen</span></div><div class="content"><div class="card" id="card"><div class="empty">Napiši nalogo spodaj. Lokalni vodja bo najprej pripravil načrt, izvedba pa se ne začne brez tvojega dovoljenja.</div></div></div>
   <div class="composer"><div class="compose-inner"><textarea id="input" placeholder="Opiši celotno nalogo ali napiši pojasnilo izbrani nalogi …"></textarea><div class="actions"><button id="send">Pošlji lokalnemu vodji</button><button class="approve" id="execute" disabled>Dovoli in izvedi</button><button class="secondary" id="copy" disabled>Kopiraj za Codex</button><span class="status" id="status"></span></div></div></div></main>
 </div>
 <script>
-let jobs=[], selected=null, newMode=true;
+let jobs=[], selected=null, newMode=true, view='conversation', traceText='';
 const $=id=>document.getElementById(id);
 async function api(path, options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const v=await r.json();if(!r.ok)throw new Error(v.error||'Napaka');return v}
-function choose(id){selected=id;newMode=false;render();}
+function choose(id){selected=id;newMode=false;traceText='';render();if(view==='live')loadTrace();}
 function newTask(){selected=null;newMode=true;$('input').value='';$('input').focus();render();}
 function render(){
   $('jobs').replaceChildren(...jobs.map(j=>{const b=document.createElement('button');b.className='job'+(j.run_id===selected?' active':'');b.onclick=()=>choose(j.run_id);const t=document.createElement('div');t.className='job-title';t.textContent=j.task;const s=document.createElement('div');s.className='job-state';s.textContent=j.state_label;b.append(t,s);return b}));
   const j=jobs.find(x=>x.run_id===selected);$('execute').disabled=!j||j.state!=='READY_FOR_OWNER_LEASE';$('copy').disabled=!j||j.state!=='READY_FOR_CODEX_REVIEW';
+  $('conversation').classList.toggle('active',view==='conversation');$('live').classList.toggle('active',view==='live');
   if(!j){$('title').textContent='Nova naloga';$('badge').textContent='Pripravljen';$('card').innerHTML='<div class="empty">Napiši nalogo spodaj. Lokalni vodja bo najprej pripravil načrt, izvedba pa se ne začne brez tvojega dovoljenja.</div>';return}
-  $('title').textContent=j.run_id;$('badge').textContent=j.state_label;const c=$('card');c.replaceChildren();const p=document.createElement('div');p.className='transcript';p.textContent=j.transcript;c.append(p);
+  $('title').textContent=j.run_id;$('badge').textContent=j.state_label;const c=$('card');
+  if(view==='live'){if(c.querySelector('.terminal'))return;c.replaceChildren();const p=document.createElement('pre');p.className='terminal';p.textContent=traceText||'Nalagam celoten potek …';c.append(p);return}
+  c.replaceChildren();const p=document.createElement('div');p.className='transcript';p.textContent=j.transcript;c.append(p);
   const lines=[...(j.activity||[]),...(j.events||[]).map(e=>`${e.at||''} · ${e.stage||''} · ${e.message||''}`)];if(lines.length){const e=document.createElement('div');e.className='events';const h=document.createElement('b');h.textContent='Sprotno dogajanje';e.append(h);lines.slice(-20).forEach(line=>{const d=document.createElement('div');d.className='event';d.textContent=line;e.append(d)});c.append(e)}
 }
-async function refresh(){try{const v=await api('/api/jobs');jobs=v.jobs;if(!newMode&&selected&&!jobs.some(j=>j.run_id===selected))selected=null;if(!newMode&&!selected&&jobs.length)selected=jobs[0].run_id;render()}catch(e){$('status').textContent=e.message}}
+async function loadTrace(){if(!selected||view!=='live')return;try{const v=await api(`/api/trace?run_id=${encodeURIComponent(selected)}`);traceText=v.trace;const p=$('card').querySelector('.terminal');if(p){const near=p.scrollTop+p.clientHeight>=p.scrollHeight-100;p.textContent=traceText;if(near)p.scrollTop=p.scrollHeight}}catch(e){traceText=e.message}}
+async function refresh(){try{const v=await api('/api/jobs');jobs=v.jobs;if(!newMode&&selected&&!jobs.some(j=>j.run_id===selected))selected=null;if(!newMode&&!selected&&jobs.length)selected=jobs[0].run_id;render();if(view==='live')await loadTrace()}catch(e){$('status').textContent=e.message}}
 $('new').onclick=newTask;
+$('conversation').onclick=()=>{view='conversation';render()};
+$('live').onclick=()=>{view='live';render();loadTrace()};
 $('send').onclick=async()=>{const task=$('input').value.trim();if(!task)return;$('status').textContent='Lokalni vodja prevzema nalogo …';try{await api('/api/submit',{method:'POST',body:JSON.stringify({task,parent_run_id:newMode?null:selected})});$('input').value='';newMode=false;selected=null;setTimeout(refresh,600)}catch(e){$('status').textContent=e.message}};
 $('execute').onclick=async()=>{if(!selected)return;$('status').textContent='Zaganjam varno lokalno izvedbo …';try{await api('/api/execute',{method:'POST',body:JSON.stringify({run_id:selected})});setTimeout(refresh,500)}catch(e){$('status').textContent=e.message}};
 $('copy').onclick=async()=>{if(!selected)return;await navigator.clipboard.writeText(`Preglej lokalnega kandidata ${selected}`);$('status').textContent='Sporočilo za Codex je kopirano'};
