@@ -239,15 +239,19 @@ class RunEnvironment:
         executor_url = f"http://127.0.0.1:{port}"
         config = {
             "ollama_url": bridge_template.get("ollama_url", "http://172.17.0.1:11434/api/chat"),
-            "model": bridge_template.get("worker_model", "qwen3.5:9b"),
+            "model": bridge_template.get(
+                "worker_model", bridge_template.get("model", "gpt-oss:20b")
+            ),
             "executor_url": executor_url,
             "token_file": str(executor_config_dir / "token"),
             "project": str(worktree),
-            "system_prompt": str(worktree / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"),
+            "system_prompt": str(
+                source_root / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"
+            ),
             "num_ctx": int(bridge_template.get("worker_num_ctx", 65536)),
             "max_steps": int(bridge_template.get("max_steps", 30)),
             "keep_alive": str(bridge_template.get("worker_keep_alive", "5m")),
-            "agent_role": "Qwen — lokalni izvajalec",
+            "agent_role": "GPT-OSS — lokalni izvajalec (ločena izvedbena seja)",
             "completion_policy": "supervisor_only",
         }
         atomic_write_immutable_json(bridge_config, config)
@@ -1037,7 +1041,9 @@ def qwen_prompt(run: dict[str, Any]) -> str:
         f"  code: {json.dumps(plan['context_links']['code'], ensure_ascii=False)}\n"
         f"  tests: {json.dumps(plan['context_links']['tests'], ensure_ascii=False)}\n"
         "Roles: Codex — vodja projekta in končni pregled; GPT-OSS — lokalni vodja "
-        "izvedbe; Qwen — lokalni izvajalec; Bridge — nadzorni most. Follow the "
+        "izvedbe in načrtovanja; GPT-OSS executor — lokalni izvajalec v ločeni "
+        "seji; GPT-OSS reviewer — skeptični pregledovalec v novi ločeni seji; "
+        "Bridge — nadzorni most. Follow the "
         "persistent AGENTS.md rules loaded in the bridge system prompt. "
         "Make the smallest complete change. Do not modify any other file. "
         "Do not run git checkout, restore, reset, clean, commit, merge, push, "
@@ -1144,7 +1150,7 @@ class Supervisor:
             run["job_id"] = self.adapter.dispatch_qwen(qwen_prompt(run))
             run["job_dispatched_at"] = time.time()
             record(run, Stage.DISPATCHED_TO_QWEN,
-                   f"Qwen job dispatched: {run['job_id']}")
+                   f"Executor job dispatched: {run['job_id']}")
             self.save(run)
             return True
         if stage is Stage.DISPATCHED_TO_QWEN:
@@ -1153,26 +1159,26 @@ class Supervisor:
                 dispatched_at = run.get("job_dispatched_at")
                 timeout = run["plan"]["job_timeout_seconds"]
                 if not isinstance(dispatched_at, (int, float)):
-                    run["feedback"] = "Missing dispatch timestamp for active Qwen job"
-                    record(run, Stage.BLOCKED, "Cannot enforce Qwen job timeout")
+                    run["feedback"] = "Missing dispatch timestamp for active executor job"
+                    record(run, Stage.BLOCKED, "Cannot enforce executor job timeout")
                     self.save(run)
                     self.notify_terminal(run)
                     return True
                 if time.time() - dispatched_at >= timeout:
                     run["feedback"] = (
-                        f"Qwen job {run['job_id']} remained {status} for at least "
+                        f"Executor job {run['job_id']} remained {status} for at least "
                         f"{timeout} seconds; worker must be inspected before retry"
                     )
-                    record(run, Stage.BLOCKED, "Qwen job timeout reached")
+                    record(run, Stage.BLOCKED, "Executor job timeout reached")
                     self.save(run)
                     self.notify_terminal(run)
                     return True
                 return False
             if status != "completed":
-                retry_or_block(run, f"Qwen job ended as {status}: {result}")
+                retry_or_block(run, f"Executor job ended as {status}: {result}")
             else:
                 run["qwen_result"] = result
-                record(run, Stage.DIFF_VERIFICATION, "Qwen job completed")
+                record(run, Stage.DIFF_VERIFICATION, "Executor job completed")
             self.save(run)
             if run["stage"] in TERMINAL_STAGES:
                 self.notify_terminal(run)

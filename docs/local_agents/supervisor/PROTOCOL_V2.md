@@ -15,11 +15,14 @@ ukaze, dovoljenja, retryje, dokazila in obvestila.
   načrt.
 - **GPT-OSS lokalni vodja** z bralnimi orodji razišče zahtevo in predlaga samo
   cilj, dovoljene datoteke, atomske naloge, omejitve in sprejemne kriterije.
-- **Qwen izvajalec** sme pisati samo v dovoljene datoteke izoliranega worktreeja.
+- **GPT-OSS izvajalec** deluje v ločeni, čisti izvedbeni seji in sme pisati samo
+  v dovoljene datoteke izoliranega worktreeja.
 - **Deterministični gatekeeper** preveri obseg diffa, pričakovane datoteke,
   teste, trajnost dokazil, retryje in terminalno stanje.
-- **GPT-OSS reviewer** pregleda kandidat, testna dokazila in vsak sprejemni
-  kriterij posebej. Ne upravlja stanja in ne odobrava prenosa v original.
+- **GPT-OSS reviewer** deluje v novi, čisti pregledovalni seji ter pregleda
+  kandidat, testna dokazila in vsak sprejemni kriterij posebej. Ne upravlja
+  stanja in ne odobrava prenosa v original. Ločitev sej prepreči deljenje
+  pogovorne zgodovine, ne zagotavlja pa raznolikosti modelov.
 - **Codex** opravi paketni končni pregled ter šele po odobritvi prenese kandidat
   v zaščiteni original in pripravi backup.
 
@@ -41,6 +44,8 @@ teka.
 2. Modelne poti se normalizirajo in preverijo pred izdelavo worktreeja.
 3. Kontekst vsebuje samo datoteke, katerih obstoj je manager preveril.
 4. Načrt, manifest dovoljenih datotek in začetni checkpoint so nespremenljivi.
+   Izvedbeni sistemski poziv se vedno naloži iz zaščitenega nadzornega repozitorija,
+   nikoli iz kandidatovega worktreeja.
 5. Retry uporablja isti omejeni kandidat; odsotnost novega diffa ne izbriše že
    veljavne spremembe.
 6. Sprememba zunaj dovoljenega obsega takoj blokira tek.
@@ -57,8 +62,8 @@ teka.
 - Manager najprej opravi vse mehanske preglede brez modela.
 - GPT-OSS dobi omejen kontekst in bralna orodja, ne celotnega repozitorija v
   pozivu.
-- Qwen dobi samo en atom, dovoljene datoteke, sprejemne kriterije in zadnjo
-  konkretno povratno informacijo.
+- GPT-OSS izvajalec dobi samo en atom, dovoljene datoteke, sprejemne kriterije
+  in zadnjo konkretno povratno informacijo.
 - Reviewer dobi samo zahtevo, diff, rezultate testov in kontrolno listo.
 - Infrastrukturne napake se ne pošiljajo modelu v popravljanje.
 

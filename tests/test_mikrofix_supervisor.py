@@ -537,7 +537,14 @@ class RunEnvironmentTests(unittest.TestCase):
             self.assertEqual("fake-worker-model", bridge["model"])
             self.assertEqual(32768, bridge["num_ctx"])
             self.assertEqual("2m", bridge["keep_alive"])
-            self.assertEqual("Qwen — lokalni izvajalec", bridge["agent_role"])
+            self.assertEqual(
+                "GPT-OSS — lokalni izvajalec (ločena izvedbena seja)",
+                bridge["agent_role"],
+            )
+            self.assertEqual(
+                str(source / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"),
+                bridge["system_prompt"],
+            )
             self.assertEqual("supervisor_only", bridge["completion_policy"])
             self.assertEqual(str(environment.executor_config_dir / "token"),
                              bridge["token_file"])
