@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -56,6 +57,54 @@ QWEN_PLANNER_SYSTEM = (
 GPT_VALIDATOR_SYSTEM = (
     PROJECT_ROOT / "docs/local_agents/supervisor/PLANNER_SYSTEM.md"
 )
+LEAD_CONVERSATION_SYSTEM = (
+    PROJECT_ROOT / "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md"
+)
+MAX_CONVERSATION_TURNS = 40
+
+
+def conversation_response_schema() -> dict[str, Any]:
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": [
+            "reply", "routing", "ready_task", "objective", "allowed_files",
+            "atoms", "constraints", "acceptance_criteria",
+        ],
+        "properties": {
+            "reply": {"type": "string", "minLength": 1},
+            "routing": {
+                "type": "string",
+                "enum": ["NEEDS_INFO", "READY_FOR_PROCESSING"],
+            },
+            "ready_task": {"type": "string"},
+            "objective": {"type": "string"},
+            "allowed_files": {
+                "type": "array", "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "atoms": {
+                "type": "array",
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["id", "task", "expected_files"],
+                    "properties": {
+                        "id": {"type": "string", "minLength": 1},
+                        "task": {"type": "string", "minLength": 1},
+                        "expected_files": {
+                            "type": "array", "minItems": 1, "uniqueItems": True,
+                            "items": {"type": "string", "minLength": 1},
+                        },
+                    },
+                },
+            },
+            "constraints": {
+                "type": "array", "items": {"type": "string", "minLength": 1},
+            },
+            "acceptance_criteria": {
+                "type": "array", "items": {"type": "string", "minLength": 1},
+            },
+        },
+    }
 
 
 def binding_owner_criterion(owner_request: str) -> str:
@@ -515,6 +564,300 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         log.close()
 
 
+def lead_conversation_prompt(
+    message: str, *, parent_run_id: str, turns: list[dict[str, str]],
+    lead_profile: str,
+) -> str:
+    """Build one bounded continuation turn for one isolated persistent lead."""
+    profile_name = (
+        "Qwen Thinking vodja" if lead_profile == "qwen_thinking"
+        else "GPT-OSS vodja"
+    )
+    history = turns[-MAX_CONVERSATION_TURNS:]
+    rendered_history = "\n\n".join(
+        ("LASTNIK" if turn.get("role") == "owner" else profile_name.upper())
+        + ":\n" + str(turn.get("content") or "").strip()
+        for turn in history
+        if str(turn.get("content") or "").strip()
+    )
+    return (
+        "Nadaljuj neposredni pogovor z lastnikom v okviru že izbrane naloge. "
+        "To ni nova naloga. Drugi profil lokalnega vodje v tem pogovoru ne "
+        "sodeluje, ne vidi zgodovine in ga ne smeš klicati ali prositi za "
+        "pregled. Za dejstva o projektu uporabi samo bralna projektna orodja. "
+        "Vrni odločitev v točno zahtevani strukturirani obliki; polje reply je "
+        "besedilo, ki ga vidi lastnik.\n\n"
+        f"IZBRANI IN ZAKLENJENI PROFIL VODJE: {profile_name}\n"
+        f"IZBRANA NALOGA: {parent_run_id}\n\n"
+        f"DOSEDANJI POGOVOR:\n{rendered_history or '(še brez nadaljevanj)'}\n\n"
+        f"NOVO SPOROČILO LASTNIKA:\n{message.strip()}"
+    )
+
+
+def run_lead_conversation(
+    message: str, *, job_dir: Path, repository: Path,
+    turns: list[dict[str, str]], lead_profile: str = "gpt_oss",
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Ask only the selected persistent lead through a read-only executor."""
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    base_home = Path.home() / ".local/share/mikrofix-bridge/lead-profiles"
+    if lead_profile == "qwen_thinking":
+        lead_home = base_home / "qwen-thinking"
+        model = str(template.get("planning_advisor_model", QWEN_PLANNER_MODEL))
+        num_ctx = int(template.get("qwen_lead_num_ctx") or 131072)
+        keep_alive = str(template.get("qwen_lead_keep_alive") or "30m")
+        think: bool | str = True
+        role = "Qwen Thinking — glavni lokalni vodja v pogovoru"
+    elif lead_profile == "gpt_oss":
+        lead_home = base_home / "gpt-oss"
+        model = str(template.get("model", "gpt-oss:20b"))
+        num_ctx = int(template.get("num_ctx") or 131072)
+        keep_alive = str(template.get("lead_keep_alive") or "30m")
+        think = "low"
+        role = "GPT-OSS — glavni lokalni vodja v pogovoru"
+    else:
+        raise ManagerError(f"Unknown lead profile: {lead_profile}")
+    lead = ensure_context_ready(
+        PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
+        model=model, num_ctx=num_ctx, keep_alive=keep_alive,
+    )
+
+    turn_dir = job_dir / "conversation-runtime" / "turns" / f"turn-{time.time_ns()}"
+    bridge_home = turn_dir / "bridge"
+    executor_config = turn_dir / "executor-config"
+    executor_state = turn_dir / "executor-state"
+    for path in (bridge_home, executor_config, executor_state):
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+
+    port = free_local_port()
+    token_file = executor_config / "token"
+    executor_url = f"http://127.0.0.1:{port}"
+    config_path = bridge_home / "config.json"
+    atomic_write_immutable_json(config_path, {
+        "ollama_url": template["ollama_url"],
+        "model": model,
+        "executor_url": executor_url,
+        "token_file": str(token_file),
+        "project": str(repository),
+        "system_prompt": str(LEAD_CONVERSATION_SYSTEM),
+        "project_memory": str(lead["memory_file"]),
+        "parent_session_id": str(lead["session_id"]),
+        "num_ctx": num_ctx,
+        "max_steps": 40,
+        "keep_alive": keep_alive,
+        "think": think,
+        "require_tool_use": True,
+        "completion_policy": "supervisor_only",
+        "response_format": conversation_response_schema(),
+        "agent_role": role,
+    })
+    executor_env = {
+        "MIKROFIX_EXECUTOR_ROOT": str(repository),
+        "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config),
+        "MIKROFIX_EXECUTOR_STATE_DIR": str(executor_state),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    log_path = turn_dir / "executor.log"
+    log = log_path.open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        [str(PROJECT_ROOT / ".venv-server/bin/python"), "-m", "uvicorn",
+         "tools.local_executor.server:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=PROJECT_ROOT, env={**os.environ, **executor_env},
+        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, text=True,
+    )
+    bridge = [str(PROJECT_ROOT / ".venv-server/bin/python"),
+              str(PROJECT_ROOT / "tools/mikrofix_bridge.py")]
+    bridge_env = {
+        "MIKROFIX_BRIDGE_HOME": str(bridge_home),
+        "MIKROFIX_BRIDGE_CONFIG": str(config_path),
+        "CODEX_THREAD_ID": "",
+    }
+    try:
+        wait_for_executor(executor_url, token_file, process)
+        prompt = lead_conversation_prompt(
+            message, parent_run_id=job_dir.name, turns=turns,
+            lead_profile=lead_profile,
+        )
+        bridge_job_id = command(
+            bridge + ["dispatch", "--name", f"Neposredni pogovor: {role}",
+                      "--task", prompt],
+            cwd=PROJECT_ROOT, env=bridge_env, timeout=30,
+        ).splitlines()[-1]
+        run_bridge_monitor(bridge, bridge_env, bridge_home, bridge_job_id)
+        raw_response = command(
+            bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
+            env=bridge_env, timeout=30,
+        ).strip()
+        if not raw_response:
+            raise ManagerError("Izbrani lokalni vodja je vrnil prazen odgovor")
+        try:
+            decision = json.loads(raw_response)
+        except json.JSONDecodeError as exc:
+            raise ManagerError("Izbrani lokalni vodja ni vrnil veljavne odločitve") from exc
+        if not isinstance(decision, dict):
+            raise ManagerError("Odločitev lokalnega vodje mora biti JSON objekt")
+        required = set(conversation_response_schema()["required"])
+        if set(decision) != required:
+            raise ManagerError("Odločitev lokalnega vodje nima natančno zahtevanih polj")
+        routing = decision.get("routing")
+        if routing not in {"NEEDS_INFO", "READY_FOR_PROCESSING"}:
+            raise ManagerError("Odločitev lokalnega vodje ima neveljaven routing")
+        if not isinstance(decision.get("reply"), str) or not decision["reply"].strip():
+            raise ManagerError("Odločitev lokalnega vodje nima odgovora za lastnika")
+        return decision, {
+            "bridge_job_id": bridge_job_id,
+            "session_id": str(lead["session_id"]),
+            "memory_sha256": str(lead["memory_sha256"]),
+            "trace_root": str(bridge_home / "jobs"),
+            "lead_profile": lead_profile,
+        }
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        log.close()
+
+
+def talk(
+    message: str, *, parent_run_id: str,
+    workspace: Path = DEFAULT_WORKSPACE,
+    lead_profile: str = "gpt_oss",
+    responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+) -> dict[str, Any]:
+    """Append one direct owner/lead turn without creating a new manager job."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    job_dir = workspace / "jobs" / parent_run_id
+    if not (job_dir / "request.json").is_file():
+        raise ManagerError(f"Parent run does not exist: {parent_run_id}")
+    clean_message = message.strip()
+    if not clean_message:
+        raise ManagerError("Conversation message must not be empty")
+    config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    repository = Path(config["repository"]).resolve()
+    conversation_file = job_dir / "conversation.json"
+    lock_path = job_dir / "conversation.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        conversation: dict[str, Any] = {}
+        if conversation_file.is_file():
+            try:
+                value = json.loads(conversation_file.read_text(encoding="utf-8"))
+                if isinstance(value, dict):
+                    conversation = value
+            except (OSError, json.JSONDecodeError):
+                conversation = {}
+        locked_profile = str(conversation.get("lead_profile") or "")
+        if locked_profile and locked_profile != lead_profile:
+            raise ManagerError(
+                "Ta pogovor je zaklenjen na drug profil vodje. Za drugi profil "
+                "odpri novo nalogo."
+            )
+        turns = conversation.get("turns")
+        if not isinstance(turns, list):
+            turns = []
+        decision, evidence = responder(
+            clean_message, job_dir=job_dir, repository=repository, turns=turns,
+            lead_profile=lead_profile,
+        )
+        routing = str(decision["routing"])
+        reply = str(decision["reply"]).strip()
+        routed_run_id = ""
+        if routing == "READY_FOR_PROCESSING":
+            ready_task = str(decision.get("ready_task") or "").strip()
+            proposal = {
+                key: decision[key]
+                for key in (
+                    "objective", "allowed_files", "atoms", "constraints",
+                    "acceptance_criteria",
+                )
+            }
+            if not ready_task:
+                raise ManagerError("READY_FOR_PROCESSING requires ready_task")
+            errors = model_plan_errors(proposal, repository)
+            if errors:
+                raise ManagerError(
+                    "READY_FOR_PROCESSING plan is incomplete: " + "; ".join(errors)
+                )
+            routed = submit(
+                ready_task, workspace=workspace,
+                generator=lambda _task, **_kwargs: json.dumps(
+                    proposal, ensure_ascii=False
+                ),
+                initialize=True, parent_run_id=parent_run_id,
+            )
+            routed_run_id = str(routed["run_id"])
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        turns.extend([
+            {"role": "owner", "content": clean_message, "at": stamp},
+            {"role": "lead", "content": reply, "at": stamp,
+             "lead_profile": lead_profile,
+             "routing": routing, "routed_run_id": routed_run_id,
+             "bridge_job_id": evidence.get("bridge_job_id", "")},
+        ])
+        conversation = {
+            "schema_version": 1,
+            "parent_run_id": parent_run_id,
+            "session_id": evidence.get("session_id", ""),
+            "memory_sha256": evidence.get("memory_sha256", ""),
+            "lead_profile": lead_profile,
+            "turns": turns,
+            "active_run_id": routed_run_id or conversation.get("active_run_id", ""),
+            "updated_at": stamp,
+        }
+        atomic_write_json(conversation_file, conversation)
+        return conversation
+
+
+def start_conversation(
+    message: str, *, workspace: Path = DEFAULT_WORKSPACE,
+    lead_profile: str = "gpt_oss",
+    responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+) -> dict[str, Any]:
+    """Create one owner-visible conversation root, then ask only its chosen lead."""
+    workspace = workspace.expanduser().resolve()
+    clean_message = message.strip()
+    if not clean_message:
+        raise ManagerError("Conversation message must not be empty")
+    if lead_profile not in {"gpt_oss", "qwen_thinking"}:
+        raise ManagerError("Unknown lead profile")
+    # Validate the workspace before creating a durable root.
+    json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    run_id = new_run_id(workspace)
+    job_dir = workspace / "jobs" / run_id
+    job_dir.mkdir(parents=True, mode=0o700)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    atomic_write_immutable_json(job_dir / "request.json", {
+        "schema_version": 1, "run_id": run_id, "task": clean_message,
+        "parent_run_id": None, "created_at": stamp,
+        "lead_profile": lead_profile, "kind": "lead_conversation",
+    })
+    atomic_write_json(job_dir / "manager.json", {
+        "schema_version": 1, "run_id": run_id, "state": "CONVERSATION",
+        "lead_profile": lead_profile,
+    })
+    atomic_write_json(job_dir / "conversation.json", {
+        "schema_version": 1, "parent_run_id": run_id,
+        "lead_profile": lead_profile, "turns": [], "active_run_id": "",
+        "updated_at": stamp,
+    })
+    try:
+        return talk(
+            clean_message, parent_run_id=run_id, workspace=workspace,
+            lead_profile=lead_profile, responder=responder,
+        )
+    except BaseException as exc:
+        atomic_write_json(job_dir / "manager.json", {
+            "schema_version": 1, "run_id": run_id, "state": "BLOCKED",
+            "lead_profile": lead_profile, "exact_reason": str(exc),
+        })
+        raise
+
+
 def new_run_id(workspace: Path) -> str:
     prefix = time.strftime("MF-LOCAL-%Y%m%d-%H%M%S", time.localtime())
     candidate = prefix
@@ -647,6 +990,17 @@ def parse_args() -> argparse.Namespace:
     submit_parser = sub.add_parser("submit")
     submit_parser.add_argument("--task", required=True)
     submit_parser.add_argument("--parent")
+    start_parser = sub.add_parser("start")
+    start_parser.add_argument("--message", required=True)
+    start_parser.add_argument(
+        "--profile", choices=("gpt_oss", "qwen_thinking"), default="gpt_oss"
+    )
+    talk_parser = sub.add_parser("talk")
+    talk_parser.add_argument("--message", required=True)
+    talk_parser.add_argument("--parent", required=True)
+    talk_parser.add_argument(
+        "--profile", choices=("gpt_oss", "qwen_thinking"), default="gpt_oss"
+    )
     execute_parser = sub.add_parser("execute")
     execute_parser.add_argument("run_id")
     execute_parser.add_argument("--lease-minutes", type=int, default=30)
@@ -660,6 +1014,15 @@ def main() -> int:
             result = submit(
                 args.task, workspace=args.workspace,
                 parent_run_id=args.parent,
+            )
+        elif args.command_name == "start":
+            result = start_conversation(
+                args.message, workspace=args.workspace, lead_profile=args.profile,
+            )
+        elif args.command_name == "talk":
+            result = talk(
+                args.message, parent_run_id=args.parent,
+                workspace=args.workspace, lead_profile=args.profile,
             )
         else:
             result = execute_run(

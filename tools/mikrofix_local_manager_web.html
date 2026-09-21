@@ -15,24 +15,24 @@
     .content{overflow:auto;padding:24px;min-height:0}.card{max-width:1000px;margin:auto;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:22px}.transcript{white-space:pre-wrap;font-size:16px}.events{margin-top:20px;border-top:1px solid var(--border);padding-top:15px}.event{color:var(--muted);padding:4px 0}.event b{color:var(--text)}
     .views{display:flex;gap:7px;margin-left:auto;margin-right:18px}.view{padding:7px 11px;background:#26384a;color:var(--muted)}.view.active{background:#075985;color:white}.terminal{margin:0;white-space:pre-wrap;overflow:auto;overflow-wrap:anywhere;color:#c8f7d4;background:#07120d;border:1px solid #1f4933;border-radius:10px;padding:16px;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;min-height:300px;max-height:calc(100vh - 330px)}
     .composer{border-top:1px solid var(--border);padding:15px 24px;background:#0e1620}.compose-inner{max-width:1000px;margin:auto}textarea{width:100%;height:110px;resize:vertical;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:13px;font:inherit;outline:none}textarea:focus{border-color:var(--blue)}
-    .actions{display:flex;gap:9px;align-items:center;margin-top:10px}.status{margin-left:auto;color:var(--muted);font-size:13px}.empty{color:var(--muted);padding:40px;text-align:center}@media(max-width:850px){.app{grid-template-columns:1fr}.side{display:none}}
+    .actions{display:flex;gap:9px;align-items:center;margin-top:10px;flex-wrap:wrap}select{background:#26384a;color:var(--text);border:1px solid var(--border);border-radius:9px;padding:10px}.status{margin-left:auto;color:var(--muted);font-size:13px}.empty{color:var(--muted);padding:40px;text-align:center}@media(max-width:850px){.app{grid-template-columns:1fr}.side{display:none}}
   </style>
 </head>
 <body>
 <div class="app">
-  <aside class="side"><header><h1>MikroFix – lokalni vodja</h1><div class="sub">Qwen razčleni · GPT‑OSS odloči in izvede · ti odločaš</div><button class="new" id="new">+ Nova naloga</button></header><div id="jobs"></div></aside>
+  <aside class="side"><header><h1>MikroFix – lokalni vodja</h1><div class="sub">Izberi enega neodvisnega vodjo · ti odločaš</div><button class="new" id="new">+ Nova naloga</button></header><div id="jobs"></div></aside>
   <main><div class="top"><strong id="title">Nova naloga</strong><div class="views"><button class="view active" id="conversation">Pogovor</button><button class="view" id="live">Živi potek</button></div><span class="badge" id="badge">Pripravljen</span></div><div class="content"><div class="card" id="card"><div class="empty">Napiši nalogo spodaj. Lokalni vodja bo najprej pripravil načrt, izvedba pa se ne začne brez tvojega dovoljenja.</div></div></div>
-  <div class="composer"><div class="compose-inner"><textarea id="input" placeholder="Opiši celotno nalogo ali napiši pojasnilo izbrani nalogi …"></textarea><div class="actions"><button id="send">Pošlji lokalnemu vodji</button><button class="approve" id="execute" disabled>Dovoli in izvedi</button><button class="secondary" id="copy" disabled>Kopiraj za Codex</button><span class="status" id="status"></span></div></div></div></main>
+  <div class="composer"><div class="compose-inner"><textarea id="input" placeholder="Opiši celotno nalogo ali napiši pojasnilo izbrani nalogi …"></textarea><div class="actions"><select id="profile" aria-label="Izbrani lokalni vodja"><option value="gpt_oss">GPT‑OSS vodja</option><option value="qwen_thinking">Qwen Thinking vodja</option></select><button id="send">Pošlji lokalnemu vodji</button><button class="approve" id="execute" disabled>Dovoli in izvedi</button><button class="secondary" id="copy" disabled>Kopiraj kandidata za Codex</button><button class="secondary" id="opinion" disabled>Vprašaj Codex za mnenje</button><span class="status" id="status"></span></div></div></div></main>
 </div>
 <script>
 let jobs=[], selected=null, newMode=true, view='conversation', traceText='';
 const $=id=>document.getElementById(id);
 async function api(path, options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const v=await r.json();if(!r.ok)throw new Error(v.error||'Napaka');return v}
-function choose(id){selected=id;newMode=false;traceText='';render();if(view==='live')loadTrace();}
-function newTask(){selected=null;newMode=true;$('input').value='';$('input').focus();render();}
+function choose(id){selected=id;newMode=false;traceText='';const j=jobs.find(x=>x.run_id===id);if(j&&j.lead_profile)$('profile').value=j.lead_profile;render();if(view==='live')loadTrace();}
+function newTask(){selected=null;newMode=true;$('profile').disabled=false;$('input').value='';$('input').focus();render();}
 function render(){
   $('jobs').replaceChildren(...jobs.map(j=>{const b=document.createElement('button');b.className='job'+(j.run_id===selected?' active':'');b.onclick=()=>choose(j.run_id);const t=document.createElement('div');t.className='job-title';t.textContent=j.task;const s=document.createElement('div');s.className='job-state';s.textContent=j.state_label;b.append(t,s);return b}));
-  const j=jobs.find(x=>x.run_id===selected);$('execute').disabled=!j||j.state!=='READY_FOR_OWNER_LEASE';$('copy').disabled=!j||j.state!=='READY_FOR_CODEX_REVIEW';
+  const j=jobs.find(x=>x.run_id===selected);if(j&&j.lead_profile)$('profile').value=j.lead_profile;$('profile').disabled=!!j;$('execute').disabled=!j||j.state!=='READY_FOR_OWNER_LEASE';$('copy').disabled=!j||j.state!=='READY_FOR_CODEX_REVIEW';$('opinion').disabled=!j;
   $('conversation').classList.toggle('active',view==='conversation');$('live').classList.toggle('active',view==='live');
   if(!j){$('title').textContent='Nova naloga';$('badge').textContent='Pripravljen';$('card').innerHTML='<div class="empty">Napiši nalogo spodaj. Lokalni vodja bo najprej pripravil načrt, izvedba pa se ne začne brez tvojega dovoljenja.</div>';return}
   $('title').textContent=j.run_id;$('badge').textContent=j.state_label;const c=$('card');
@@ -45,9 +45,10 @@ async function refresh(){try{const v=await api('/api/jobs');jobs=v.jobs;if(!newM
 $('new').onclick=newTask;
 $('conversation').onclick=()=>{view='conversation';render()};
 $('live').onclick=()=>{view='live';render();loadTrace()};
-$('send').onclick=async()=>{const task=$('input').value.trim();if(!task)return;$('status').textContent='Lokalni vodja prevzema nalogo …';try{await api('/api/submit',{method:'POST',body:JSON.stringify({task,parent_run_id:newMode?null:selected})});$('input').value='';newMode=false;selected=null;setTimeout(refresh,600)}catch(e){$('status').textContent=e.message}};
-$('execute').onclick=async()=>{if(!selected)return;$('status').textContent='Zaganjam varno lokalno izvedbo …';try{await api('/api/execute',{method:'POST',body:JSON.stringify({run_id:selected})});setTimeout(refresh,500)}catch(e){$('status').textContent=e.message}};
-$('copy').onclick=async()=>{if(!selected)return;await navigator.clipboard.writeText(`Preglej lokalnega kandidata ${selected}`);$('status').textContent='Sporočilo za Codex je kopirano'};
+$('send').onclick=async()=>{const message=$('input').value.trim();if(!message)return;const profile=$('profile').value;$('status').textContent='Izbrani lokalni vodja pripravlja odgovor …';try{const path=newMode?'/api/start':'/api/talk';await api(path,{method:'POST',body:JSON.stringify({message,parent_run_id:selected,profile})});$('input').value='';if(newMode){newMode=false;selected=null}setTimeout(refresh,600)}catch(e){$('status').textContent=e.message}};
+$('execute').onclick=async()=>{const j=jobs.find(x=>x.run_id===selected);if(!j)return;$('status').textContent='Zaganjam varno lokalno izvedbo …';try{await api('/api/execute',{method:'POST',body:JSON.stringify({run_id:j.action_run_id||j.run_id})});setTimeout(refresh,500)}catch(e){$('status').textContent=e.message}};
+$('copy').onclick=async()=>{const j=jobs.find(x=>x.run_id===selected);if(!j)return;await navigator.clipboard.writeText(`Preglej lokalnega kandidata ${j.action_run_id||j.run_id}`);$('status').textContent='Sporočilo za Codex je kopirano'};
+$('opinion').onclick=async()=>{const j=jobs.find(x=>x.run_id===selected);if(!j)return;const candidate=j.action_run_id?` Aktivni izvedbeni kandidat je ${j.action_run_id}.`:'';await navigator.clipboard.writeText(`Preglej pogovor lokalnega vodje pri nalogi ${j.run_id}.${candidate} Povej svoje mnenje in predlagaj naslednji korak, vendar ničesar ne spreminjaj brez moje izrecne zahteve.`);$('status').textContent='Vprašanje za Codex je kopirano — pošlji ga sam'};
 refresh();setInterval(refresh,2000);
 </script>
 </body>

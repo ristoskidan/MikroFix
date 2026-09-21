@@ -42,10 +42,43 @@ class LocalWebPayloadTests(unittest.TestCase):
 
     def test_html_is_local_and_exposes_required_owner_actions(self):
         html = web.HTML_FILE.read_text(encoding="utf-8")
-        for label in ("Nova naloga", "Pošlji lokalnemu vodji", "Dovoli in izvedi", "Kopiraj za Codex", "Živi potek"):
+        for label in ("Nova naloga", "Pošlji lokalnemu vodji", "Dovoli in izvedi", "Kopiraj kandidata za Codex", "Vprašaj Codex za mnenje", "Živi potek", "Qwen Thinking vodja"):
             self.assertIn(label, html)
+        self.assertIn("/api/start", html)
+        self.assertIn("/api/talk", html)
         self.assertIn("grid-template-rows:auto minmax(0,1fr) auto", html)
         self.assertEqual("127.0.0.1", web.HOST)
+
+    def test_routed_candidate_is_grouped_under_lead_conversation(self):
+        root = self.workspace / "jobs" / "MF-ROOT"
+        child = self.workspace / "jobs" / "MF-CHILD"
+        root.mkdir()
+        child.mkdir()
+        (root / "request.json").write_text(json.dumps({
+            "run_id": "MF-ROOT", "task": "Discuss first", "created_at": "1",
+            "lead_profile": "qwen_thinking", "kind": "lead_conversation",
+        }), encoding="utf-8")
+        (root / "manager.json").write_text(json.dumps({
+            "run_id": "MF-ROOT", "state": "CONVERSATION",
+            "lead_profile": "qwen_thinking",
+        }), encoding="utf-8")
+        (root / "conversation.json").write_text(json.dumps({
+            "lead_profile": "qwen_thinking", "turns": [],
+            "active_run_id": "MF-CHILD",
+        }), encoding="utf-8")
+        (child / "request.json").write_text(json.dumps({
+            "run_id": "MF-CHILD", "task": "Execute", "created_at": "2",
+            "parent_run_id": "MF-ROOT",
+        }), encoding="utf-8")
+        (child / "manager.json").write_text(json.dumps({
+            "run_id": "MF-CHILD", "state": "READY_FOR_OWNER_LEASE",
+        }), encoding="utf-8")
+        jobs = web.jobs_payload(self.workspace)["jobs"]
+        self.assertEqual(1, len(jobs))
+        self.assertEqual("MF-ROOT", jobs[0]["run_id"])
+        self.assertEqual("MF-CHILD", jobs[0]["action_run_id"])
+        self.assertEqual("READY_FOR_OWNER_LEASE", jobs[0]["state"])
+        self.assertEqual("qwen_thinking", jobs[0]["lead_profile"])
 
     def test_existing_browser_window_is_raised_instead_of_duplicated(self):
         search = mock.Mock(returncode=0, stdout="101\n202\n")
@@ -135,6 +168,27 @@ class LocalWebPayloadTests(unittest.TestCase):
         trace = web.build_trace(self.workspace, "MF-PLAN")
         self.assertIn("TRENUTNO STANJE", trace)
         self.assertIn("PLAN_READY", trace)
+
+    def test_trace_includes_direct_lead_conversation_steps(self):
+        directory = self.workspace / "jobs" / "MF-TALK"
+        trace_dir = (
+            directory / "conversation-runtime" / "turns" / "turn-1"
+            / "bridge" / "jobs" / "MF-1"
+        )
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "trace.jsonl").write_text(json.dumps({
+            "type": "model", "role": "Qwen Thinking vodja", "step": 1,
+            "content": "Najprej preverim obstoječi tok.", "tool_call_count": 1,
+        }) + "\n", encoding="utf-8")
+        (directory / "request.json").write_text(json.dumps({
+            "run_id": "MF-TALK", "task": "Talk", "created_at": "now",
+        }), encoding="utf-8")
+        (directory / "manager.json").write_text(json.dumps({
+            "run_id": "MF-TALK", "state": "CONVERSATION",
+        }), encoding="utf-8")
+        trace = web.build_trace(self.workspace, "MF-TALK")
+        self.assertIn("LOKALNI VODJA · POGOVOR IN PREMISLEK", trace)
+        self.assertIn("Najprej preverim obstoječi tok.", trace)
 
 
 if __name__ == "__main__":

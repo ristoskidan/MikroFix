@@ -21,6 +21,7 @@ MANAGER = PROJECT_ROOT / "tools" / "mikrofix_local_manager.py"
 WINDOW_TITLE = "MikroFix – lokalni vodja projekta"
 
 STATE_LABELS = {
+    "CONVERSATION": "Pogovor z izbranim lokalnim vodjo",
     "PLANNING": "Qwen razčlenjuje nalogo, GPT-OSS pa preverja načrt",
     "READY_FOR_OWNER_LEASE": "Načrt je pripravljen — čaka tvojo odobritev izvedbe",
     "WAITING_FOR_OWNER_LEASE": "Čaka na tvojo potrditev dovoljenja za pisanje",
@@ -72,6 +73,7 @@ def list_jobs(workspace: Path) -> list[dict[str, Any]]:
             "state": effective_state,
             "manager": manager,
             "directory": directory,
+            "lead_profile": request.get("lead_profile", ""),
         })
     jobs.sort(key=lambda item: item["created_at"], reverse=True)
     return jobs
@@ -116,6 +118,24 @@ def render_job(job: dict[str, Any]) -> str:
         lines.extend(["", "Trenutno dogajanje:", *activity])
     if manager.get("checkpoint"):
         lines.extend(["", "Kandidat:", str(manager["checkpoint"])])
+    conversation = read_json(job["directory"] / "conversation.json")
+    turns = conversation.get("turns") or []
+    if turns:
+        profile = str(conversation.get("lead_profile") or "gpt_oss")
+        lead_name = (
+            "QWEN THINKING VODJA" if profile == "qwen_thinking"
+            else "GPT-OSS VODJA"
+        )
+        lines.extend(["", f"NEPOSREDNI POGOVOR · {lead_name}"])
+        for turn in turns:
+            if not isinstance(turn, dict):
+                continue
+            role = "TI" if turn.get("role") == "owner" else lead_name
+            lines.extend(["", role, str(turn.get("content") or "").strip()])
+            if turn.get("routing"):
+                lines.append(f"Odločitev: {turn['routing']}")
+            if turn.get("routed_run_id"):
+                lines.append(f"Predano v obdelavo: {turn['routed_run_id']}")
     return "\n".join(lines).strip() + "\n"
 
 
@@ -214,6 +234,12 @@ class LocalManagerUI:
 
         actions = ttk.Frame(right)
         actions.pack(fill="x", pady=(8, 0))
+        self.profile = ttk.Combobox(
+            actions, state="readonly", width=22,
+            values=("GPT-OSS vodja", "Qwen Thinking vodja"),
+        )
+        self.profile.current(0)
+        self.profile.pack(side="left", padx=(0, 8))
         self.send_button = ttk.Button(actions, text="Pošlji lokalnemu vodji",
                                       command=self.send)
         self.send_button.pack(side="left")
@@ -268,6 +294,11 @@ class LocalManagerUI:
             self.transcript.see("end")
             self.last_render = text
         state = job["state"] if job else ""
+        if job and job.get("lead_profile"):
+            self.profile.current(1 if job["lead_profile"] == "qwen_thinking" else 0)
+            self.profile.configure(state="disabled")
+        else:
+            self.profile.configure(state="readonly")
         self.execute_button.configure(
             state="normal" if state == "READY_FOR_OWNER_LEASE" else "disabled"
         )
@@ -281,6 +312,7 @@ class LocalManagerUI:
         self.input.delete("1.0", "end")
         self.input.focus_set()
         self.last_render = ""
+        self.profile.configure(state="readonly")
         self.show_selected()
 
     def spawn_manager(self, arguments: list[str]) -> None:
@@ -301,12 +333,15 @@ class LocalManagerUI:
         if not text:
             messagebox.showinfo("MikroFix", "Najprej napiši nalogo ali pojasnilo.")
             return
-        arguments = ["submit", "--task", text]
-        if self.selected_run_id:
-            arguments.extend(["--parent", self.selected_run_id])
+        profile = "qwen_thinking" if self.profile.current() == 1 else "gpt_oss"
+        arguments = (
+            ["talk", "--message", text, "--parent", self.selected_run_id,
+             "--profile", profile]
+            if self.selected_run_id else
+            ["start", "--message", text, "--profile", profile]
+        )
         self.spawn_manager(arguments)
         self.input.delete("1.0", "end")
-        self.selected_run_id = None
         self.global_status.configure(text="Lokalni vodja je prevzel sporočilo")
 
     def execute_selected(self) -> None:

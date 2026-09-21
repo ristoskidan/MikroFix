@@ -48,8 +48,11 @@ MAX_BODY = 64_000
 MAX_TRACE_BYTES = 1_000_000
 
 
-def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
-    manager = job["manager"]
+def serialize_job(
+    job: dict[str, Any], action_job: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    effective = action_job or job
+    manager = effective["manager"]
     supervisor = {}
     supervisor_path = manager.get("supervisor_state")
     if supervisor_path:
@@ -59,8 +62,12 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "task": job["task"],
         "parent_run_id": job.get("parent_run_id"),
         "created_at": job["created_at"],
-        "state": job["state"],
-        "state_label": STATE_LABELS.get(job["state"], job["state"]),
+        "state": effective["state"],
+        "state_label": STATE_LABELS.get(effective["state"], effective["state"]),
+        "lead_profile": read_json(job["directory"] / "conversation.json").get(
+            "lead_profile", job["manager"].get("lead_profile", "")
+        ),
+        "action_run_id": effective["run_id"] if action_job else "",
         "transcript": render_job(job),
         "activity": planner_activity(job["directory"], limit=20),
         "events": supervisor.get("events", [])[-20:],
@@ -70,7 +77,24 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
 
 
 def jobs_payload(workspace: Path) -> dict[str, Any]:
-    return {"jobs": [serialize_job(job) for job in list_jobs(workspace)]}
+    jobs = list_jobs(workspace)
+    by_id = {job["run_id"]: job for job in jobs}
+    routed_ids: set[str] = set()
+    roots: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    for job in jobs:
+        conversation = read_json(job["directory"] / "conversation.json")
+        action_id = str(conversation.get("active_run_id") or "")
+        action_job = by_id.get(action_id)
+        if action_job:
+            routed_ids.add(action_id)
+        roots.append((job, action_job))
+    return {
+        "jobs": [
+            serialize_job(job, action_job)
+            for job, action_job in roots
+            if job["run_id"] not in routed_ids
+        ]
+    }
 
 
 def _read_trace_file(path: Path, limit: int = 200_000) -> str:
@@ -165,6 +189,13 @@ def build_trace(workspace: Path, run_id: str) -> str:
         raise ValueError("Naloga ne obstaja")
 
     sections: list[str] = []
+    for turn_root in sorted(
+        (job_dir / "conversation-runtime" / "turns").glob("turn-*")
+    ):
+        sections.extend(_bridge_trace_sections(
+            turn_root / "bridge" / "jobs",
+            "IZBRANI LOKALNI VODJA · POGOVOR IN PREMISLEK",
+        ))
     sections.extend(_bridge_trace_sections(
         job_dir / "planner-runtime" / "qwen-bridge" / "jobs",
         "QWEN · PREDLOG NAČRTA",
@@ -206,6 +237,16 @@ def build_trace(workspace: Path, run_id: str) -> str:
         f"Poskus: {supervisor.get('attempt', 0)}\n"
         f"Razlog / povratna informacija: {supervisor.get('feedback') or manager.get('exact_reason') or '-'}"
     )
+    conversation = read_json(job_dir / "conversation.json")
+    action_run_id = str(conversation.get("active_run_id") or "")
+    if (
+        action_run_id and action_run_id != run_id
+        and (workspace / "jobs" / action_run_id).is_dir()
+    ):
+        sections.append(
+            "=== PREDANI IZVEDBENI KANDIDAT · " + action_run_id + " ===\n"
+            + build_trace(workspace, action_run_id)
+        )
     trace = redact_trace("\n\n".join(sections))
     if len(trace.encode("utf-8")) > MAX_TRACE_BYTES:
         encoded = trace.encode("utf-8")[-MAX_TRACE_BYTES:]
@@ -315,6 +356,33 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                     if not isinstance(parent, str):
                         raise ValueError("Neveljavna povezava nadaljevanja")
                     arguments.extend(["--parent", parent])
+                spawn_manager(self.server.workspace, arguments)
+                self.send_json(202, {"accepted": True})
+                return
+            if self.path in {"/api/start", "/api/talk"}:
+                message = value.get("message")
+                profile = value.get("profile", "gpt_oss")
+                if (
+                    not isinstance(message, str) or not message.strip()
+                    or len(message) > 12_000
+                ):
+                    raise ValueError("Napiši veljavno sporočilo")
+                if profile not in {"gpt_oss", "qwen_thinking"}:
+                    raise ValueError("Izberi veljaven profil lokalnega vodje")
+                if self.path == "/api/start":
+                    arguments = [
+                        "start", "--message", message.strip(), "--profile", profile,
+                    ]
+                else:
+                    parent = value.get("parent_run_id")
+                    if not isinstance(parent, str) or not re.fullmatch(
+                        r"[A-Za-z0-9_-]+", parent
+                    ):
+                        raise ValueError("Izberi veljaven obstoječi pogovor")
+                    arguments = [
+                        "talk", "--message", message.strip(), "--parent", parent,
+                        "--profile", profile,
+                    ]
                 spawn_manager(self.server.workspace, arguments)
                 self.send_json(202, {"accepted": True})
                 return

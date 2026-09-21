@@ -142,6 +142,49 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn(proposal, gpt)
         self.assertIn("missing criterion", gpt)
 
+    def test_lead_profiles_are_isolated_and_prompt_is_natural_structured(self):
+        prompt = manager.lead_conversation_prompt(
+            "Kaj še manjka?", parent_run_id="MF-ONE",
+            turns=[{"role": "lead", "content": "Povej cilj."}],
+            lead_profile="qwen_thinking",
+        )
+        self.assertIn("Qwen Thinking vodja", prompt)
+        self.assertIn("Drugi profil", prompt)
+        self.assertIn("strukturirani obliki", prompt)
+        self.assertNotIn("ne v JSON-u", prompt)
+
+    def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):
+        def responder(message, **kwargs):
+            self.assertEqual("Build the intake", message)
+            self.assertEqual("qwen_thinking", kwargs["lead_profile"])
+            return ({
+                "reply": "Kateri uporabnik sme potrditi prevzem?",
+                "routing": "NEEDS_INFO", "ready_task": "", "objective": "",
+                "allowed_files": [], "atoms": [], "constraints": [],
+                "acceptance_criteria": [],
+            }, {
+                "session_id": "qwen-session", "memory_sha256": "memory",
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "qwen_thinking",
+            })
+
+        conversation = manager.start_conversation(
+            "Build the intake", workspace=self.workspace,
+            lead_profile="qwen_thinking", responder=responder,
+        )
+        run_id = conversation["parent_run_id"]
+        self.assertEqual("qwen_thinking", conversation["lead_profile"])
+        self.assertEqual(2, len(conversation["turns"]))
+        self.assertEqual(1, len(list((self.workspace / "jobs").iterdir())))
+        request = json.loads(
+            (self.workspace / "jobs" / run_id / "request.json").read_text()
+        )
+        self.assertEqual("lead_conversation", request["kind"])
+        with self.assertRaisesRegex(manager.ManagerError, "zaklenjen"):
+            manager.talk(
+                "Switch", parent_run_id=run_id, workspace=self.workspace,
+                lead_profile="gpt_oss", responder=responder,
+            )
+
     def test_semantic_feedback_reports_all_shape_and_context_errors(self):
         invalid = model_plan(
             constraints="not a list",
