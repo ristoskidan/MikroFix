@@ -62,6 +62,8 @@ SYSTEM_PROMPT = Path(CFG["system_prompt"])
 MAX_STEPS = int(CFG.get("max_steps", 30))
 NUM_CTX = int(CFG.get("num_ctx", 65536))
 KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
+THINK = CFG.get("think")
+REQUIRE_TOOL_USE = bool(CFG.get("require_tool_use", True))
 RESPONSE_FORMAT = CFG.get("response_format")
 AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
 COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
@@ -500,6 +502,8 @@ def call_qwen(messages):
             "messages": messages,
             "tools": TOOLS
     }
+    if THINK is not None:
+        payload["think"] = THINK
     if RESPONSE_FORMAT is not None:
         payload["format"] = RESPONSE_FORMAT
     return request_json(
@@ -563,6 +567,16 @@ def write_log(job_id, text):
         f.write(line + "\n")
 
     print(line, flush=True)
+
+
+def write_trace(job_id, event):
+    """Append one structured owner-visible event without hidden reasoning."""
+    payload = {"at": now(), **event}
+    path = job_dir(job_id) / "trace.jsonl"
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def create_job(task, *, display_name=None, codex_thread_id=None):
@@ -701,6 +715,11 @@ def process_job(job_id):
         job_id,
         f"Začenjam nalogo {job.get('display_name') or job_id} ({job_id}): {job['task']}",
     )
+    write_trace(job_id, {
+        "type": "request",
+        "role": AGENT_ROLE,
+        "content": job["task"],
+    })
 
     messages = [
         {
@@ -714,6 +733,7 @@ def process_job(job_id):
     ]
 
     tool_use_count = 0
+    successful_tool_use_count = 0
 
     try:
         for step in range(1, MAX_STEPS + 1):
@@ -729,6 +749,17 @@ def process_job(job_id):
 
             message = response.get("message", {})
             tool_calls = message.get("tool_calls") or []
+            write_trace(job_id, {
+                "type": "model",
+                "role": AGENT_ROLE,
+                "step": step,
+                "content": str(message.get("content") or "").strip(),
+                "tool_call_count": len(tool_calls),
+                "note": (
+                    "Prikazani so dejanski odgovor, klici orodij in rezultati; "
+                    "skrito notranje razmišljanje ni del pregledovalnika."
+                ),
+            })
 
             if not tool_calls:
                 result = (
@@ -737,7 +768,7 @@ def process_job(job_id):
 
                 # Model ne sme zaključiti projektne naloge,
                 # ne da bi dejansko uporabil vsaj eno orodje.
-                if tool_use_count == 0:
+                if REQUIRE_TOOL_USE and successful_tool_use_count == 0:
                     write_log(
                         job_id,
                         "Izvajalec je poskusil zaključiti brez uporabe orodij; zahtevam dejanski pregled."
@@ -749,7 +780,8 @@ def process_job(job_id):
                         "role": "user",
                         "content": (
                             "Ne zaključuj še. Naloga zahteva dejanski pregled projekta. "
-                            "Uporabi razpoložljiva projektna orodja "
+                            "Vsaj en orodni klic mora biti uspešen. Uporabi "
+                            "razpoložljiva projektna orodja "
                             "(project_status, project_list, project_search, project_read "
                             "in po potrebi project_diff), preveri dejansko stanje "
                             "in šele nato pripravi končni odgovor."
@@ -812,6 +844,13 @@ def process_job(job_id):
                         ensure_ascii=False
                     )
                 )
+                write_trace(job_id, {
+                    "type": "tool_call",
+                    "role": AGENT_ROLE,
+                    "step": step,
+                    "tool": name,
+                    "arguments": arguments,
+                })
 
                 try:
                     result = execute_tool(
@@ -823,11 +862,20 @@ def process_job(job_id):
                         "ok": True,
                         "result": result
                     }
+                    successful_tool_use_count += 1
 
                     write_log(
                         job_id,
                         f"TOOL {name}: OK"
                     )
+                    write_trace(job_id, {
+                        "type": "tool_result",
+                        "role": AGENT_ROLE,
+                        "step": step,
+                        "tool": name,
+                        "ok": True,
+                        "result": result,
+                    })
 
                 except Exception as e:
                     tool_result = {
@@ -839,6 +887,14 @@ def process_job(job_id):
                         job_id,
                         f"TOOL {name}: ERROR: {e}"
                     )
+                    write_trace(job_id, {
+                        "type": "tool_result",
+                        "role": AGENT_ROLE,
+                        "step": step,
+                        "tool": name,
+                        "ok": False,
+                        "error": str(e),
+                    })
 
                 messages.append({
                     "role": "tool",
@@ -864,6 +920,11 @@ def process_job(job_id):
             job_id,
             f"Naloga je spodletela: {e}"
         )
+        write_trace(job_id, {
+            "type": "error",
+            "role": AGENT_ROLE,
+            "content": str(e),
+        })
         notify_job_completion(job)
 
 

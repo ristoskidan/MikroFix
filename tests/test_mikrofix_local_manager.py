@@ -129,6 +129,19 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn("PREJŠNJI IZHOD JE BIL ZAVRNJEN", prompt)
         self.assertIn("checks are empty", prompt)
 
+    def test_qwen_advises_and_gpt_oss_receives_verified_handoff(self):
+        qwen = manager.qwen_planner_prompt("Implement feature", "bad path")
+        self.assertIn("Razčleni", qwen)
+        self.assertIn("bad path", qwen)
+        proposal = json.dumps(model_plan())
+        gpt = manager.gpt_validation_prompt(
+            "Implement feature", proposal, "abc123", "missing criterion"
+        )
+        self.assertIn("Qwen ne odloča", gpt)
+        self.assertIn("abc123", gpt)
+        self.assertIn(proposal, gpt)
+        self.assertIn("missing criterion", gpt)
+
     def test_semantic_feedback_reports_all_shape_and_context_errors(self):
         invalid = model_plan(
             constraints="not a list",
@@ -155,6 +168,20 @@ class LocalManagerTests(unittest.TestCase):
         )
         self.assertEqual(["AGENTS.md"], trusted["context_links"]["canon"])
         self.assertEqual(["tests/test_app.py"], trusted["context_links"]["tests"])
+
+    def test_tool_names_cannot_be_smuggled_in_as_allowed_files(self):
+        invalid = model_plan(
+            allowed_files=["project_status"],
+            atoms=[{
+                "id": "A1", "task": "Inspect status",
+                "expected_files": ["project_status"],
+            }],
+        )
+        with self.assertRaisesRegex(manager.ManagerError, "tool names"):
+            manager.normalize_plan(
+                json.dumps(invalid), run_id="MF-LOCAL-1",
+                repository=self.repository,
+            )
 
     def test_submit_persists_request_and_validated_plan_without_codex(self):
         calls = []

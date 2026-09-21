@@ -55,7 +55,8 @@ class LocalManagerUIPureTests(unittest.TestCase):
         rendered = ui.render_job(jobs[0])
         self.assertIn("Owner clarification", rendered)
         self.assertIn("Nadaljevanje naloge: MF-1", rendered)
-        self.assertIn("Lokalni vodja pregleduje", rendered)
+        self.assertIn("Qwen razčlenjuje", rendered)
+        self.assertIn("GPT-OSS pa preverja", rendered)
 
     def test_ready_candidate_renders_checkpoint(self):
         directory = self.write_job("MF-3", "Finished request", "READY_FOR_CODEX_REVIEW")

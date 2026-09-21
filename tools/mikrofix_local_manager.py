@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -16,13 +17,15 @@ from typing import Any, Callable
 import urllib.request
 
 try:
-    from tools.mikrofix_lead_session import ensure_context_ready
+    from tools.mikrofix_lead_session import PLANNING_SOURCES, ensure_context_ready
     from tools.mikrofix_supervisor import (
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
     )
 except ModuleNotFoundError:
-    from mikrofix_lead_session import ensure_context_ready  # type: ignore[no-redef]
+    from mikrofix_lead_session import (  # type: ignore[no-redef]
+        PLANNING_SOURCES, ensure_context_ready,
+    )
     from mikrofix_supervisor import (  # type: ignore[no-redef]
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
@@ -41,6 +44,18 @@ MODEL_PLAN_FIELDS = {
 }
 REQUIRED_MODEL_PLAN_FIELDS = MODEL_PLAN_FIELDS - {"context_links"}
 MAX_PLANNER_ATTEMPTS = 3
+BRIDGE_TOOL_NAMES = {
+    "project_status", "project_read", "project_list", "project_search",
+    "project_diff", "project_apply_patch", "project_create", "project_replace",
+    "project_run_check", "system_command", "desktop_inspect", "desktop_action",
+}
+QWEN_PLANNER_MODEL = "qwen3:4b-thinking-2507-q8_0"
+QWEN_PLANNER_SYSTEM = (
+    PROJECT_ROOT / "docs/local_agents/supervisor/QWEN_PLANNER_SYSTEM.md"
+)
+GPT_VALIDATOR_SYSTEM = (
+    PROJECT_ROOT / "docs/local_agents/supervisor/PLANNER_SYSTEM.md"
+)
 
 
 def binding_owner_criterion(owner_request: str) -> str:
@@ -120,6 +135,12 @@ def model_plan_errors(value: dict[str, Any], repository: Path) -> list[str]:
         allowed_set: set[str] = set()
     else:
         allowed_set = {item for item in allowed if isinstance(item, str)}
+        mistaken_tools = sorted(allowed_set & BRIDGE_TOOL_NAMES)
+        if mistaken_tools:
+            errors.append(
+                "allowed_files contains tool names instead of repository paths: "
+                + ", ".join(mistaken_tools)
+            )
     atoms = value.get("atoms")
     if not isinstance(atoms, list) or not atoms:
         errors.append("atoms must be a non-empty list")
@@ -259,8 +280,40 @@ def planner_prompt(task: str, previous_error: str = "") -> str:
         "Pripravi izvedbeni načrt za naslednjo zahtevo lastnika. Jedrna pravila, "
         "specifikacija, stanje in lekcije so že v trajnem kontekstu glavne seje; "
         "ne beri jih znova. Z orodji preveri samo konkretno kodo, teste in poti. "
-        "Končni odgovor "
-        "naj bo samo zahtevani JSON.\n\nZAHTEVA:\n" + task + correction
+        "Končni odgovor naj bo samo zahtevani JSON.\n\nZAHTEVA:\n"
+        + task + correction
+    )
+
+
+def qwen_planner_prompt(task: str, previous_error: str = "") -> str:
+    correction = (
+        "\nPREJŠNJI PREDLOG JE BIL ZAVRNJEN: " + previous_error
+        if previous_error else ""
+    )
+    return (
+        "Razčleni naslednjo zahtevo lastnika v najmanjši varen izvedbeni načrt. "
+        "Projektni spomin je že potrjen; preveri samo konkretne poti in simbole. "
+        "Ne spreminjaj datotek. V allowed_files in expected_files zapiši samo "
+        "prave projektno relativne poti datotek; imen orodij, funkcij ali ukazov "
+        "nikoli ne zapiši kot datotečne poti. Vrni samo zahtevani JSON.\n\nZAHTEVA:\n"
+        + task + correction
+    )
+
+
+def gpt_validation_prompt(
+    task: str, qwen_proposal: str, memory_hash: str, previous_error: str = ""
+) -> str:
+    correction = (
+        "\nPREJŠNJA POTRDITEV JE BILA ZAVRNJENA: " + previous_error
+        if previous_error else ""
+    )
+    return (
+        "Kot glavni GPT-OSS vodja preveri Qwenov svetovalni predlog proti "
+        "lastnikovi zahtevi in skupnemu projektnemu spominu. Qwen ne odloča. "
+        "Odpravi vse napake in vrni samo končni JSON načrt.\n\n"
+        f"SKUPNI MEMORY SHA-256: {memory_hash}\n\n"
+        f"ZAHTEVA LASTNIKA:\n{task}\n\nQWENOV PREDLOG:\n{qwen_proposal}"
+        + correction
     )
 
 
@@ -281,40 +334,84 @@ def run_bridge_monitor(
 def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
     lead_home = Path.home() / ".local/share/mikrofix-bridge"
+    gpt_model = str(template.get("model", "gpt-oss:20b"))
+    gpt_num_ctx = int(template.get("num_ctx", 131072))
+    gpt_keep_alive = str(template.get("lead_keep_alive", "30m"))
     lead = ensure_context_ready(
         PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
-        model=str(template.get("model", "gpt-oss:20b")),
-        num_ctx=int(template.get("num_ctx", 131072)),
-        keep_alive=str(template.get("lead_keep_alive", "30m")),
+        model=gpt_model, num_ctx=gpt_num_ctx, keep_alive=gpt_keep_alive,
     )
+    qwen_model = str(template.get("planning_advisor_model", QWEN_PLANNER_MODEL))
+    qwen_num_ctx = int(template.get("planning_advisor_num_ctx", 32768))
+    qwen_keep_alive = str(template.get("planning_advisor_keep_alive", "15m"))
+    planning_home = lead_home / "planning-team"
+    gpt_planner_lead = ensure_context_ready(
+        PROJECT_ROOT, planning_home / "gpt-oss",
+        ollama_url=str(template["ollama_url"]), model=gpt_model,
+        num_ctx=min(gpt_num_ctx, 32768), keep_alive=gpt_keep_alive,
+        sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
+    )
+    qwen_lead = ensure_context_ready(
+        PROJECT_ROOT, planning_home / "qwen",
+        ollama_url=str(template["ollama_url"]), model=qwen_model,
+        num_ctx=qwen_num_ctx, keep_alive=qwen_keep_alive,
+        sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
+    )
+    if qwen_lead["memory_sha256"] != gpt_planner_lead["memory_sha256"]:
+        raise ManagerError("Qwen and GPT-OSS did not acknowledge the same project memory")
     runtime = job_dir / "planner-runtime"
     bridge_home = runtime / "bridge"
+    qwen_bridge_home = runtime / "qwen-bridge"
     executor_config = runtime / "executor-config"
     executor_state = runtime / "executor-state"
-    for path in (bridge_home, executor_config, executor_state):
+    for path in (bridge_home, qwen_bridge_home, executor_config, executor_state):
         path.mkdir(parents=True, mode=0o700, exist_ok=True)
     port = free_local_port()
     token_file = executor_config / "token"
     executor_url = f"http://127.0.0.1:{port}"
-    bridge_config = bridge_home / "config.json"
-    atomic_write_immutable_json(bridge_config, {
-        "ollama_url": template["ollama_url"],
-        "model": template.get("model", "gpt-oss:20b"),
-        "executor_url": executor_url,
-        "token_file": str(token_file),
-        "project": str(repository),
-        "system_prompt": str(PROJECT_ROOT / "docs/local_agents/supervisor/PLANNER_SYSTEM.md"),
-        "project_memory": str(lead["memory_file"]),
-        "parent_session_id": str(lead["session_id"]),
-        "num_ctx": int(template.get("num_ctx", 131072)),
-        "max_steps": 60,
-        "keep_alive": str(template.get("lead_keep_alive", "30m")),
-        # Planner jobs are internal stages. Only the final supervised run may
-        # tell the owner that the task itself has finished.
-        "completion_policy": "supervisor_only",
-        "response_format": json.loads(PROPOSAL_SCHEMA.read_text(encoding="utf-8")),
-        "agent_role": "GPT-OSS — lokalni vodja načrtovanja",
-    })
+    schema = json.loads(PROPOSAL_SCHEMA.read_text(encoding="utf-8"))
+
+    def write_stage_config(
+        home: Path, *, model: str, num_ctx: int, keep_alive: str,
+        system_prompt: Path, memory: dict[str, object], role: str,
+        think: bool | str,
+        require_tool_use: bool,
+    ) -> Path:
+        config_path = home / "config.json"
+        atomic_write_immutable_json(config_path, {
+            "ollama_url": template["ollama_url"],
+            "model": model,
+            "executor_url": executor_url,
+            "token_file": str(token_file),
+            "project": str(repository),
+            "system_prompt": str(system_prompt),
+            "project_memory": str(memory["memory_file"]),
+            "parent_session_id": str(memory["session_id"]),
+            "num_ctx": num_ctx,
+            "max_steps": 60,
+            "keep_alive": keep_alive,
+            "think": think,
+            "require_tool_use": require_tool_use,
+            "completion_policy": "supervisor_only",
+            "response_format": schema,
+            "agent_role": role,
+        })
+        return config_path
+
+    qwen_config = write_stage_config(
+        qwen_bridge_home, model=qwen_model, num_ctx=qwen_num_ctx,
+        keep_alive=qwen_keep_alive, system_prompt=QWEN_PLANNER_SYSTEM,
+        memory=qwen_lead, role="Qwen — svetovalec za razčlenjevanje", think=True,
+        require_tool_use=False,
+    )
+    bridge_config = write_stage_config(
+        bridge_home, model=gpt_model, num_ctx=gpt_num_ctx,
+        keep_alive=gpt_keep_alive, system_prompt=GPT_VALIDATOR_SYSTEM,
+        memory=gpt_planner_lead,
+        role="GPT-OSS — glavni vodja in potrjevalec načrta",
+        think="low",
+        require_tool_use=True,
+    )
     executor_env = {
         "MIKROFIX_EXECUTOR_ROOT": str(repository),
         "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config),
@@ -329,28 +426,32 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         cwd=PROJECT_ROOT, env={**os.environ, **executor_env}, stdin=subprocess.DEVNULL,
         stdout=log, stderr=subprocess.STDOUT, text=True,
     )
-    bridge_env = {
-        "MIKROFIX_BRIDGE_HOME": str(bridge_home),
-        "MIKROFIX_BRIDGE_CONFIG": str(bridge_config),
-        "CODEX_THREAD_ID": "",
-    }
     bridge = [str(PROJECT_ROOT / ".venv-server/bin/python"),
               str(PROJECT_ROOT / "tools/mikrofix_bridge.py")]
-    try:
-        wait_for_executor(executor_url, token_file, process)
+
+    def stage_environment(home: Path, config: Path) -> dict[str, str]:
+        return {
+            "MIKROFIX_BRIDGE_HOME": str(home),
+            "MIKROFIX_BRIDGE_CONFIG": str(config),
+            "CODEX_THREAD_ID": "",
+        }
+
+    def ask_stage(
+        *, home: Path, config: Path, display_name: str,
+        prompt_factory: Callable[[str], str],
+    ) -> str:
+        environment = stage_environment(home, config)
         last_error = ""
-        for attempt in range(MAX_PLANNER_ATTEMPTS):
+        for _attempt in range(MAX_PLANNER_ATTEMPTS):
             job_id = command(
-                bridge + ["dispatch", "--name", "Načrt lokalnega vodje",
-                          "--task", planner_prompt(task, last_error)],
-                cwd=PROJECT_ROOT, env=bridge_env, timeout=30,
+                bridge + ["dispatch", "--name", display_name,
+                          "--task", prompt_factory(last_error)],
+                cwd=PROJECT_ROOT, env=environment, timeout=30,
             ).splitlines()[-1]
-            run_bridge_monitor(bridge, bridge_env, bridge_home, job_id)
+            run_bridge_monitor(bridge, environment, home, job_id)
             raw = command(bridge + ["result", job_id], cwd=PROJECT_ROOT,
-                          env=bridge_env, timeout=30)
+                          env=environment, timeout=30)
             try:
-                # Validate schema, paths and all semantic gates while the
-                # planner still has its one bounded correction opportunity.
                 normalize_plan(
                     raw, run_id=job_dir.name, repository=repository,
                     owner_request=task,
@@ -359,9 +460,51 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
             except (ManagerError, ValueError) as exc:
                 last_error = str(exc)
         raise ManagerError(
-            f"Planner remained invalid after {MAX_PLANNER_ATTEMPTS} attempts: "
-            + last_error
+            f"{display_name} remained invalid after {MAX_PLANNER_ATTEMPTS} "
+            f"attempts: {last_error}"
         )
+
+    try:
+        wait_for_executor(executor_url, token_file, process)
+        qwen_raw = ask_stage(
+            home=qwen_bridge_home, config=qwen_config,
+            display_name="Qwenov predlog razčlenitve",
+            prompt_factory=lambda error: qwen_planner_prompt(task, error),
+        )
+        qwen_proposal = parse_model_json(qwen_raw)
+        atomic_write_immutable_json(job_dir / "qwen-proposal.json", qwen_proposal)
+        final_raw = ask_stage(
+            home=bridge_home, config=bridge_config,
+            display_name="GPT-OSS potrditev Qwenovega načrta",
+            prompt_factory=lambda error: gpt_validation_prompt(
+                task, json.dumps(qwen_proposal, ensure_ascii=False, indent=2),
+                str(gpt_planner_lead["memory_sha256"]), error,
+            ),
+        )
+        final_proposal = parse_model_json(final_raw)
+        atomic_write_immutable_json(job_dir / "gpt-approved-plan.json", final_proposal)
+        atomic_write_immutable_json(job_dir / "planning-handoff.json", {
+            "schema_version": 1,
+            "shared_memory_sha256": gpt_planner_lead["memory_sha256"],
+            "qwen": {
+                "role": "planning_advisor",
+                "model": qwen_model,
+                "session_id": qwen_lead["session_id"],
+                "proposal_sha256": hashlib.sha256(
+                    json.dumps(qwen_proposal, ensure_ascii=False, sort_keys=True).encode()
+                ).hexdigest(),
+            },
+            "gpt_oss": {
+                "role": "lead_and_plan_gate",
+                "model": gpt_model,
+                "session_id": gpt_planner_lead["session_id"],
+                "execution_parent_session_id": lead["session_id"],
+                "approved_plan_sha256": hashlib.sha256(
+                    json.dumps(final_proposal, ensure_ascii=False, sort_keys=True).encode()
+                ).hexdigest(),
+            },
+        })
+        return final_raw
     finally:
         process.terminate()
         try:
@@ -422,7 +565,7 @@ def submit(task: str, *, workspace: Path = DEFAULT_WORKSPACE,
             "plan": str(job_dir / "plan.json"),
             "supervisor_state": str(job_dir / "supervisor.json") if initialize else None,
         })
-    except Exception as exc:
+    except BaseException as exc:
         state.update({"state": "BLOCKED", "exact_reason": str(exc)})
         atomic_write_json(job_dir / "manager.json", state)
         raise

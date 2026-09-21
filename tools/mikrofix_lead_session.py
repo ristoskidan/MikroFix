@@ -18,6 +18,13 @@ SOURCES = (
     "docs/local_agents/supervisor/PROTOCOL_V2.md",
 )
 
+PLANNING_SOURCES = (
+    "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
+    "docs/local_agents/LEKCIJE.md",
+    "docs/local_agents/supervisor/PROTOCOL_V2.md",
+    "AGENTS.md",
+)
+
 
 def _atomic_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -26,7 +33,10 @@ def _atomic_text(path: Path, content: str) -> None:
     os.replace(temporary, path)
 
 
-def ensure_lead_session(project_root: Path, home: Path) -> dict[str, object]:
+def ensure_lead_session(
+    project_root: Path, home: Path, *, sources: tuple[str, ...] = SOURCES,
+    memory_name: str = "GPT_OSS_LEAD_MEMORY.md",
+) -> dict[str, object]:
     """Create or refresh the one parent context without model-side file reads."""
     project_root = project_root.resolve()
     home = home.expanduser().resolve()
@@ -37,7 +47,7 @@ def ensure_lead_session(project_root: Path, home: Path) -> dict[str, object]:
         "parent_session_id. Jedrnih virov pri vsaki nalogi ne odpiraj znova. "
         "Preveri samo konkretno kodo in teste trenutne naloge.\n",
     ]
-    for relative in SOURCES:
+    for relative in sources:
         content = (project_root / relative).read_text(encoding="utf-8")
         manifest[relative] = hashlib.sha256(content.encode("utf-8")).hexdigest()
         sections.extend((f"\n---\n\n## VIR: `{relative}`\n", content.rstrip(), "\n"))
@@ -52,7 +62,7 @@ def ensure_lead_session(project_root: Path, home: Path) -> dict[str, object]:
             old = {}
     same_context = old.get("memory_sha256") == memory_hash
     session_id = str(old.get("session_id") or f"LEAD-{uuid.uuid4().hex[:16]}")
-    memory_file = home / "GPT_OSS_LEAD_MEMORY.md"
+    memory_file = home / memory_name
     if not memory_file.is_file() or not same_context:
         _atomic_text(memory_file, memory)
         memory_file.chmod(0o400)
@@ -113,9 +123,13 @@ def confirm_context(home: Path, session_id: str, memory_hash: str) -> dict[str, 
 def ensure_context_ready(
     project_root: Path, home: Path, *, ollama_url: str, model: str,
     num_ctx: int = 131072, keep_alive: str = "30m",
+    sources: tuple[str, ...] = SOURCES,
+    memory_name: str = "GPT_OSS_LEAD_MEMORY.md",
 ) -> dict[str, object]:
     """Ask the lead for one acknowledgement only when trusted context changed."""
-    state = ensure_lead_session(project_root, home)
+    state = ensure_lead_session(
+        project_root, home, sources=sources, memory_name=memory_name
+    )
     if state["state"] == "CONTEXT_READY":
         return state
     memory = Path(str(state["memory_file"])).read_text(encoding="utf-8")

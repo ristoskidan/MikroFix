@@ -13,8 +13,10 @@ ukaze, dovoljenja, retryje, dokazila in obvestila.
 - **Deterministični manager** trajno zapiše zahtevo, preveri strukturiran predlog,
   iz dejanskega repozitorija določi kontekst in teste ter pripravi nespremenljiv
   načrt.
-- **GPT-OSS lokalni vodja** z bralnimi orodji razišče zahtevo in predlaga samo
-  cilj, dovoljene datoteke, atomske naloge, omejitve in sprejemne kriterije.
+- **Qwen načrtovalni svetovalec** z bralnimi orodji pripravi prvi strukturirani
+  predlog razčlenitve. Ne piše datotek in nima pravice odobriti izvedbe.
+- **GPT-OSS lokalni vodja** neodvisno preveri Qwenov predlog proti lastnikovi
+  zahtevi in skupnemu kontekstu ter ga popravi, zavrne ali potrdi.
 - **GPT-OSS izvajalec** deluje v ločeni, čisti izvedbeni seji in sme pisati samo
   v dovoljene datoteke izoliranega worktreeja.
 - **Deterministični gatekeeper** preveri obseg diffa, pričakovane datoteke,
@@ -36,6 +38,13 @@ konkretne poti; jedrnih dokumentov ne bere ponovno. Vsak atom, ki ga vodja
 določi, se odpre kot podizvajalska naloga z istim `parent_session_id`, istim
 projektnim spominom in že podanimi shemami orodij. Ob spremembi kateregakoli
 vira se stanje vrne v `AWAITING_CONTEXT_ACK` in celoten kontekst se potrdi znova.
+
+Qwen ima svojo trajno načrtovalno sejo. Njena skrita pogovorna zgodovina ni
+prenesena v GPT-OSS. Oba modela pa potrdita enak SHA-256 skupnega projektnega
+spomina. Med njima se prenese samo trenutna lastnikova zahteva, Qwenov omejeni
+JSON predlog in morebitna deterministična povratna informacija validatorja.
+Končni nespremenljiv načrt vedno izvira iz GPT-OSS potrditve in managerjevih
+mehanskih varnostnih pravil.
 
 ## Stanja
 

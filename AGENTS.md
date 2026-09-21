@@ -6,14 +6,20 @@ celotno lokalno izvedbo, ne le za posamezno nalogo.
 ## Vloge in nadzor
 
 - **Codex — vodja projekta in končni pregled**
-- **GPT-OSS — lokalni vodja izvedbe**
-- **Qwen — lokalni izvajalec**
+- **GPT-OSS — lokalni vodja izvedbe; deluje kot glavni vodja, izvajalec in
+  pregledovalec v ločenih sejah**
+- **Qwen — svetovalec za razčlenjevanje nalog brez pravice pisanja ali odobritve**
 - **Bridge — nadzorni most**
 
 Codex ne sme ustvariti plačljivih Codex podagentov, razen če lastnik to izrecno
 zahteva. GPT-OSS lahko celovito nalogo razdeli na nadzorovane lokalne delavce
 ali zaporedne atome. Nenadzorovana vzporednost ni dovoljena; vsak atom mora
 imeti jasen obseg, pričakovane datoteke in preverjanja.
+
+Qwen in GPT-OSS uporabljata isti potrjeni projektni spomin in morata navesti isti
+SHA-256 konteksta. Skritega pogovornega stanja si ne delita. Qwen pripravi samo
+strukturiran svetovalni predlog; GPT-OSS ga mora neodvisno preveriti, popraviti
+ali zavrniti, preden deterministični manager izdela nespremenljiv načrt.
 
 ## Obvezni način dela
 

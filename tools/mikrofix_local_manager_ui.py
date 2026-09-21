@@ -21,10 +21,10 @@ MANAGER = PROJECT_ROOT / "tools" / "mikrofix_local_manager.py"
 WINDOW_TITLE = "MikroFix – lokalni vodja projekta"
 
 STATE_LABELS = {
-    "PLANNING": "Lokalni vodja pregleduje projekt in pripravlja načrt",
+    "PLANNING": "Qwen razčlenjuje nalogo, GPT-OSS pa preverja načrt",
     "READY_FOR_OWNER_LEASE": "Načrt je pripravljen — čaka tvojo odobritev izvedbe",
     "WAITING_FOR_OWNER_LEASE": "Čaka na tvojo potrditev dovoljenja za pisanje",
-    "RUNNING_LOCAL": "Qwen izvaja nalogo in lokalni vodja jo preverja",
+    "RUNNING_LOCAL": "GPT-OSS izvaja nalogo in ločeni pregledovalec jo preverja",
     "READY_FOR_CODEX_REVIEW": "Kandidat je pripravljen za Codexov pregled",
     "BLOCKED": "Naloga potrebuje popravek ali konkretno odločitev",
     "PLAN_READY": "Načrt je pripravljen",

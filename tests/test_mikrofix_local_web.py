@@ -88,10 +88,53 @@ class LocalWebPayloadTests(unittest.TestCase):
             "supervisor_state": str(supervisor),
         }), encoding="utf-8")
         trace = web.build_trace(self.workspace, "MF-TRACE")
-        for expected in ("QWEN · IZVEDBA", "Qwen korak 1", "1 test PASS", "Verdict: APPROVE", "missing valid verdict"):
+        for expected in ("GPT-OSS · IZVEDBA", "Qwen korak 1", "1 test PASS", "Verdict: APPROVE", "missing valid verdict"):
             self.assertIn(expected, trace)
         self.assertNotIn("topsecret", trace)
         self.assertIn("Bearer <skrito>", trace)
+
+    def test_trace_shows_each_model_tool_call_and_actual_tool_result(self):
+        directory = self.workspace / "jobs" / "MF-STEPS"
+        planner = directory / "planner-runtime" / "qwen-bridge" / "jobs" / "MF-1"
+        planner.mkdir(parents=True)
+        events = [
+            {"type": "model", "role": "Qwen planner", "step": 1,
+             "content": "Preverjam pravo pot.", "tool_call_count": 1},
+            {"type": "tool_call", "role": "Qwen planner", "step": 1,
+             "tool": "project_search", "arguments": {"query": "invoice"}},
+            {"type": "tool_result", "role": "Qwen planner", "step": 1,
+             "tool": "project_search", "ok": True,
+             "result": {"matches": ["app.py:12"], "count": 1}},
+        ]
+        (planner / "trace.jsonl").write_text(
+            "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+        )
+        (directory / "request.json").write_text(json.dumps({
+            "run_id": "MF-STEPS", "task": "Trace", "created_at": "now",
+        }), encoding="utf-8")
+        (directory / "manager.json").write_text(json.dumps({
+            "run_id": "MF-STEPS", "state": "PLANNING",
+        }), encoding="utf-8")
+        trace = web.build_trace(self.workspace, "MF-STEPS")
+        for expected in (
+            "QWEN · PREDLOG NAČRTA", "KORAK 1", "Preverjam pravo pot.",
+            "project_search", '"query": "invoice"', '"app.py:12"',
+        ):
+            self.assertIn(expected, trace)
+
+    def test_plan_only_trace_accepts_null_supervisor_path(self):
+        directory = self.workspace / "jobs" / "MF-PLAN"
+        directory.mkdir()
+        (directory / "request.json").write_text(json.dumps({
+            "run_id": "MF-PLAN", "task": "Plan", "created_at": "now",
+        }), encoding="utf-8")
+        (directory / "manager.json").write_text(json.dumps({
+            "run_id": "MF-PLAN", "state": "PLAN_READY",
+            "supervisor_state": None,
+        }), encoding="utf-8")
+        trace = web.build_trace(self.workspace, "MF-PLAN")
+        self.assertIn("TRENUTNO STANJE", trace)
+        self.assertIn("PLAN_READY", trace)
 
 
 if __name__ == "__main__":

@@ -95,6 +95,64 @@ def redact_trace(text: str) -> str:
     return text
 
 
+def _structured_trace(path: Path) -> str:
+    """Render each durable model/tool event as an owner-readable step."""
+    raw = _read_trace_file(path, limit=600_000)
+    if not raw:
+        return ""
+    rendered: list[str] = []
+    for line in raw.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            rendered.append(line)
+            continue
+        kind = str(event.get("type") or "dogodek")
+        step = event.get("step")
+        role = str(event.get("role") or "lokalni agent")
+        prefix = f"KORAK {step}" if step is not None else kind.upper()
+        rendered.append(f"--- {prefix} · {role} · {kind} ---")
+        if event.get("content"):
+            rendered.append(str(event["content"]))
+        if kind == "model" and not event.get("content"):
+            rendered.append(
+                f"Model je izbral {event.get('tool_call_count', 0)} klic(ev) orodij; "
+                "vmesnega besedilnega odgovora ni vrnil."
+            )
+        if event.get("tool"):
+            rendered.append(f"Orodje: {event['tool']}")
+        for key, label in (("arguments", "Parametri"), ("result", "Rezultat")):
+            if key in event:
+                rendered.append(
+                    label + ":\n" + json.dumps(
+                        event[key], ensure_ascii=False, indent=2, default=str
+                    )
+                )
+        if event.get("error"):
+            rendered.append("Napaka: " + str(event["error"]))
+        if event.get("note"):
+            rendered.append("Opomba: " + str(event["note"]))
+    return "\n".join(rendered)
+
+
+def _bridge_trace_sections(root: Path, heading: str) -> list[str]:
+    sections: list[str] = []
+    for directory in sorted(root.glob("MF-*")):
+        structured = _structured_trace(directory / "trace.jsonl")
+        log = _read_trace_file(directory / "log.txt")
+        result = _read_trace_file(directory / "result.txt")
+        parts = []
+        if structured:
+            parts.append(structured)
+        elif log:
+            parts.append(log)
+        if result:
+            parts.append("KONČNI ODGOVOR:\n" + result)
+        if parts:
+            sections.append(f"=== {heading} · {directory.name} ===\n" + "\n\n".join(parts))
+    return sections
+
+
 def build_trace(workspace: Path, run_id: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
         raise ValueError("Neveljaven ID naloge")
@@ -107,16 +165,19 @@ def build_trace(workspace: Path, run_id: str) -> str:
         raise ValueError("Naloga ne obstaja")
 
     sections: list[str] = []
-    planner_jobs = job_dir / "planner-runtime" / "bridge" / "jobs"
-    for directory in sorted(planner_jobs.glob("MF-*")):
-        log = _read_trace_file(directory / "log.txt")
-        result = _read_trace_file(directory / "result.txt")
-        body = "\n".join(part for part in (log, "\nKONČNI ODGOVOR:\n" + result if result else "") if part)
-        if body:
-            sections.append(f"=== GPT-OSS · NAČRTOVANJE · {directory.name} ===\n{body}")
+    sections.extend(_bridge_trace_sections(
+        job_dir / "planner-runtime" / "qwen-bridge" / "jobs",
+        "QWEN · PREDLOG NAČRTA",
+    ))
+    sections.extend(_bridge_trace_sections(
+        job_dir / "planner-runtime" / "bridge" / "jobs",
+        "GPT-OSS · POTRDITEV NAČRTA",
+    ))
 
     manager = read_json(job_dir / "manager.json")
-    supervisor_path = Path(manager.get("supervisor_state", job_dir / "supervisor.json"))
+    supervisor_path = Path(
+        manager.get("supervisor_state") or (job_dir / "supervisor.json")
+    )
     supervisor = read_json(supervisor_path)
     events = supervisor.get("events") or []
     if events:
@@ -130,17 +191,10 @@ def build_trace(workspace: Path, run_id: str) -> str:
     run_dir_raw = environment.get("run_dir")
     if run_dir_raw:
         run_dir = Path(str(run_dir_raw))
-        qwen_jobs = run_dir / "bridge" / "jobs"
-        for directory in sorted(qwen_jobs.glob("MF-*")):
-            log = _read_trace_file(directory / "log.txt")
-            result = _read_trace_file(directory / "result.txt")
-            body = "\n".join(
-                part for part in (
-                    log,
-                    "\nQWENOV KONČNI ODGOVOR:\n" + result if result else "[Qwen še dela ali ni vrnil končnega odgovora]",
-                ) if part
-            )
-            sections.append(f"=== QWEN · IZVEDBA · {directory.name} ===\n{body}")
+        sections.extend(_bridge_trace_sections(
+            run_dir / "bridge" / "jobs",
+            "GPT-OSS · IZVEDBA",
+        ))
 
     if supervisor.get("test_evidence"):
         sections.append("=== LOKALNI TESTI ===\n" + str(supervisor["test_evidence"]))

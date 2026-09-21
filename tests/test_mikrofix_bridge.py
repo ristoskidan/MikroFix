@@ -168,12 +168,45 @@ class BridgeCompletionTests(unittest.TestCase):
             self.bridge.process_job(job["id"])
         self.assertEqual([("completed", "finished\n")], observed)
 
+    def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
+        job = self.bridge.create_job("Verify with a successful tool")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_read", "arguments": {"path": "missing"}}
+            }]}},
+            {"message": {"content": "premature"}},
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {"content": "verified"}},
+        ])
+        tool_results = iter([RuntimeError("not found"), {"ok": True}])
+
+        def execute(_name, _arguments):
+            result = next(tool_results)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        old_steps = self.bridge.MAX_STEPS
+        self.bridge.MAX_STEPS = 4
+        try:
+            with mock.patch.object(
+                self.bridge, "call_qwen", side_effect=lambda _m: next(responses)
+            ), mock.patch.object(self.bridge, "execute_tool", side_effect=execute):
+                self.bridge.process_job(job["id"])
+        finally:
+            self.bridge.MAX_STEPS = old_steps
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual("verified", persisted["result"])
+
     def test_runtime_prompt_always_contains_persistent_lead_rules(self):
         prompt = self.bridge.runtime_system_prompt()
         for required in (
             "Codex — vodja projekta in končni pregled",
             "GPT-OSS — lokalni vodja izvedbe",
-            "Qwen — lokalni izvajalec",
+            "Qwen — svetovalec za razčlenjevanje nalog",
             "Bridge — nadzorni most",
             "Natančen vzrok:",
             "project_diff",
