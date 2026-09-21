@@ -1567,6 +1567,15 @@ class LocalAdapter:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(material)
+            parent_args: list[str] = []
+            config_name = self._bridge_env.get("MIKROFIX_BRIDGE_CONFIG")
+            if config_name:
+                config = json.loads(Path(config_name).read_text(encoding="utf-8"))
+                if config.get("project_memory") and config.get("parent_session_id"):
+                    parent_args = [
+                        "--project-memory", str(config["project_memory"]),
+                        "--parent-session-id", str(config["parent_session_id"]),
+                    ]
             result = self._run([
                 str(self.source_root / ".venv-server" / "bin" / "python"),
                 str(self.source_root / "tools" / "mikrofix_local_agent.py"),
@@ -1575,6 +1584,7 @@ class LocalAdapter:
                 "--output", "Specific findings followed by exactly one final verdict line.",
                 "--log-dir", str(self.state_dir / "reviews"),
                 "--console-log", str(self.state_dir / "agent-console.log"),
+                *parent_args,
             ], timeout=1200, check=False)
         finally:
             path.unlink(missing_ok=True)

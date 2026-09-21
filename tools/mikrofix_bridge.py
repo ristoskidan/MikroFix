@@ -722,7 +722,7 @@ def process_job(job_id):
 
             write_log(
                 job_id,
-                f"Qwen korak {step}/{MAX_STEPS}"
+                f"Izvajalec korak {step}/{MAX_STEPS}"
             )
 
             response = call_qwen(messages)
@@ -740,7 +740,7 @@ def process_job(job_id):
                 if tool_use_count == 0:
                     write_log(
                         job_id,
-                        "Qwen je poskusil zaključiti brez uporabe orodij; zahtevam dejanski pregled."
+                        "Izvajalec je poskusil zaključiti brez uporabe orodij; zahtevam dejanski pregled."
                     )
 
                     messages.append(message)
@@ -761,7 +761,7 @@ def process_job(job_id):
                 if not result:
                     write_log(
                         job_id,
-                        "Qwen je vrnil prazen končni odgovor; zahtevam besedni povzetek."
+                        "Izvajalec je vrnil prazen končni odgovor; zahtevam besedni povzetek."
                     )
 
                     messages.append(message)
@@ -850,7 +850,7 @@ def process_job(job_id):
                 })
 
         raise RuntimeError(
-            f"Dosežena omejitev {MAX_STEPS} Qwen korakov."
+            f"Dosežena omejitev {MAX_STEPS} korakov izvajalca."
         )
 
     except Exception as e:
@@ -1197,7 +1197,7 @@ def main():
     LOGS.mkdir(parents=True, exist_ok=True)
 
     parser = argparse.ArgumentParser(
-        description="MikroFIX lokalni Qwen bridge"
+        description="MikroFIX lokalni agentni bridge"
     )
 
     sub = parser.add_subparsers(

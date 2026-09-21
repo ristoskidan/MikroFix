@@ -17,6 +17,8 @@ class LeadSessionTests(unittest.TestCase):
                 source.write_text(relative + "\n", encoding="utf-8")
             first = ensure_lead_session(root, home)
             self.assertEqual("AWAITING_CONTEXT_ACK", first["state"])
+            unconfirmed_again = ensure_lead_session(root, home)
+            self.assertEqual("AWAITING_CONTEXT_ACK", unconfirmed_again["state"])
             ready = confirm_context(
                 home, str(first["session_id"]), str(first["memory_sha256"])
             )

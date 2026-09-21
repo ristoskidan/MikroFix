@@ -74,6 +74,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Zahtevana oblika oziroma vsebina odgovora.",
     )
     parser.add_argument("--context", type=Path, default=DEFAULT_CONTEXT)
+    parser.add_argument(
+        "--project-memory", type=Path,
+        help="Potrjeni trajni kontekst nadrejene lokalne seje.",
+    )
+    parser.add_argument(
+        "--parent-session-id", default="",
+        help="ID glavne seje, iz katere izvira ta podizvajalska naloga.",
+    )
     parser.add_argument("--lessons", type=Path, default=DEFAULT_LESSONS)
     parser.add_argument("--rules-dir", type=Path, default=DEFAULT_RULES_DIR)
     parser.add_argument(
@@ -386,6 +394,17 @@ def main(argv: list[str] | None = None) -> int:
         args.scope,
         task + "\n" + args.output,
     )
+    if args.project_memory:
+        memory_path = args.project_memory.expanduser().resolve()
+        memory = read_text(memory_path, "trajnega projektnega spomina")
+        memory_hash = hashlib.sha256(memory.encode("utf-8")).hexdigest()
+        context_files.append((memory_path, memory_hash))
+        context = (
+            context.rstrip()
+            + "\n\n---\n\n# POD­EDOVANI KONTEKST GLAVNE SEJE\n\n"
+            + f"parent_session_id: {args.parent_session_id}\n\n"
+            + memory
+        )
 
     task_id = make_task_id()
     created_at = dt.datetime.now().astimezone().isoformat(timespec="seconds")

@@ -29,8 +29,10 @@ Najprej ugotovi, ali je naloga projektna ali splošna.
 
 ## Obvezni začetek projektne naloge
 
-1. Preberi ustrezne module v `docs/local_agents/pravila/`, vedno tudi
-   `00_JEDRO.md`, ter `docs/local_agents/LEKCIJE.md`.
+1. Jedrna pravila, specifikacija, potrjene lekcije in projektno stanje so že
+   podedovani iz glavne seje prek `parent_session_id`. Teh dokumentov ne išči
+   in ne beri znova. Preberi samo konkretno kodo, teste in druge datoteke, ki
+   so neposredno potrebni za dodeljeni atom.
 2. Preveri stanje projekta in obstoječe spremembe. Tujih sprememb ne prepisuj.
 3. Kratko povej načrt, merila uspeha in kaj nameravaš spremeniti.
 4. Najprej uporabi strukturirana projektna orodja; poljubni terminal uporabi le,

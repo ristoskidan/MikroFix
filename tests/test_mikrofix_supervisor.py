@@ -555,6 +555,8 @@ class RunEnvironmentTests(unittest.TestCase):
                 bridge["system_prompt"],
             )
             self.assertEqual("supervisor_only", bridge["completion_policy"])
+            self.assertTrue(bridge["parent_session_id"].startswith("LEAD-"))
+            self.assertTrue(Path(bridge["project_memory"]).is_file())
             self.assertEqual(str(environment.executor_config_dir / "token"),
                              bridge["token_file"])
             allowed = json.loads(
@@ -754,6 +756,37 @@ class LocalAdapterTests(unittest.TestCase):
                 [python, str(source / "tools" / "mikrofix_local_agent.py")],
                 calls[1][:2],
             )
+
+    def test_reviewer_inherits_parent_session_context(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            worktree = base / "worktree"
+            state = base / "state"
+            source = base / "source"
+            worktree.mkdir()
+            memory = base / "memory.md"
+            memory.write_text("trusted memory\n", encoding="utf-8")
+            config = base / "bridge.json"
+            config.write_text(json.dumps({
+                "project_memory": str(memory),
+                "parent_session_id": "LEAD-TEST",
+            }), encoding="utf-8")
+            adapter = LocalAdapter(
+                worktree, state, source_root=source,
+                bridge_env={"MIKROFIX_BRIDGE_CONFIG": str(config)},
+            )
+            calls = []
+
+            def fake_run(args, timeout=900, check=True, env=None):
+                calls.append(list(args))
+                return subprocess.CompletedProcess(args, 0, "VERDICT: APPROVE\n", "")
+
+            adapter._run = fake_run
+            self.assertTrue(adapter.review("review it", "diff").ok)
+            self.assertIn("--project-memory", calls[0])
+            self.assertIn(str(memory), calls[0])
+            self.assertIn("--parent-session-id", calls[0])
+            self.assertIn("LEAD-TEST", calls[0])
 
     def test_syntax_check_includes_unstaged_staged_and_untracked_python(self):
         adapter = LocalAdapter(Path("/worktree"), Path("/state"),

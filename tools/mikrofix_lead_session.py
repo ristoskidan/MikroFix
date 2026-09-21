@@ -56,14 +56,34 @@ def ensure_lead_session(project_root: Path, home: Path) -> dict[str, object]:
     if not memory_file.is_file() or not same_context:
         _atomic_text(memory_file, memory)
         memory_file.chmod(0o400)
+    acknowledgement_file = home / "context-ready.json"
+    acknowledgement: dict[str, object] = {}
+    if acknowledgement_file.is_file():
+        try:
+            acknowledgement = json.loads(
+                acknowledgement_file.read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, json.JSONDecodeError):
+            acknowledgement = {}
+    acknowledged = acknowledgement == {
+        "context_ack": "CONTEXT_READY",
+        "session_id": session_id,
+        "memory_sha256": memory_hash,
+    }
     state = {
         "schema_version": 1,
         "session_id": session_id,
-        "state": "CONTEXT_READY" if same_context else "AWAITING_CONTEXT_ACK",
+        "state": (
+            "CONTEXT_READY"
+            if same_context and old.get("state") == "CONTEXT_READY" and acknowledged
+            else "AWAITING_CONTEXT_ACK"
+        ),
         "memory_file": str(memory_file),
         "memory_sha256": memory_hash,
         "source_manifest": manifest,
     }
+    if acknowledged:
+        state["acknowledgement_file"] = str(acknowledgement_file)
     _atomic_text(state_file, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
     return state
 
