@@ -41,6 +41,18 @@ REQUIRED_MODEL_PLAN_FIELDS = MODEL_PLAN_FIELDS - {"context_links"}
 MAX_PLANNER_ATTEMPTS = 3
 
 
+def binding_owner_criterion(owner_request: str) -> str:
+    """Keep every owner requirement inside the evidence-scored review gate."""
+    request = owner_request.strip()
+    return (
+        "Treat the original owner request as binding in full. Enumerate every "
+        "explicit requirement and restriction from the quoted request, cite "
+        "concrete candidate evidence for each one, and FAIL this criterion if "
+        "any item is omitted, weakened, contradicted, or unsupported. Original "
+        f"owner request: {request}"
+    )
+
+
 class ManagerError(RuntimeError):
     pass
 
@@ -187,13 +199,16 @@ def normalize_plan(
         "expected_files": list(atom["expected_files"]),
         "checks": trusted_checks(list(atom["expected_files"])),
     } for atom in model_plan["atoms"]]
+    trusted_owner_request = owner_request.strip() or model_plan["objective"]
+    acceptance_criteria = [binding_owner_criterion(trusted_owner_request)]
+    acceptance_criteria.extend(model_plan["acceptance_criteria"])
     plan = {
         "objective": model_plan["objective"],
-        "owner_request": owner_request.strip() or model_plan["objective"],
+        "owner_request": trusted_owner_request,
         "allowed_files": allowed_files,
         "atoms": atoms,
         "constraints": list(model_plan["constraints"]),
-        "acceptance_criteria": list(model_plan["acceptance_criteria"]),
+        "acceptance_criteria": acceptance_criteria,
         "context_links": trusted_context(repository, allowed_files),
         "run_id": run_id,
         "base_checkpoint": head,

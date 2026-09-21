@@ -137,6 +137,8 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn("ACCEPTANCE CRITERIA", self.adapter.review_prompts[0])
         self.assertIn("1. Named checks pass", self.adapter.review_prompts[0])
         self.assertIn("Expected files: app.py", self.adapter.review_prompts[0])
+        self.assertIn("original owner request is binding", self.adapter.review_prompts[0].lower())
+        self.assertIn("check every explicit requirement separately", self.adapter.review_prompts[0])
 
     def test_missing_lease_pauses_and_resumes(self):
         self.adapter.lease = False

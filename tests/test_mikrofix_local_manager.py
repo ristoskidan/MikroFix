@@ -67,11 +67,20 @@ class LocalManagerTests(unittest.TestCase):
 
     def test_normalize_overrides_all_trusted_fields(self):
         raw = "```json\n" + json.dumps(model_plan()) + "\n```"
-        plan = manager.normalize_plan(raw, run_id="MF-LOCAL-1", repository=self.repository)
+        plan = manager.normalize_plan(
+            raw, run_id="MF-LOCAL-1", repository=self.repository,
+            owner_request="Must preserve requirement A and must not change tests",
+        )
         self.assertEqual("MF-LOCAL-1", plan["run_id"])
         self.assertEqual(self.git("rev-parse", "HEAD"), plan["base_checkpoint"])
         self.assertEqual(3, plan["max_retries_per_atom"])
         self.assertEqual("AWAIT_CODEX_REVIEW", plan["final_gate"])
+        self.assertIn(
+            "Must preserve requirement A and must not change tests",
+            plan["acceptance_criteria"][0],
+        )
+        self.assertIn("Enumerate every explicit requirement", plan["acceptance_criteria"][0])
+        self.assertEqual("Regression test passes", plan["acceptance_criteria"][1])
 
     def test_planner_worker_runs_directly_without_terminal_dependency(self):
         bridge = ["/trusted/python", "/trusted/bridge.py"]

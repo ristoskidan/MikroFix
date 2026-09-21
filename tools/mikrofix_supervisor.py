@@ -1248,7 +1248,11 @@ class Supervisor:
                 "For every numbered acceptance criterion below, emit PASS or FAIL "
                 "with concrete evidence from the diff or tests. Reject any defect, "
                 "scope drift, missing regression coverage, destructive behavior, "
-                "or unsupported completion claim.\n"
+                "or unsupported completion claim. The original owner request is "
+                "binding even when a model-generated objective, atom, or later "
+                "criterion is narrower. For its binding criterion, enumerate and "
+                "check every explicit requirement separately; do not summarize it "
+                "as a single general PASS.\n"
                 f"ACCEPTANCE CRITERIA:\n{criteria}\n"
                 "End with exactly one final line: VERDICT: APPROVE or VERDICT: REJECT."
             )
