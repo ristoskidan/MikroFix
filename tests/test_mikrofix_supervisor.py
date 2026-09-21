@@ -179,7 +179,20 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(2, len(self.adapter.jobs))
         self.assertIn("missing regression", self.adapter.jobs[1])
 
-    def test_retry_can_reuse_existing_candidate_when_executor_makes_no_new_diff(self):
+    def test_invalid_reviewer_format_retries_review_not_executor(self):
+        self.adapter.reviews = [
+            GateResult(False, "missing valid verdict", "**VERDICT: APPROVE**"),
+            GateResult(True, "approved", "VERDICT: APPROVE"),
+        ]
+        state = self.run_until_terminal()
+        self.assertEqual(Stage.AWAIT_CODEX_REVIEW.value, state["stage"])
+        self.assertEqual(1, len(self.adapter.jobs))
+        self.assertTrue(any(
+            "repeating review without redispatching" in event["message"]
+            for event in state["events"]
+        ))
+
+    def test_substantive_rejection_requires_a_new_executor_diff(self):
         calls = 0
 
         def result_without_second_change(job_id):
@@ -191,16 +204,12 @@ class SupervisorTests(unittest.TestCase):
 
         self.adapter.qwen_result = result_without_second_change
         self.adapter.reviews = [
-            GateResult(False, "review formatting rejected", "VERDICT: REJECT"),
-            GateResult(True, "approved", "VERDICT: APPROVE"),
+            GateResult(False, "VERDICT: REJECT", "VERDICT: REJECT"),
         ]
         state = self.run_until_terminal()
-        self.assertEqual(Stage.AWAIT_CODEX_REVIEW.value, state["stage"])
-        self.assertEqual(2, len(self.adapter.jobs))
-        self.assertTrue(any(
-            event["message"] == "Retry reused the existing bounded candidate"
-            for event in state["events"]
-        ))
+        self.assertEqual(Stage.BLOCKED.value, state["stage"])
+        self.assertIn("no new change", state["feedback"])
+        self.assertEqual(3, len(self.adapter.jobs))
 
     def test_active_job_timeout_blocks_without_dispatching_a_retry(self):
         timeout_plan = plan(job_timeout_seconds=30)
@@ -439,6 +448,7 @@ class PlanValidationTests(unittest.TestCase):
         self.assertIn("=== LOCAL EXECUTION REQUIRED ===", prompt)
         self.assertIn("constraints", prompt)
         self.assertIn("acceptance_criteria", prompt)
+        self.assertIn("Original owner request:", prompt)
         self.assertIn("base_checkpoint", prompt)
         self.assertIn("context_links", prompt)
         self.assertIn("canon", prompt)

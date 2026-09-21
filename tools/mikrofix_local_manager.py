@@ -172,7 +172,9 @@ def trusted_context(repository: Path, allowed_files: list[str]) -> dict[str, lis
     }
 
 
-def normalize_plan(raw: str, *, run_id: str, repository: Path) -> dict[str, Any]:
+def normalize_plan(
+    raw: str, *, run_id: str, repository: Path, owner_request: str = ""
+) -> dict[str, Any]:
     model_plan = parse_model_json(raw)
     preliminary_errors = model_plan_errors(model_plan, repository)
     if preliminary_errors:
@@ -187,6 +189,7 @@ def normalize_plan(raw: str, *, run_id: str, repository: Path) -> dict[str, Any]
     } for atom in model_plan["atoms"]]
     plan = {
         "objective": model_plan["objective"],
+        "owner_request": owner_request.strip() or model_plan["objective"],
         "allowed_files": allowed_files,
         "atoms": atoms,
         "constraints": list(model_plan["constraints"]),
@@ -320,7 +323,10 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
             try:
                 # Validate schema, paths and all semantic gates while the
                 # planner still has its one bounded correction opportunity.
-                normalize_plan(raw, run_id=job_dir.name, repository=repository)
+                normalize_plan(
+                    raw, run_id=job_dir.name, repository=repository,
+                    owner_request=task,
+                )
                 return raw
             except (ManagerError, ValueError) as exc:
                 last_error = str(exc)
@@ -372,7 +378,9 @@ def submit(task: str, *, workspace: Path = DEFAULT_WORKSPACE,
     atomic_write_json(job_dir / "manager.json", state)
     try:
         raw = generator(task, job_dir=job_dir, repository=repository)
-        plan = normalize_plan(raw, run_id=run_id, repository=repository)
+        plan = normalize_plan(
+            raw, run_id=run_id, repository=repository, owner_request=task
+        )
         atomic_write_immutable_json(job_dir / "plan.json", plan)
         if initialize:
             command([
@@ -415,8 +423,10 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
         "--state-dir", str(workspace), "--repository-root", str(repository),
     ]
     state["state"] = "WAITING_FOR_OWNER_LEASE"
+    state.pop("exact_reason", None)
     atomic_write_json(manager_file, state)
     workers_started = False
+    lease_granted = False
     try:
         command(base + ["workers", "start", "--state", str(supervisor_state)],
                 cwd=PROJECT_ROOT, timeout=120)
@@ -424,7 +434,9 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
         command(base + ["grant-lease", "--minutes", str(lease_minutes),
                         "--state", str(supervisor_state)],
                 cwd=PROJECT_ROOT, timeout=360)
+        lease_granted = True
         state["state"] = "RUNNING_LOCAL"
+        state.pop("exact_reason", None)
         atomic_write_json(manager_file, state)
         command(base + ["resume", "--state", str(supervisor_state)],
                 cwd=PROJECT_ROOT, timeout=7200)
@@ -438,7 +450,12 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
         state["checkpoint"] = supervisor.get("checkpoint")
         state["exact_reason"] = supervisor.get("feedback", "")
     except Exception as exc:
-        state["state"] = "BLOCKED"
+        # A dismissed or timed-out owner prompt changes no candidate state.
+        # Keep the validated plan reusable instead of forcing replanning.
+        state["state"] = (
+            "READY_FOR_OWNER_LEASE" if not lease_granted
+            else "BLOCKED"
+        )
         state["exact_reason"] = str(exc)
         raise
     finally:

@@ -787,6 +787,7 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
         "run_id", "objective", "base_checkpoint", "allowed_files", "atoms",
         "max_retries_per_atom", "job_timeout_seconds", "final_gate",
         "constraints", "context_links", "acceptance_criteria",
+        "owner_request",
     }
     unknown_keys = sorted(set(plan) - allowed_keys)
     if unknown_keys:
@@ -903,6 +904,9 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
 
     constraints = required_string_list("constraints")
     acceptance = required_string_list("acceptance_criteria")
+    owner_request = plan.get("owner_request", plan["objective"])
+    if not isinstance(owner_request, str) or not owner_request.strip():
+        raise ValueError("owner_request must be a non-empty string")
 
     if "context_links" not in plan:
         raise ValueError("missing required field: context_links")
@@ -936,6 +940,7 @@ def validate_plan(plan: dict[str, Any]) -> dict[str, Any]:
     return {
         "run_id": plan["run_id"].strip(),
         "objective": plan["objective"].strip(),
+        "owner_request": owner_request.strip(),
         "base_checkpoint": plan["base_checkpoint"].strip(),
         "allowed_files": allowed,
         "atoms": atoms,
@@ -962,6 +967,8 @@ def initial_run(
         "stage": Stage.PLANNED.value,
         "atom_index": 0,
         "attempt": 0,
+        "review_attempt": 0,
+        "requires_new_change": False,
         "job_id": None,
         "job_dispatched_at": None,
         "feedback": "",
@@ -994,8 +1001,11 @@ def record(run: dict[str, Any], stage: Stage, message: str) -> None:
                           "message": message})
 
 
-def retry_or_block(run: dict[str, Any], reason: str) -> None:
+def retry_or_block(
+    run: dict[str, Any], reason: str, *, require_change: bool = True
+) -> None:
     run["feedback"] = reason
+    run["requires_new_change"] = require_change
     maximum = run["plan"]["max_retries_per_atom"]
     if run["attempt"] >= maximum:
         record(run, Stage.BLOCKED, f"Retry limit reached: {reason}")
@@ -1013,6 +1023,7 @@ def qwen_prompt(run: dict[str, Any]) -> str:
         "=== LOCAL EXECUTION REQUIRED ===\n"
         f"RUN {plan['run_id']} / ATOM {atom['id']} / attempt {run['attempt'] + 1}\n"
         f"Objective: {plan['objective']}\n"
+        f"Original owner request: {plan.get('owner_request', plan['objective'])}\n"
         f"Task: {atom['task']}\n"
         f"Allowed files (strict): {', '.join(plan['allowed_files'])}\n"
         f"Expected files: {', '.join(atom['expected_files']) or '(not specified)'}\n"
@@ -1181,6 +1192,11 @@ class Supervisor:
                 run["feedback"] = f"Files outside allowed_files changed: {outside}"
                 record(run, Stage.BLOCKED,
                        "Out-of-scope workspace mutation; manual inspection required")
+            elif run.get("requires_new_change") and not changed:
+                retry_or_block(
+                    run,
+                    "Executor made no new change after a substantive gate rejection",
+                )
             elif not review_paths:
                 retry_or_block(run, "No actual workspace change was detected")
             elif missing:
@@ -1198,6 +1214,7 @@ class Supervisor:
                         )
                     record(run, Stage.LOCAL_TESTS,
                            f"Diff accepted for files: {', '.join(sorted(review_paths))}")
+                    run["requires_new_change"] = False
             self.save(run)
             if run["stage"] in TERMINAL_STAGES:
                 self.notify_terminal(run)
@@ -1225,6 +1242,7 @@ class Supervisor:
             prompt = (
                 f"Review atom {atom['id']}: {atom['task']}.\n"
                 f"Objective: {run['plan']['objective']}\n"
+                f"Original owner request: {run['plan'].get('owner_request', run['plan']['objective'])}\n"
                 f"Allowed files: {', '.join(run['plan']['allowed_files'])}\n"
                 f"Expected files: {', '.join(atom['expected_files'])}\n"
                 "For every numbered acceptance criterion below, emit PASS or FAIL "
@@ -1236,13 +1254,36 @@ class Supervisor:
             )
             material = run["diff"] + "\n\nTEST EVIDENCE:\n" + run["test_evidence"]
             result = self.adapter.review(prompt, material)
+            run["review_attempt"] = int(run.get("review_attempt", 0)) + 1
             run["review_evidence"] = result.evidence or result.summary
             if not result.ok:
-                retry_or_block(run, f"GPT-OSS rejected the atom: {result.summary}")
+                format_only = result.summary in {
+                    "missing valid verdict", "ambiguous multiple verdicts"
+                }
+                if format_only and run["review_attempt"] < 2:
+                    run["feedback"] = (
+                        "Reviewer output format was invalid; repeating review without "
+                        "redispatching the executor"
+                    )
+                    record(run, Stage.GPT_OSS_REVIEW, run["feedback"])
+                elif format_only:
+                    run["feedback"] = (
+                        "Reviewer did not produce one valid verdict after two attempts"
+                    )
+                    record(run, Stage.BLOCKED, run["feedback"])
+                else:
+                    run["review_attempt"] = 0
+                    retry_or_block(
+                        run,
+                        f"GPT-OSS rejected the atom: {result.summary}",
+                        require_change=True,
+                    )
                 self.save(run)
                 if run["stage"] in TERMINAL_STAGES:
                     self.notify_terminal(run)
                 return True
+            run["review_attempt"] = 0
+            run["feedback"] = ""
             run["completed_atoms"].append({
                 "id": atom["id"], "attempts": run["attempt"],
                 "tests": run["test_evidence"], "review": run["review_evidence"],
@@ -1253,7 +1294,8 @@ class Supervisor:
                 run.update({"attempt": 0, "job_id": None, "feedback": "",
                             "job_dispatched_at": None,
                             "qwen_result": "", "diff": "", "test_evidence": "",
-                            "review_evidence": "", "dispatch_snapshot": None})
+                            "review_evidence": "", "dispatch_snapshot": None,
+                            "review_attempt": 0, "requires_new_change": False})
                 record(run, Stage.PLANNED, "Atom accepted; next atom planned")
             else:
                 record(run, Stage.CHECKPOINT, "All atoms accepted")

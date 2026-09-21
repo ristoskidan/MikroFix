@@ -165,6 +165,7 @@ class LocalManagerTests(unittest.TestCase):
         plan = json.loads((job_dir / "plan.json").read_text(encoding="utf-8"))
         self.assertEqual("Owner task", request["task"])
         self.assertEqual(request["run_id"], plan["run_id"])
+        self.assertEqual("Owner task", plan["owner_request"])
         self.assertEqual(0, (job_dir / "plan.json").stat().st_mode & 0o222)
 
     def test_follow_up_requires_existing_parent_and_persists_link(self):
@@ -217,6 +218,34 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual("/candidate/manifest.json", state["checkpoint"])
         self.assertTrue(any("grant-lease" in call for call in calls))
         self.assertTrue(any("stop" in call for call in calls))
+
+    def test_owner_prompt_timeout_keeps_validated_plan_retryable(self):
+        run_id = "MF-LEASE-TIMEOUT"
+        job_dir = self.workspace / "jobs" / run_id
+        job_dir.mkdir()
+        supervisor_state = job_dir / "supervisor.json"
+        supervisor_state.write_text(json.dumps({
+            "stage": "PLANNED", "checkpoint": None, "feedback": "",
+        }), encoding="utf-8")
+        manager_file = job_dir / "manager.json"
+        manager_file.write_text(json.dumps({
+            "schema_version": 1, "run_id": run_id,
+            "state": "READY_FOR_OWNER_LEASE",
+            "supervisor_state": str(supervisor_state),
+        }), encoding="utf-8")
+
+        def fake_command(args, **_kwargs):
+            if "grant-lease" in args:
+                raise subprocess.TimeoutExpired(args, 120)
+            return "ok"
+
+        with (
+            mock.patch.object(manager, "command", side_effect=fake_command),
+            self.assertRaises(subprocess.TimeoutExpired),
+        ):
+            manager.execute_run(run_id, workspace=self.workspace)
+        state = json.loads(manager_file.read_text(encoding="utf-8"))
+        self.assertEqual("READY_FOR_OWNER_LEASE", state["state"])
 
 
 if __name__ == "__main__":
