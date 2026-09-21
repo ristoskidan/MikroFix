@@ -8,8 +8,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shlex
-import shutil
 import socket
 import subprocess
 import sys
@@ -171,35 +169,14 @@ def run_bridge_monitor(
     bridge: list[str], bridge_env: dict[str, str], bridge_home: Path,
     job_id: str,
 ) -> None:
-    """Run the planner monitor visibly when a desktop terminal is available."""
-    terminal = shutil.which("xfce4-terminal")
-    visible = os.environ.get("MIKROFIX_VISIBLE_PLANNER", "1") != "0"
-    if not visible or not terminal or not os.environ.get("DISPLAY"):
-        command(bridge + ["monitor", "--once"], cwd=PROJECT_ROOT,
-                env=bridge_env, timeout=1800)
-        return
-    env_prefix = " ".join(
-        f"{key}={shlex.quote(value)}" for key, value in bridge_env.items()
+    """Run the planner worker directly; the owner UI reads its durable log."""
+    del bridge_home, job_id
+    command(
+        bridge + ["monitor", "--once"],
+        cwd=PROJECT_ROOT,
+        env=bridge_env,
+        timeout=1800,
     )
-    monitor_command = shlex.join(bridge + ["monitor", "--once"])
-    shell_command = f"{env_prefix} {monitor_command}"
-    subprocess.Popen(
-        [terminal, "--hold", "--title=MikroFix - GPT-OSS lokalni vodja",
-         "--maximize", "--command", f"bash -lc {shlex.quote(shell_command)}"],
-        cwd=PROJECT_ROOT, stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    job_file = bridge_home / "jobs" / job_id / "job.json"
-    deadline = time.monotonic() + 1800
-    while time.monotonic() < deadline:
-        try:
-            status = json.loads(job_file.read_text(encoding="utf-8"))["status"]
-        except (OSError, KeyError, json.JSONDecodeError):
-            status = "queued"
-        if status in {"completed", "failed"}:
-            return
-        time.sleep(0.5)
-    raise ManagerError(f"Planner job {job_id} exceeded 1800 seconds")
 
 
 def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
@@ -224,6 +201,9 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         "num_ctx": int(template.get("num_ctx", 131072)),
         "max_steps": 60,
         "keep_alive": "0",
+        # Planner jobs are internal stages. Only the final supervised run may
+        # tell the owner that the task itself has finished.
+        "completion_policy": "supervisor_only",
         "agent_role": "GPT-OSS — lokalni vodja načrtovanja",
     })
     executor_env = {

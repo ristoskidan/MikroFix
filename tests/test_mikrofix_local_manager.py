@@ -73,6 +73,20 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual(3, plan["max_retries_per_atom"])
         self.assertEqual("AWAIT_CODEX_REVIEW", plan["final_gate"])
 
+    def test_planner_worker_runs_directly_without_terminal_dependency(self):
+        bridge = ["/trusted/python", "/trusted/bridge.py"]
+        environment = {"MIKROFIX_BRIDGE_HOME": "/private/runtime"}
+        with mock.patch.object(manager, "command", return_value="") as called:
+            manager.run_bridge_monitor(
+                bridge, environment, self.workspace / "runtime", "MF-2026-0001"
+            )
+        called.assert_called_once_with(
+            bridge + ["monitor", "--once"],
+            cwd=manager.PROJECT_ROOT,
+            env=environment,
+            timeout=1800,
+        )
+
     def test_unknown_fields_and_missing_context_fail_closed(self):
         with self.assertRaisesRegex(manager.ManagerError, "unknown"):
             manager.normalize_plan(
