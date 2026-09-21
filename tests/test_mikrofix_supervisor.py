@@ -139,6 +139,9 @@ class SupervisorTests(unittest.TestCase):
         self.assertIn("Expected files: app.py", self.adapter.review_prompts[0])
         self.assertIn("original owner request is binding", self.adapter.review_prompts[0].lower())
         self.assertIn("check every explicit requirement separately", self.adapter.review_prompts[0])
+        self.assertIn("verbatim quote from the candidate diff", self.adapter.review_prompts[0])
+        self.assertIn("inspect every sentence for grammar", self.adapter.review_prompts[0])
+        self.assertIn("permission to modify test files", self.adapter.review_prompts[0])
 
     def test_missing_lease_pauses_and_resumes(self):
         self.adapter.lease = False
