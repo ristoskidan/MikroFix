@@ -16,11 +16,13 @@ from typing import Any, Callable
 import urllib.request
 
 try:
+    from tools.mikrofix_lead_session import ensure_context_ready
     from tools.mikrofix_supervisor import (
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
     )
 except ModuleNotFoundError:
+    from mikrofix_lead_session import ensure_context_ready  # type: ignore[no-redef]
     from mikrofix_supervisor import (  # type: ignore[no-redef]
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
@@ -254,8 +256,10 @@ def planner_prompt(task: str, previous_error: str = "") -> str:
         if previous_error else ""
     )
     return (
-        "Pripravi izvedbeni načrt za naslednjo zahtevo lastnika. Pred odgovorom "
-        "z orodji preglej dejanska pravila, povezano kodo in teste. Končni odgovor "
+        "Pripravi izvedbeni načrt za naslednjo zahtevo lastnika. Jedrna pravila, "
+        "specifikacija, stanje in lekcije so že v trajnem kontekstu glavne seje; "
+        "ne beri jih znova. Z orodji preveri samo konkretno kodo, teste in poti. "
+        "Končni odgovor "
         "naj bo samo zahtevani JSON.\n\nZAHTEVA:\n" + task + correction
     )
 
@@ -276,6 +280,13 @@ def run_bridge_monitor(
 
 def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    lead_home = Path.home() / ".local/share/mikrofix-bridge"
+    lead = ensure_context_ready(
+        PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
+        model=str(template.get("model", "gpt-oss:20b")),
+        num_ctx=int(template.get("num_ctx", 131072)),
+        keep_alive=str(template.get("lead_keep_alive", "30m")),
+    )
     runtime = job_dir / "planner-runtime"
     bridge_home = runtime / "bridge"
     executor_config = runtime / "executor-config"
@@ -293,9 +304,11 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         "token_file": str(token_file),
         "project": str(repository),
         "system_prompt": str(PROJECT_ROOT / "docs/local_agents/supervisor/PLANNER_SYSTEM.md"),
+        "project_memory": str(lead["memory_file"]),
+        "parent_session_id": str(lead["session_id"]),
         "num_ctx": int(template.get("num_ctx", 131072)),
         "max_steps": 60,
-        "keep_alive": "0",
+        "keep_alive": str(template.get("lead_keep_alive", "30m")),
         # Planner jobs are internal stages. Only the final supervised run may
         # tell the owner that the task itself has finished.
         "completion_policy": "supervisor_only",

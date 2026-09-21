@@ -31,6 +31,11 @@ import urllib.error
 import urllib.request
 
 try:
+    from tools.mikrofix_lead_session import ensure_lead_session
+except ModuleNotFoundError:
+    from mikrofix_lead_session import ensure_lead_session  # type: ignore[no-redef]
+
+try:
     from tools.mikrofix_completion import CompletionOutbox, validate_thread_id
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_completion import (  # type: ignore[no-redef]
@@ -237,6 +242,10 @@ class RunEnvironment:
         })
         port = 20000 + int(hashlib.sha256(run_id.encode()).hexdigest()[:6], 16) % 20000
         executor_url = f"http://127.0.0.1:{port}"
+        lead_home = Path(
+            bridge_template.get("lead_home", state_dir / "lead-session")
+        ).expanduser().resolve()
+        lead = ensure_lead_session(source_root, lead_home)
         config = {
             "ollama_url": bridge_template.get("ollama_url", "http://172.17.0.1:11434/api/chat"),
             "model": bridge_template.get(
@@ -248,6 +257,8 @@ class RunEnvironment:
             "system_prompt": str(
                 source_root / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"
             ),
+            "project_memory": str(lead["memory_file"]),
+            "parent_session_id": str(lead["session_id"]),
             "num_ctx": int(bridge_template.get("worker_num_ctx", 65536)),
             "max_steps": int(bridge_template.get("max_steps", 30)),
             "keep_alive": str(bridge_template.get("worker_keep_alive", "5m")),

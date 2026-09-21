@@ -486,6 +486,15 @@ class RunEnvironmentTests(unittest.TestCase):
         bridge.write_text("# trusted bridge\n", encoding="utf-8")
         reviewer.write_text("# trusted reviewer\n", encoding="utf-8")
         control.write_text("# trusted lease controller\n", encoding="utf-8")
+        for relative in (
+            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
+            "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md",
+            "docs/local_agents/LEKCIJE.md",
+            "docs/local_agents/supervisor/PROTOCOL_V2.md",
+        ):
+            context = source / relative
+            context.parent.mkdir(parents=True, exist_ok=True)
+            context.write_text(f"trusted context: {relative}\n", encoding="utf-8")
         return bridge, reviewer
 
     def test_prepares_isolated_worktree_config_manifest_and_lease_path(self):
@@ -971,6 +980,15 @@ class WorkerManagerTests(unittest.TestCase):
         (tools / "mikrofix_bridge.py").write_text("# bridge\n", encoding="utf-8")
         (tools / "mikrofix_local_agent.py").write_text("# reviewer\n", encoding="utf-8")
         (tools / "local_executor/control.py").write_text("# control\n", encoding="utf-8")
+        for relative in (
+            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
+            "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md",
+            "docs/local_agents/LEKCIJE.md",
+            "docs/local_agents/supervisor/PROTOCOL_V2.md",
+        ):
+            context = self.source / relative
+            context.parent.mkdir(parents=True, exist_ok=True)
+            context.write_text(f"trusted context: {relative}\n", encoding="utf-8")
         self.git(self.source, "add", ".")
         self.git(self.source, "commit", "-qm", "base")
         self.environment = RunEnvironment.create(

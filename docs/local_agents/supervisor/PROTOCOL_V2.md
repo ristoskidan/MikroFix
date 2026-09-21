@@ -26,6 +26,17 @@ ukaze, dovoljenja, retryje, dokazila in obvestila.
 - **Codex** opravi paketni končni pregled ter šele po odobritvi prenese kandidat
   v zaščiteni original in pripravi backup.
 
+## Trajna glavna seja
+
+Glavni GPT-OSS vodja enkrat prejme sestavljen projektni spomin iz kanoničnega
+konteksta, master specifikacije, potrjenih lekcij in tega protokola. Potrditi
+mora `CONTEXT_READY` skupaj z natančnim `parent_session_id` in SHA-256 spomina.
+Dokler se hash virov ne spremeni, naslednje zahteve vsebujejo samo nalogo in
+konkretne poti; jedrnih dokumentov ne bere ponovno. Vsak atom, ki ga vodja
+določi, se odpre kot podizvajalska naloga z istim `parent_session_id`, istim
+projektnim spominom in že podanimi shemami orodij. Ob spremembi kateregakoli
+vira se stanje vrne v `AWAITING_CONTEXT_ACK` in celoten kontekst se potrdi znova.
+
 ## Stanja
 
 ```text

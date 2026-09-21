@@ -65,6 +65,8 @@ KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
 RESPONSE_FORMAT = CFG.get("response_format")
 AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
 COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
+PROJECT_MEMORY = Path(CFG["project_memory"]) if CFG.get("project_memory") else None
+PARENT_SESSION_ID = str(CFG.get("parent_session_id", ""))
 
 
 TOOLS = [
@@ -669,7 +671,17 @@ Ko je naloga končana, podaj kratek in konkreten končni povzetek.
 """
 
     lead_rules = (PROJECT / "AGENTS.md").read_text(encoding="utf-8")
-    return prompt + addition + "\n\n--- PERSISTENT LOCAL-LEAD RULES ---\n\n" + lead_rules
+    inherited = ""
+    if PROJECT_MEMORY is not None:
+        inherited = (
+            "\n\n--- INHERITED PARENT SESSION CONTEXT ---\n"
+            f"parent_session_id: {PARENT_SESSION_ID}\n\n"
+            + PROJECT_MEMORY.read_text(encoding="utf-8")
+        )
+    return (
+        prompt + addition + "\n\n--- PERSISTENT LOCAL-LEAD RULES ---\n\n"
+        + lead_rules + inherited
+    )
 
 
 def process_job(job_id):
