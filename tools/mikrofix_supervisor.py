@@ -1599,6 +1599,15 @@ class LocalAdapter:
             if match:
                 verdicts.append(f"VERDICT: {match.group(1).upper()}")
         approved = result.returncode == 0 and verdicts == ["VERDICT: APPROVE"]
+        unsupported_evidence = bool(re.search(
+            r"\b(?:predpostav\w*|assum(?:e|ed|ing|ption)\w*)\b",
+            output,
+            flags=re.IGNORECASE,
+        ))
+        if approved and unsupported_evidence:
+            approved = False
+            summary = "review approval relied on an unsupported assumption"
+            return GateResult(approved, summary, output[-60000:])
         if approved:
             summary = "approved"
         elif len(verdicts) > 1:

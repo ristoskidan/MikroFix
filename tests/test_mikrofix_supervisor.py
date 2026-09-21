@@ -728,6 +728,26 @@ class LocalAdapterTests(unittest.TestCase):
         self.assertFalse(unknown.ok)
         self.assertEqual("missing valid verdict", unknown.summary)
 
+    def test_reviewer_rejects_approval_based_on_an_assumption(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            adapter = LocalAdapter(
+                base / "worktree", base / "state", source_root=base / "source"
+            )
+
+            def fake_run(args, timeout=900, check=True, env=None):
+                return subprocess.CompletedProcess(
+                    args, 0,
+                    "PASS - predpostavimo iz konteksta.\nVERDICT: APPROVE\n", "",
+                )
+
+            adapter._run = fake_run
+            result = adapter.review("review it", "diff")
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            "review approval relied on an unsupported assumption", result.summary
+        )
+
     def test_bridge_and_reviewer_use_absolute_trusted_source_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
