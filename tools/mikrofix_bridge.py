@@ -62,6 +62,7 @@ SYSTEM_PROMPT = Path(CFG["system_prompt"])
 MAX_STEPS = int(CFG.get("max_steps", 30))
 NUM_CTX = int(CFG.get("num_ctx", 65536))
 KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
+RESPONSE_FORMAT = CFG.get("response_format")
 AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
 COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
 
@@ -489,17 +490,20 @@ def execute_tool(name, arguments):
 
 
 def call_qwen(messages):
-    return request_json(
-        OLLAMA,
-        method="POST",
-        data={
+    payload = {
             "model": MODEL,
             "stream": False,
             "keep_alive": KEEP_ALIVE,
             "options": {"num_ctx": NUM_CTX},
             "messages": messages,
             "tools": TOOLS
-        },
+    }
+    if RESPONSE_FORMAT is not None:
+        payload["format"] = RESPONSE_FORMAT
+    return request_json(
+        OLLAMA,
+        method="POST",
+        data=payload,
         timeout=900
     )
 

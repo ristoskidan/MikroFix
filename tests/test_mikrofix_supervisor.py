@@ -66,6 +66,7 @@ class FakeAdapter:
         self.job_results = [("completed", "implemented")]
         self.tests = GateResult(True, "ok", "tests passed")
         self.reviews = [GateResult(True, "approved", "VERDICT: APPROVE")]
+        self.review_prompts = []
         self.checkpoint_calls = 0
 
     def lease_active(self):
@@ -95,6 +96,7 @@ class FakeAdapter:
         return self.tests
 
     def review(self, prompt, material):
+        self.review_prompts.append(prompt)
         return self.reviews.pop(0)
 
     def checkpoint(self, run, diff):
@@ -132,6 +134,9 @@ class SupervisorTests(unittest.TestCase):
                          "LOCAL_TESTS", "GPT_OSS_REVIEW", "CHECKPOINT",
                          "AWAIT_CODEX_REVIEW"):
             self.assertIn(required, stages)
+        self.assertIn("ACCEPTANCE CRITERIA", self.adapter.review_prompts[0])
+        self.assertIn("1. Named checks pass", self.adapter.review_prompts[0])
+        self.assertIn("Expected files: app.py", self.adapter.review_prompts[0])
 
     def test_missing_lease_pauses_and_resumes(self):
         self.adapter.lease = False
@@ -173,6 +178,29 @@ class SupervisorTests(unittest.TestCase):
         self.assertEqual(Stage.AWAIT_CODEX_REVIEW.value, state["stage"])
         self.assertEqual(2, len(self.adapter.jobs))
         self.assertIn("missing regression", self.adapter.jobs[1])
+
+    def test_retry_can_reuse_existing_candidate_when_executor_makes_no_new_diff(self):
+        calls = 0
+
+        def result_without_second_change(job_id):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                self.adapter.files["app.py"] = f"changed-{job_id}"
+            return "completed", "candidate ready"
+
+        self.adapter.qwen_result = result_without_second_change
+        self.adapter.reviews = [
+            GateResult(False, "review formatting rejected", "VERDICT: REJECT"),
+            GateResult(True, "approved", "VERDICT: APPROVE"),
+        ]
+        state = self.run_until_terminal()
+        self.assertEqual(Stage.AWAIT_CODEX_REVIEW.value, state["stage"])
+        self.assertEqual(2, len(self.adapter.jobs))
+        self.assertTrue(any(
+            event["message"] == "Retry reused the existing bounded candidate"
+            for event in state["events"]
+        ))
 
     def test_active_job_timeout_blocks_without_dispatching_a_retry(self):
         timeout_plan = plan(job_timeout_seconds=30)

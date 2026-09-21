@@ -29,10 +29,15 @@ except ModuleNotFoundError:
 
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
 BRIDGE_TEMPLATE = Path.home() / ".local/share/mikrofix-bridge/config.json"
+PROPOSAL_SCHEMA = (
+    PROJECT_ROOT / "docs/local_agents/supervisor/PLAN_PROPOSAL_SCHEMA.json"
+)
 MODEL_PLAN_FIELDS = {
-    "objective", "allowed_files", "atoms", "constraints", "context_links",
-    "acceptance_criteria",
+    "objective", "allowed_files", "atoms", "constraints", "acceptance_criteria",
+    # Accepted during migration but ignored; the manager computes trusted context.
+    "context_links",
 }
+REQUIRED_MODEL_PLAN_FIELDS = MODEL_PLAN_FIELDS - {"context_links"}
 MAX_PLANNER_ATTEMPTS = 3
 
 
@@ -57,14 +62,30 @@ def parse_model_json(raw: str) -> dict[str, Any]:
     fenced = re.fullmatch(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
     if fenced:
         text = fenced.group(1)
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ManagerError(f"Planner did not return valid JSON: {exc}") from exc
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    for index, character in enumerate(text):
+        if character != "{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(value, dict)
+            and REQUIRED_MODEL_PLAN_FIELDS <= set(value)
+            and value not in values
+        ):
+            values.append(value)
+    if len(values) != 1:
+        raise ManagerError(
+            f"Planner must return exactly one JSON object; found {len(values)}"
+        )
+    value = values[0]
     if not isinstance(value, dict):
         raise ManagerError("Planner result must be one JSON object")
     unknown = sorted(set(value) - MODEL_PLAN_FIELDS)
-    missing = sorted(MODEL_PLAN_FIELDS - set(value))
+    missing = sorted(REQUIRED_MODEL_PLAN_FIELDS - set(value))
     if unknown or missing:
         raise ManagerError(f"Planner fields invalid; missing={missing}, unknown={unknown}")
     return value
@@ -79,24 +100,76 @@ def model_plan_errors(value: dict[str, Any], repository: Path) -> list[str]:
             errors.append(f"{key} must be a non-empty list")
         elif any(not isinstance(item, str) or not item.strip() for item in items):
             errors.append(f"{key} entries must be non-empty strings")
-    atoms = value.get("atoms")
-    if isinstance(atoms, list):
-        for index, atom in enumerate(atoms):
-            if isinstance(atom, dict) and not atom.get("checks"):
-                errors.append(f"atoms[{index}].checks must be a non-empty list")
-    context = value.get("context_links")
-    if not isinstance(context, dict):
-        errors.append("context_links must be an object with canon, code and tests lists")
+    allowed = value.get("allowed_files")
+    if not isinstance(allowed, list) or not allowed:
+        errors.append("allowed_files must be a non-empty list")
+        allowed_set: set[str] = set()
     else:
-        for section in ("canon", "code", "tests"):
-            paths = context.get(section)
-            if not isinstance(paths, list) or not paths:
-                errors.append(f"context_links.{section} must be a non-empty list")
+        allowed_set = {item for item in allowed if isinstance(item, str)}
+    atoms = value.get("atoms")
+    if not isinstance(atoms, list) or not atoms:
+        errors.append("atoms must be a non-empty list")
+    else:
+        for index, atom in enumerate(atoms):
+            if not isinstance(atom, dict):
+                errors.append(f"atoms[{index}] must be an object")
                 continue
-            for relative in paths:
-                if not isinstance(relative, str) or not (repository / relative).is_file():
-                    errors.append(f"context_links.{section} missing file: {relative}")
+            expected = atom.get("expected_files")
+            if not isinstance(expected, list) or not expected:
+                errors.append(f"atoms[{index}].expected_files must be a non-empty list")
+            elif not set(expected) <= allowed_set:
+                errors.append(f"atoms[{index}].expected_files must be inside allowed_files")
     return errors
+
+
+def trusted_checks(paths: list[str]) -> list[str]:
+    """Select bounded checks from file types; the model never chooses commands."""
+    checks = ["syntax_changed_python"]
+    if any(path == "test_v32_central_api.py" or "central_" in path for path in paths):
+        checks.append("central_api_tests")
+    elif any(path.endswith(".py") for path in paths):
+        checks.append("desktop_unit_tests")
+    return list(dict.fromkeys(checks))
+
+
+def first_existing(repository: Path, candidates: list[str]) -> str:
+    for relative in candidates:
+        if (repository / relative).is_file():
+            return relative
+    raise ManagerError("Trusted context is missing from the agent repository")
+
+
+def trusted_context(repository: Path, allowed_files: list[str]) -> dict[str, list[str]]:
+    """Build context exclusively from verified repository paths."""
+    existing_allowed = [path for path in allowed_files if (repository / path).is_file()]
+    code = existing_allowed[:4] or [first_existing(repository, [
+        "docs/local_agents/README.md", "README_v30.txt", "AGENTS.md",
+    ])]
+    central = any("central" in path for path in allowed_files)
+    test_candidates = (
+        ["test_v32_central_api.py"] if central else
+        ["tests/test_mikrofix_supervisor.py", "test_v32_application_entrypoints.py"]
+    )
+    verified_test = next(
+        (candidate for candidate in test_candidates if (repository / candidate).is_file()),
+        None,
+    )
+    if verified_test is None:
+        fallback_tests = sorted(
+            path.relative_to(repository).as_posix()
+            for path in repository.rglob("test*.py")
+            if path.is_file() and ".git" not in path.parts
+        )
+        if not fallback_tests:
+            raise ManagerError("Trusted test context is missing from the agent repository")
+        verified_test = fallback_tests[0]
+    return {
+        "canon": [first_existing(repository, [
+            "AGENTS.md", "docs/local_agents/README.md",
+        ])],
+        "code": code,
+        "tests": [verified_test],
+    }
 
 
 def normalize_plan(raw: str, *, run_id: str, repository: Path) -> dict[str, Any]:
@@ -105,8 +178,20 @@ def normalize_plan(raw: str, *, run_id: str, repository: Path) -> dict[str, Any]
     if preliminary_errors:
         raise ManagerError("; ".join(preliminary_errors))
     head = command(["git", "rev-parse", "HEAD"], cwd=repository, timeout=30)
+    allowed_files = list(model_plan["allowed_files"])
+    atoms = [{
+        "id": atom["id"],
+        "task": atom["task"],
+        "expected_files": list(atom["expected_files"]),
+        "checks": trusted_checks(list(atom["expected_files"])),
+    } for atom in model_plan["atoms"]]
     plan = {
-        **model_plan,
+        "objective": model_plan["objective"],
+        "allowed_files": allowed_files,
+        "atoms": atoms,
+        "constraints": list(model_plan["constraints"]),
+        "acceptance_criteria": list(model_plan["acceptance_criteria"]),
+        "context_links": trusted_context(repository, allowed_files),
         "run_id": run_id,
         "base_checkpoint": head,
         "max_retries_per_atom": 3,
@@ -114,14 +199,6 @@ def normalize_plan(raw: str, *, run_id: str, repository: Path) -> dict[str, Any]
         "final_gate": "AWAIT_CODEX_REVIEW",
     }
     validated = validate_plan(plan)
-    missing_context = sorted({
-        relative
-        for values in validated["context_links"].values()
-        for relative in values
-        if not (repository / relative).is_file()
-    })
-    if missing_context:
-        raise ManagerError("Planner referenced missing context files: " + ", ".join(missing_context))
     if validated["objective"].startswith("BLOCKED:"):
         raise ManagerError(validated["objective"])
     return validated
@@ -204,6 +281,7 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         # Planner jobs are internal stages. Only the final supervised run may
         # tell the owner that the task itself has finished.
         "completion_policy": "supervisor_only",
+        "response_format": json.loads(PROPOSAL_SCHEMA.read_text(encoding="utf-8")),
         "agent_role": "GPT-OSS — lokalni vodja načrtovanja",
     })
     executor_env = {

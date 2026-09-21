@@ -94,16 +94,28 @@ class LocalManagerTests(unittest.TestCase):
                 run_id="MF-LOCAL-1", repository=self.repository,
             )
 
-    def test_empty_atom_checks_are_semantic_failure_for_retry(self):
+    def test_parser_accepts_one_structured_object_with_surrounding_text(self):
+        raw = "Planner note before\n" + json.dumps(model_plan()) + "\nDone."
+        parsed = manager.parse_model_json(raw)
+        self.assertEqual("Implement one bounded behavior", parsed["objective"])
+        with self.assertRaisesRegex(manager.ManagerError, "exactly one JSON object"):
+            manager.parse_model_json(
+                json.dumps(model_plan()) + "\n" + json.dumps(model_plan(objective="two"))
+            )
+
+    def test_model_checks_are_ignored_and_trusted_checks_are_added(self):
         invalid = model_plan(atoms=[{
             "id": "A1", "task": "Write documentation",
             "checks": [], "expected_files": ["app.py"],
         }])
-        with self.assertRaisesRegex(manager.ManagerError, "checks must be a non-empty list"):
-            manager.normalize_plan(
-                json.dumps(invalid), run_id="MF-LOCAL-1",
-                repository=self.repository,
-            )
+        plan = manager.normalize_plan(
+            json.dumps(invalid), run_id="MF-LOCAL-1",
+            repository=self.repository,
+        )
+        self.assertEqual(
+            ["syntax_changed_python", "desktop_unit_tests"],
+            plan["atoms"][0]["checks"],
+        )
         prompt = manager.planner_prompt("Write documentation", "checks are empty")
         self.assertIn("PREJŠNJI IZHOD JE BIL ZAVRNJEN", prompt)
         self.assertIn("checks are empty", prompt)
@@ -126,15 +138,14 @@ class LocalManagerTests(unittest.TestCase):
         message = str(raised.exception)
         self.assertIn("constraints must be a non-empty list", message)
         self.assertIn("acceptance_criteria must be a non-empty list", message)
-        self.assertIn("missing-canon.md", message)
-        self.assertIn("missing-test.py", message)
-        with self.assertRaisesRegex(manager.ManagerError, "missing file"):
-            manager.normalize_plan(
-                json.dumps(model_plan(context_links={
-                    "canon": ["missing.md"], "code": ["app.py"],
-                    "tests": ["tests/test_app.py"],
-                })), run_id="MF-LOCAL-1", repository=self.repository,
-            )
+        trusted = manager.normalize_plan(
+            json.dumps(model_plan(context_links={
+                "canon": ["missing.md"], "code": ["missing.py"],
+                "tests": ["missing-test.py"],
+            })), run_id="MF-LOCAL-1", repository=self.repository,
+        )
+        self.assertEqual(["AGENTS.md"], trusted["context_links"]["canon"])
+        self.assertEqual(["tests/test_app.py"], trusted["context_links"]["tests"])
 
     def test_submit_persists_request_and_validated_plan_without_codex(self):
         calls = []

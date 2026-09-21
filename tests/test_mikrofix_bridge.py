@@ -76,6 +76,21 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual(THREAD_ID, persisted["codex_thread_id"])
         self.assertEqual("Readable task", persisted["display_name"])
 
+    def test_optional_response_schema_is_forwarded_to_ollama(self):
+        schema = {"type": "object", "required": ["objective"]}
+        calls = []
+
+        def fake_request(url, **kwargs):
+            calls.append((url, kwargs))
+            return {"message": {"content": "{}"}}
+
+        with (
+            mock.patch.object(self.bridge, "RESPONSE_FORMAT", schema),
+            mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
+        ):
+            self.bridge.call_qwen([{"role": "user", "content": "plan"}])
+        self.assertEqual(schema, calls[0][1]["data"]["format"])
+
     def test_terminal_notification_is_at_most_once_across_replay(self):
         job = self.bridge.create_job(
             "Finish safely", display_name="Safe finish", codex_thread_id=THREAD_ID

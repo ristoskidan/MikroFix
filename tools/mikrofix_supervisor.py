@@ -70,6 +70,8 @@ CONTROL_PLANE_FILES = {
     "docs/local_agents/LEKCIJE.md",
     "docs/local_agents/WORKSPACE.md",
     "docs/local_agents/supervisor/PLANNER_SYSTEM.md",
+    "docs/local_agents/supervisor/PLAN_PROPOSAL_SCHEMA.json",
+    "docs/local_agents/supervisor/PROTOCOL_V2.md",
     "desktop/mikrofix-local-manager.desktop",
     "desktop/mikrofix-local-manager-autostart.desktop",
 }
@@ -1167,25 +1169,35 @@ class Supervisor:
         if stage is Stage.DIFF_VERIFICATION:
             current = self.adapter.snapshot()
             changed = changed_paths(run["dispatch_snapshot"], current)
+            total_changed = changed_paths(run["initial_snapshot"], current)
             allowed = set(run["plan"]["allowed_files"])
-            outside = sorted(changed - allowed)
+            outside = sorted(total_changed - allowed)
             atom = run["plan"]["atoms"][run["atom_index"]]
-            missing = sorted(set(atom["expected_files"]) - changed)
+            expected = set(atom["expected_files"])
+            expected_changed = expected & total_changed
+            missing = sorted(expected - total_changed)
+            review_paths = changed | expected_changed
             if outside:
                 run["feedback"] = f"Files outside allowed_files changed: {outside}"
                 record(run, Stage.BLOCKED,
                        "Out-of-scope workspace mutation; manual inspection required")
-            elif not changed:
+            elif not review_paths:
                 retry_or_block(run, "No actual workspace change was detected")
             elif missing:
                 retry_or_block(run, f"Expected files did not change: {missing}")
             else:
-                run["diff"] = self.adapter.diff(sorted(changed))
+                run["diff"] = self.adapter.diff(sorted(review_paths))
                 if not run["diff"].strip():
                     retry_or_block(run, "Changed files produced an empty diff artifact")
                 else:
+                    if not changed and expected_changed:
+                        record(
+                            run,
+                            Stage.DIFF_VERIFICATION,
+                            "Retry reused the existing bounded candidate",
+                        )
                     record(run, Stage.LOCAL_TESTS,
-                           f"Diff accepted for files: {', '.join(sorted(changed))}")
+                           f"Diff accepted for files: {', '.join(sorted(review_paths))}")
             self.save(run)
             if run["stage"] in TERMINAL_STAGES:
                 self.notify_terminal(run)
@@ -1204,11 +1216,23 @@ class Supervisor:
             return True
         if stage is Stage.GPT_OSS_REVIEW:
             atom = run["plan"]["atoms"][run["atom_index"]]
+            criteria = "\n".join(
+                f"{index}. {criterion}"
+                for index, criterion in enumerate(
+                    run["plan"]["acceptance_criteria"], start=1
+                )
+            )
             prompt = (
-                f"Review atom {atom['id']}: {atom['task']}. Reject defects, scope "
-                "drift, missing regression coverage, destructive behavior, and "
-                "unsupported completion claims. End with exactly VERDICT: APPROVE "
-                "or VERDICT: REJECT."
+                f"Review atom {atom['id']}: {atom['task']}.\n"
+                f"Objective: {run['plan']['objective']}\n"
+                f"Allowed files: {', '.join(run['plan']['allowed_files'])}\n"
+                f"Expected files: {', '.join(atom['expected_files'])}\n"
+                "For every numbered acceptance criterion below, emit PASS or FAIL "
+                "with concrete evidence from the diff or tests. Reject any defect, "
+                "scope drift, missing regression coverage, destructive behavior, "
+                "or unsupported completion claim.\n"
+                f"ACCEPTANCE CRITERIA:\n{criteria}\n"
+                "End with exactly one final line: VERDICT: APPROVE or VERDICT: REJECT."
             )
             material = run["diff"] + "\n\nTEST EVIDENCE:\n" + run["test_evidence"]
             result = self.adapter.review(prompt, material)
