@@ -36,6 +36,7 @@ def _atomic_text(path: Path, content: str) -> None:
 def ensure_lead_session(
     project_root: Path, home: Path, *, sources: tuple[str, ...] = SOURCES,
     memory_name: str = "GPT_OSS_LEAD_MEMORY.md",
+    profile_snapshot_hash: str = "", model: str = "", model_digest: str = "",
 ) -> dict[str, object]:
     """Create or refresh the one parent context without model-side file reads."""
     project_root = project_root.resolve()
@@ -60,8 +61,18 @@ def ensure_lead_session(
             old = json.loads(state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
             old = {}
+    identity = {
+        "profile_snapshot_hash": profile_snapshot_hash,
+        "model": model,
+        "model_digest": model_digest,
+    }
+    same_identity = all(old.get(key, "") == value for key, value in identity.items())
     same_context = old.get("memory_sha256") == memory_hash
-    session_id = str(old.get("session_id") or f"LEAD-{uuid.uuid4().hex[:16]}")
+    session_id = str(
+        old.get("session_id")
+        if same_identity and old.get("session_id")
+        else f"LEAD-{uuid.uuid4().hex[:16]}"
+    )
     memory_file = home / memory_name
     if not memory_file.is_file() or not same_context:
         _atomic_text(memory_file, memory)
@@ -91,6 +102,7 @@ def ensure_lead_session(
         "memory_file": str(memory_file),
         "memory_sha256": memory_hash,
         "source_manifest": manifest,
+        **identity,
     }
     if acknowledged:
         state["acknowledgement_file"] = str(acknowledgement_file)
@@ -125,10 +137,13 @@ def ensure_context_ready(
     num_ctx: int = 131072, keep_alive: str = "30m",
     sources: tuple[str, ...] = SOURCES,
     memory_name: str = "GPT_OSS_LEAD_MEMORY.md",
+    profile_snapshot_hash: str = "", model_digest: str = "",
 ) -> dict[str, object]:
     """Ask the lead for one acknowledgement only when trusted context changed."""
     state = ensure_lead_session(
-        project_root, home, sources=sources, memory_name=memory_name
+        project_root, home, sources=sources, memory_name=memory_name,
+        profile_snapshot_hash=profile_snapshot_hash, model=model,
+        model_digest=model_digest,
     )
     if state["state"] == "CONTEXT_READY":
         return state

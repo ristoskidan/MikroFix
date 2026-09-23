@@ -23,6 +23,13 @@ try:
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
     )
+    from tools.mikrofix_task_lifecycle import (
+        TaskState, build_profile_snapshot, initialize_task_lifecycle,
+        load_profile_registry, read_profile_snapshot, read_task_state,
+        read_system_prompt_snapshot, record_task_event, resolve_ollama_digest,
+        sha256_text, transition_task, write_profile_snapshot,
+        write_system_prompt_snapshot,
+    )
 except ModuleNotFoundError:
     from mikrofix_lead_session import (  # type: ignore[no-redef]
         PLANNING_SOURCES, ensure_context_ready,
@@ -31,10 +38,18 @@ except ModuleNotFoundError:
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
     )
+    from mikrofix_task_lifecycle import (  # type: ignore[no-redef]
+        TaskState, build_profile_snapshot, initialize_task_lifecycle,
+        load_profile_registry, read_profile_snapshot, read_task_state,
+        read_system_prompt_snapshot, record_task_event, resolve_ollama_digest,
+        sha256_text, transition_task, write_profile_snapshot,
+        write_system_prompt_snapshot,
+    )
 
 
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
 BRIDGE_TEMPLATE = Path.home() / ".local/share/mikrofix-bridge/config.json"
+PROFILE_REGISTRY = PROJECT_ROOT / "config/local_agents/lead_profiles.json"
 PROPOSAL_SCHEMA = (
     PROJECT_ROOT / "docs/local_agents/supervisor/PLAN_PROPOSAL_SCHEMA.json"
 )
@@ -121,6 +136,31 @@ def binding_owner_criterion(owner_request: str) -> str:
 
 class ManagerError(RuntimeError):
     pass
+
+
+def enabled_lead_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        profile_id: profile
+        for profile_id, profile in load_profile_registry(
+            PROFILE_REGISTRY, PROJECT_ROOT
+        ).items()
+        if profile["enabled"]
+    }
+
+
+def snapshot_for_new_task(
+    lead_profile: str, *,
+    digest_resolver: Callable[[str, str], str] = resolve_ollama_digest,
+) -> dict[str, Any]:
+    profiles = enabled_lead_profiles()
+    if lead_profile not in profiles:
+        raise ManagerError(f"Unknown or disabled lead profile: {lead_profile}")
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    profile = profiles[lead_profile]
+    digest = digest_resolver(str(template["ollama_url"]), str(profile["model"]))
+    return build_profile_snapshot(
+        profile, project_root=PROJECT_ROOT, model_digest=digest,
+    )
 
 
 def command(args: list[str], *, cwd: Path, env: dict[str, str] | None = None,
@@ -566,13 +606,13 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
 
 def lead_conversation_prompt(
     message: str, *, parent_run_id: str, turns: list[dict[str, str]],
-    lead_profile: str,
+    lead_profile: str, lead_display_name: str | None = None,
 ) -> str:
     """Build one bounded continuation turn for one isolated persistent lead."""
-    profile_name = (
-        "Qwen Thinking vodja" if lead_profile == "qwen_thinking"
-        else "GPT-OSS vodja"
-    )
+    profile_name = lead_display_name or {
+        "qwen_thinking": "Qwen Thinking vodja",
+        "gpt_oss": "GPT-OSS vodja",
+    }.get(lead_profile, lead_profile)
     history = turns[-MAX_CONVERSATION_TURNS:]
     rendered_history = "\n\n".join(
         ("LASTNIK" if turn.get("role") == "owner" else profile_name.upper())
@@ -597,29 +637,26 @@ def lead_conversation_prompt(
 def run_lead_conversation(
     message: str, *, job_dir: Path, repository: Path,
     turns: list[dict[str, str]], lead_profile: str = "gpt_oss",
+    lead_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Ask only the selected persistent lead through a read-only executor."""
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    snapshot = lead_snapshot or read_profile_snapshot(job_dir)
+    if snapshot["profile_id"] != lead_profile:
+        raise ManagerError("Conversation profile differs from its immutable snapshot")
     base_home = Path.home() / ".local/share/mikrofix-bridge/lead-profiles"
-    if lead_profile == "qwen_thinking":
-        lead_home = base_home / "qwen-thinking"
-        model = str(template.get("planning_advisor_model", QWEN_PLANNER_MODEL))
-        num_ctx = int(template.get("qwen_lead_num_ctx") or 131072)
-        keep_alive = str(template.get("qwen_lead_keep_alive") or "30m")
-        think: bool | str = True
-        role = "Qwen Thinking — glavni lokalni vodja v pogovoru"
-    elif lead_profile == "gpt_oss":
-        lead_home = base_home / "gpt-oss"
-        model = str(template.get("model", "gpt-oss:20b"))
-        num_ctx = int(template.get("num_ctx") or 131072)
-        keep_alive = str(template.get("lead_keep_alive") or "30m")
-        think = "low"
-        role = "GPT-OSS — glavni lokalni vodja v pogovoru"
-    else:
-        raise ManagerError(f"Unknown lead profile: {lead_profile}")
+    lead_home = base_home / lead_profile / job_dir.name
+    model = str(snapshot["model"])
+    num_ctx = int(snapshot["num_ctx"])
+    keep_alive = str(snapshot["keep_alive"])
+    think: bool | str = snapshot["think"]
+    role = f"{snapshot['display_name']} — glavni lokalni vodja v pogovoru"
+    system_prompt = read_system_prompt_snapshot(job_dir, snapshot)
     lead = ensure_context_ready(
         PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
         model=model, num_ctx=num_ctx, keep_alive=keep_alive,
+        profile_snapshot_hash=str(snapshot["profile_snapshot_hash"]),
+        model_digest=str(snapshot["model_digest"]),
     )
 
     turn_dir = job_dir / "conversation-runtime" / "turns" / f"turn-{time.time_ns()}"
@@ -639,7 +676,7 @@ def run_lead_conversation(
         "executor_url": executor_url,
         "token_file": str(token_file),
         "project": str(repository),
-        "system_prompt": str(LEAD_CONVERSATION_SYSTEM),
+        "system_prompt": str(system_prompt),
         "project_memory": str(lead["memory_file"]),
         "parent_session_id": str(lead["session_id"]),
         "num_ctx": num_ctx,
@@ -677,6 +714,7 @@ def run_lead_conversation(
         prompt = lead_conversation_prompt(
             message, parent_run_id=job_dir.name, turns=turns,
             lead_profile=lead_profile,
+            lead_display_name=str(snapshot["display_name"]),
         )
         bridge_job_id = command(
             bridge + ["dispatch", "--name", f"Neposredni pogovor: {role}",
@@ -710,6 +748,10 @@ def run_lead_conversation(
             "memory_sha256": str(lead["memory_sha256"]),
             "trace_root": str(bridge_home / "jobs"),
             "lead_profile": lead_profile,
+            "model": model,
+            "model_digest": str(snapshot["model_digest"]),
+            "profile_snapshot_hash": str(snapshot["profile_snapshot_hash"]),
+            "prompt_hash": sha256_text(prompt),
         }
     finally:
         process.terminate()
@@ -743,6 +785,7 @@ def talk(
     lock_path = job_dir / "conversation.lock"
     with lock_path.open("a+", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        snapshot = read_profile_snapshot(job_dir)
         conversation: dict[str, Any] = {}
         if conversation_file.is_file():
             try:
@@ -752,6 +795,10 @@ def talk(
             except (OSError, json.JSONDecodeError):
                 conversation = {}
         locked_profile = str(conversation.get("lead_profile") or "")
+        if snapshot["profile_id"] != lead_profile:
+            raise ManagerError(
+                "Ta pogovor je zaklenjen na drug immutable profil vodje."
+            )
         if locked_profile and locked_profile != lead_profile:
             raise ManagerError(
                 "Ta pogovor je zaklenjen na drug profil vodje. Za drugi profil "
@@ -762,11 +809,17 @@ def talk(
             turns = []
         decision, evidence = responder(
             clean_message, job_dir=job_dir, repository=repository, turns=turns,
-            lead_profile=lead_profile,
+            lead_profile=lead_profile, lead_snapshot=snapshot,
         )
         routing = str(decision["routing"])
         reply = str(decision["reply"]).strip()
         routed_run_id = ""
+        event_hashes = {
+            "prompt_hash": evidence.get("prompt_hash") or None,
+            "context_pack_hash": evidence.get("memory_sha256") or None,
+            "input_hash": sha256_text(clean_message),
+            "output_hash": sha256_text(reply),
+        }
         if routing == "READY_FOR_PROCESSING":
             ready_task = str(decision.get("ready_task") or "").strip()
             proposal = {
@@ -783,14 +836,38 @@ def talk(
                 raise ManagerError(
                     "READY_FOR_PROCESSING plan is incomplete: " + "; ".join(errors)
                 )
+            lifecycle = read_task_state(job_dir)
+            if lifecycle["state"] == TaskState.DRAFT.value:
+                transition_task(
+                    job_dir, TaskState.READY_FOR_PROCESSING,
+                    snapshot=snapshot, actor_type="lead", actor_id=lead_profile,
+                    event_type="LEAD_PROPOSED_PLAN", **event_hashes,
+                )
+            elif lifecycle["state"] != TaskState.READY_FOR_PROCESSING.value:
+                raise ManagerError(
+                    f"Conversation cannot route from task state {lifecycle['state']}"
+                )
             routed = submit(
                 ready_task, workspace=workspace,
                 generator=lambda _task, **_kwargs: json.dumps(
                     proposal, ensure_ascii=False
                 ),
                 initialize=True, parent_run_id=parent_run_id,
+                lead_snapshot=snapshot,
             )
             routed_run_id = str(routed["run_id"])
+            transition_task(
+                job_dir, TaskState.AWAITING_OWNER_APPROVAL,
+                snapshot=snapshot, actor_type="manager", actor_id="manager",
+                output_hash=sha256_text(json.dumps(proposal, sort_keys=True)),
+                details={"routed_run_id": routed_run_id},
+            )
+        else:
+            record_task_event(
+                job_dir, snapshot=snapshot, event_type="LEAD_MESSAGE",
+                actor_type="lead", actor_id=lead_profile, **event_hashes,
+                details={"routing": routing},
+            )
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         turns.extend([
             {"role": "owner", "content": clean_message, "at": stamp},
@@ -817,16 +894,24 @@ def start_conversation(
     message: str, *, workspace: Path = DEFAULT_WORKSPACE,
     lead_profile: str = "gpt_oss",
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+    snapshot_factory: Callable[[str], dict[str, Any]] = snapshot_for_new_task,
 ) -> dict[str, Any]:
     """Create one owner-visible conversation root, then ask only its chosen lead."""
     workspace = workspace.expanduser().resolve()
     clean_message = message.strip()
     if not clean_message:
         raise ManagerError("Conversation message must not be empty")
-    if lead_profile not in {"gpt_oss", "qwen_thinking"}:
-        raise ManagerError("Unknown lead profile")
     # Validate the workspace before creating a durable root.
-    json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    workspace_config = json.loads(
+        (workspace / "workspace.json").read_text(encoding="utf-8")
+    )
+    repository = Path(workspace_config["repository"]).resolve()
+    checkpoint = command(
+        ["git", "rev-parse", "HEAD"], cwd=repository, timeout=30,
+    ).strip()
+    snapshot = snapshot_factory(lead_profile)
+    if snapshot.get("profile_id") != lead_profile:
+        raise ManagerError("Snapshot factory returned a different lead profile")
     run_id = new_run_id(workspace)
     job_dir = workspace / "jobs" / run_id
     job_dir.mkdir(parents=True, mode=0o700)
@@ -835,7 +920,18 @@ def start_conversation(
         "schema_version": 1, "run_id": run_id, "task": clean_message,
         "parent_run_id": None, "created_at": stamp,
         "lead_profile": lead_profile, "kind": "lead_conversation",
+        "model": snapshot["model"], "model_tag": snapshot["model_tag"],
+        "model_digest": snapshot["model_digest"],
+        "profile_snapshot_hash": snapshot["profile_snapshot_hash"],
     })
+    write_profile_snapshot(job_dir, snapshot)
+    write_system_prompt_snapshot(
+        job_dir, project_root=PROJECT_ROOT, snapshot=snapshot,
+    )
+    initialize_task_lifecycle(
+        job_dir, task_id=run_id, conversation_id=run_id,
+        snapshot=snapshot, input_text=clean_message, checkpoint=checkpoint,
+    )
     atomic_write_json(job_dir / "manager.json", {
         "schema_version": 1, "run_id": run_id, "state": "CONVERSATION",
         "lead_profile": lead_profile,
@@ -851,6 +947,15 @@ def start_conversation(
             lead_profile=lead_profile, responder=responder,
         )
     except BaseException as exc:
+        try:
+            if read_task_state(job_dir)["state"] != TaskState.BLOCKED.value:
+                transition_task(
+                    job_dir, TaskState.BLOCKED, snapshot=snapshot,
+                    actor_type="manager", actor_id="manager",
+                    event_type="TASK_BLOCKED", details={"reason": str(exc)},
+                )
+        except BaseException:
+            pass
         atomic_write_json(job_dir / "manager.json", {
             "schema_version": 1, "run_id": run_id, "state": "BLOCKED",
             "lead_profile": lead_profile, "exact_reason": str(exc),
@@ -871,7 +976,8 @@ def new_run_id(workspace: Path) -> str:
 def submit(task: str, *, workspace: Path = DEFAULT_WORKSPACE,
            generator: Callable[..., str] = run_planner,
            initialize: bool = True,
-           parent_run_id: str | None = None) -> dict[str, Any]:
+           parent_run_id: str | None = None,
+           lead_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     workspace = workspace.expanduser().resolve()
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()
@@ -887,7 +993,12 @@ def submit(task: str, *, workspace: Path = DEFAULT_WORKSPACE,
         "schema_version": 1, "run_id": run_id, "task": task,
         "parent_run_id": parent_run_id,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "profile_snapshot_hash": (
+            lead_snapshot["profile_snapshot_hash"] if lead_snapshot else None
+        ),
     })
+    if lead_snapshot is not None:
+        write_profile_snapshot(job_dir, lead_snapshot)
     state = {"schema_version": 1, "run_id": run_id, "state": "PLANNING"}
     atomic_write_json(job_dir / "manager.json", state)
     try:
@@ -929,6 +1040,20 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
         raise ManagerError(
             f"Run {run_id} is not ready for execution: {state.get('state')}"
         )
+    request_file = job_dir / "request.json"
+    request = (
+        json.loads(request_file.read_text(encoding="utf-8"))
+        if request_file.is_file() else {}
+    )
+    parent_run_id = request.get("parent_run_id")
+    lifecycle_dir = (
+        workspace / "jobs" / str(parent_run_id)
+        if parent_run_id else job_dir
+    )
+    lifecycle_snapshot = (
+        read_profile_snapshot(lifecycle_dir)
+        if (lifecycle_dir / "task-state.json").is_file() else None
+    )
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()
     supervisor_state = Path(state["supervisor_state"]).resolve()
@@ -949,6 +1074,18 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
                         "--state", str(supervisor_state)],
                 cwd=PROJECT_ROOT, timeout=360)
         lease_granted = True
+        if lifecycle_snapshot is not None:
+            transition_task(
+                lifecycle_dir, TaskState.APPROVED,
+                snapshot=lifecycle_snapshot, actor_type="owner", actor_id="owner",
+                event_type="OWNER_APPROVED_PLAN",
+                details={"run_id": run_id, "lease_minutes": lease_minutes},
+            )
+            transition_task(
+                lifecycle_dir, TaskState.EXECUTING,
+                snapshot=lifecycle_snapshot, actor_type="manager", actor_id="manager",
+                details={"run_id": run_id},
+            )
         state["state"] = "RUNNING_LOCAL"
         state.pop("exact_reason", None)
         atomic_write_json(manager_file, state)
@@ -963,6 +1100,34 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
         state["local_stage"] = stage
         state["checkpoint"] = supervisor.get("checkpoint")
         state["exact_reason"] = supervisor.get("feedback", "")
+        if lifecycle_snapshot is not None:
+            if stage == "AWAIT_CODEX_REVIEW":
+                transition_task(
+                    lifecycle_dir, TaskState.LEAD_REVIEW,
+                    snapshot=lifecycle_snapshot, actor_type="supervisor",
+                    actor_id="mikrofix_supervisor", details={"run_id": run_id},
+                )
+                transition_task(
+                    lifecycle_dir, TaskState.CANDIDATE_READY,
+                    snapshot=lifecycle_snapshot, actor_type="lead",
+                    actor_id=str(lifecycle_snapshot["profile_id"]),
+                    event_type="LEAD_ACCEPTED_CANDIDATE",
+                    checkpoint=supervisor.get("checkpoint"),
+                    details={"run_id": run_id},
+                )
+                transition_task(
+                    lifecycle_dir, TaskState.AWAITING_CODEX,
+                    snapshot=lifecycle_snapshot, actor_type="manager",
+                    actor_id="manager", checkpoint=supervisor.get("checkpoint"),
+                    details={"run_id": run_id},
+                )
+            else:
+                transition_task(
+                    lifecycle_dir, TaskState.BLOCKED,
+                    snapshot=lifecycle_snapshot, actor_type="supervisor",
+                    actor_id="mikrofix_supervisor", event_type="TASK_BLOCKED",
+                    details={"run_id": run_id, "reason": state["exact_reason"]},
+                )
     except Exception as exc:
         # A dismissed or timed-out owner prompt changes no candidate state.
         # Keep the validated plan reusable instead of forcing replanning.
@@ -971,6 +1136,17 @@ def execute_run(run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
             else "BLOCKED"
         )
         state["exact_reason"] = str(exc)
+        if lease_granted and lifecycle_snapshot is not None:
+            try:
+                if read_task_state(lifecycle_dir)["state"] != TaskState.BLOCKED.value:
+                    transition_task(
+                        lifecycle_dir, TaskState.BLOCKED,
+                        snapshot=lifecycle_snapshot, actor_type="manager",
+                        actor_id="manager", event_type="TASK_BLOCKED",
+                        details={"run_id": run_id, "reason": str(exc)},
+                    )
+            except BaseException:
+                pass
         raise
     finally:
         if workers_started:
@@ -993,13 +1169,13 @@ def parse_args() -> argparse.Namespace:
     start_parser = sub.add_parser("start")
     start_parser.add_argument("--message", required=True)
     start_parser.add_argument(
-        "--profile", choices=("gpt_oss", "qwen_thinking"), default="gpt_oss"
+        "--profile", choices=tuple(enabled_lead_profiles()), default="gpt_oss"
     )
     talk_parser = sub.add_parser("talk")
     talk_parser.add_argument("--message", required=True)
     talk_parser.add_argument("--parent", required=True)
     talk_parser.add_argument(
-        "--profile", choices=("gpt_oss", "qwen_thinking"), default="gpt_oss"
+        "--profile", choices=tuple(enabled_lead_profiles()), default="gpt_oss"
     )
     execute_parser = sub.add_parser("execute")
     execute_parser.add_argument("run_id")

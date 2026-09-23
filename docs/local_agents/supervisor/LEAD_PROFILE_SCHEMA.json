@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mikrofix.local/schemas/lead-profile-registry-v1.json",
+  "title": "MikroFIX lead profile registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profiles"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profiles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z0-9_]+$"},
+      "additionalProperties": {"$ref": "#/$defs/profile"}
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version", "model", "role", "display_name", "num_ctx", "think",
+        "system_prompt", "keep_alive", "enabled"
+      ],
+      "properties": {
+        "version": {"type": "integer", "minimum": 1},
+        "model": {"type": "string", "minLength": 1},
+        "role": {"type": "string", "minLength": 1},
+        "display_name": {"type": "string", "minLength": 1},
+        "num_ctx": {"type": "integer", "minimum": 1024},
+        "think": {"oneOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}]},
+        "system_prompt": {"type": "string", "minLength": 1},
+        "keep_alive": {"type": "string", "minLength": 1},
+        "enabled": {"type": "boolean"}
+      }
+    }
+  }
+}

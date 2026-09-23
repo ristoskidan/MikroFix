@@ -47,6 +47,26 @@ class LeadSessionTests(unittest.TestCase):
             self.assertEqual(first["session_id"], changed["session_id"])
             self.assertEqual("AWAITING_CONTEXT_ACK", changed["state"])
 
+    def test_changed_model_identity_gets_a_new_parent_session(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "project"
+            home = Path(temporary) / "state"
+            for relative in SOURCES:
+                source = root / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("base\n", encoding="utf-8")
+            first = ensure_lead_session(
+                root, home, profile_snapshot_hash="a" * 64,
+                model="model:first", model_digest="b" * 64,
+            )
+            changed = ensure_lead_session(
+                root, home, profile_snapshot_hash="c" * 64,
+                model="model:second", model_digest="d" * 64,
+            )
+            self.assertNotEqual(first["session_id"], changed["session_id"])
+            self.assertEqual("model:second", changed["model"])
+            self.assertEqual("d" * 64, changed["model_digest"])
+
 
 if __name__ == "__main__":
     unittest.main()

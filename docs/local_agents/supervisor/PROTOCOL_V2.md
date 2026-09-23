@@ -58,6 +58,36 @@ Notranji modelni odgovor ni terminalno stanje. Lastnik prejme zaključno
 obvestilo samo za `READY_FOR_CODEX_REVIEW`, `BLOCKED` ali `FAILED` celotnega
 teka.
 
+Nad temi izvedbenimi stanji je življenjski cikel lastnikove naloge:
+
+```text
+DRAFT -> READY_FOR_PROCESSING -> AWAITING_OWNER_APPROVAL -> APPROVED
+      -> EXECUTING -> LEAD_REVIEW -> CANDIDATE_READY -> AWAITING_CODEX
+      -> CODEX_APPROVED -> APPLIED
+      -> CODEX_REJECTED -> LEAD_REVIEW
+```
+
+Varnostna napaka lahko aktivno stanje premakne v terminalni `BLOCKED`.
+Prehodi so navedeni v kodi kot allowlist; neznano stanje ali prehod se zavrne
+brez spremembe stanja in brez audit dogodka. Izvedbeni `Stage` supervisorja
+ostane ločen in še naprej upravlja lease, worktree, teste in checkpoint.
+
+## Profil in revizijska sled
+
+`config/local_agents/lead_profiles.json` je deklarativen registry za nove
+naloge. Ob nastanku naloge manager razreši dejanski lokalni Ollama digest ter
+ustvari read-only `lead-profile-snapshot.json` in natančno kopijo sistemskega
+prompta. Nadaljevanje bere izključno ta snapshot; poznejša sprememba registryja
+na staro nalogo ne vpliva. Sprememba modela ali snapshota ustvari novo parent
+sejo in ne more tiho prevzeti obstoječe zgodovine.
+
+Vsaka naloga ima append-only imenik `audit/events`. Posamezni dogodki so
+read-only datoteke z zaporedjem in `parent_event_id`; vsebujejo model, tag,
+digest, hash profila, prompta, konteksta, checkpointa ter vhodnega in izhodnega
+gradiva. Polja, ki za konkreten dogodek niso uporabna, so prisotna z vrednostjo
+`null`. Pogodbi sta zapisani v `LEAD_PROFILE_SCHEMA.json` in
+`AUDIT_EVENT_SCHEMA.json`.
+
 ## Nespremenljive garancije
 
 1. Model ne izbira ukazov ali imen preverjevalnih profilov.

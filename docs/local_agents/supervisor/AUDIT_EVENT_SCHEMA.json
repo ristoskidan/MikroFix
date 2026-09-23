@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mikrofix.local/schemas/audit-event-v1.json",
+  "title": "MikroFIX append-only audit event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "sequence", "event_id", "event_type", "task_id",
+    "conversation_id", "timestamp", "actor_type", "actor_id", "model",
+    "model_tag", "model_digest", "profile_snapshot_hash", "prompt_hash",
+    "context_pack_hash", "checkpoint", "input_hash", "output_hash",
+    "parent_event_id", "details", "event_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "event_id": {"type": "string", "format": "uuid"},
+    "event_type": {
+      "enum": [
+        "TASK_CREATED", "LEAD_SELECTED", "LEAD_MESSAGE", "LEAD_PROPOSED_PLAN",
+        "CONTEXT_REQUESTED", "CONTEXT_PACK_CREATED", "OWNER_APPROVED_PLAN",
+        "ATOM_STARTED", "ATOM_COMPLETED", "LEAD_REQUESTED_REPAIR",
+        "LEAD_ACCEPTED_CANDIDATE", "CODEX_REJECTED", "CODEX_FEEDBACK_ATTACHED",
+        "CODEX_APPROVED", "SOURCE_APPLIED", "TASK_STATE_TRANSITION", "TASK_BLOCKED"
+      ]
+    },
+    "task_id": {"type": "string", "minLength": 1},
+    "conversation_id": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "actor_type": {"type": "string", "minLength": 1},
+    "actor_id": {"type": "string", "minLength": 1},
+    "model": {"type": "string", "minLength": 1},
+    "model_tag": {"type": "string", "minLength": 1},
+    "model_digest": {"$ref": "#/$defs/sha256"},
+    "profile_snapshot_hash": {"$ref": "#/$defs/sha256"},
+    "prompt_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "context_pack_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "checkpoint": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+    "input_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "output_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "parent_event_id": {"oneOf": [{"type": "string", "format": "uuid"}, {"type": "null"}]},
+    "details": {"type": "object"},
+    "event_hash": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

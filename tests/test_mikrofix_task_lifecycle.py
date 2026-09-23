@@ -1,0 +1,166 @@
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+from tools.mikrofix_task_lifecycle import (
+    LifecycleError,
+    TaskState,
+    build_profile_snapshot,
+    initialize_task_lifecycle,
+    load_profile_registry,
+    read_profile_snapshot,
+    read_task_state,
+    transition_task,
+    write_profile_snapshot,
+    write_system_prompt_snapshot,
+)
+
+
+DIGEST_A = "a" * 64
+DIGEST_B = "b" * 64
+
+
+class TaskLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.project = self.root / "project"
+        self.job = self.root / "job"
+        prompt = self.project / "docs" / "lead.md"
+        prompt.parent.mkdir(parents=True)
+        prompt.write_text("lead prompt\n", encoding="utf-8")
+        self.registry_path = self.project / "profiles.json"
+        self.write_registry("model:first")
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def write_registry(self, model):
+        self.registry_path.write_text(json.dumps({
+            "schema_version": 1,
+            "profiles": {
+                "test_lead": {
+                    "version": 1,
+                    "model": model,
+                    "role": "lead",
+                    "display_name": "Test lead",
+                    "num_ctx": 4096,
+                    "think": True,
+                    "system_prompt": "docs/lead.md",
+                    "keep_alive": "5m",
+                    "enabled": True,
+                }
+            },
+        }), encoding="utf-8")
+
+    def snapshot(self, digest=DIGEST_A):
+        profile = load_profile_registry(self.registry_path, self.project)["test_lead"]
+        return build_profile_snapshot(
+            profile, project_root=self.project, model_digest=digest,
+        )
+
+    def initialize(self):
+        snapshot = self.snapshot()
+        self.job.mkdir()
+        write_profile_snapshot(self.job, snapshot)
+        write_system_prompt_snapshot(
+            self.job, project_root=self.project, snapshot=snapshot,
+        )
+        initialize_task_lifecycle(
+            self.job, task_id="MF-1", conversation_id="MF-1",
+            snapshot=snapshot, input_text="owner request", checkpoint="base-checkpoint",
+        )
+        return snapshot
+
+    def events(self):
+        return [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in sorted((self.job / "audit" / "events").glob("*.json"))
+        ]
+
+    def test_registry_change_does_not_change_existing_snapshot(self):
+        first = self.snapshot(DIGEST_A)
+        self.job.mkdir()
+        write_profile_snapshot(self.job, first)
+        self.write_registry("model:second")
+        second = self.snapshot(DIGEST_B)
+
+        persisted = read_profile_snapshot(self.job)
+        self.assertEqual("model:first", persisted["model"])
+        self.assertEqual(DIGEST_A, persisted["model_digest"])
+        self.assertNotEqual(first["profile_snapshot_hash"], second["profile_snapshot_hash"])
+
+    def test_initial_events_are_immutable_and_parent_linked(self):
+        snapshot = self.initialize()
+        events = self.events()
+        self.assertEqual(["TASK_CREATED", "LEAD_SELECTED"], [e["event_type"] for e in events])
+        self.assertIsNone(events[0]["parent_event_id"])
+        self.assertEqual(events[0]["event_id"], events[1]["parent_event_id"])
+        self.assertEqual(snapshot["model_digest"], events[1]["model_digest"])
+        self.assertEqual("base-checkpoint", events[0]["checkpoint"])
+        self.assertEqual("base-checkpoint", events[1]["checkpoint"])
+        self.assertEqual(0, events[0]["input_hash"].count(" "))
+        for path in (self.job / "audit" / "events").glob("*.json"):
+            self.assertEqual(0, path.stat().st_mode & 0o222)
+
+    def test_forbidden_transition_is_fail_closed(self):
+        snapshot = self.initialize()
+        before_state = read_task_state(self.job)
+        before_events = self.events()
+        with self.assertRaisesRegex(LifecycleError, "Forbidden"):
+            transition_task(
+                self.job, TaskState.EXECUTING, snapshot=snapshot,
+                actor_type="manager", actor_id="manager",
+            )
+        self.assertEqual(before_state, read_task_state(self.job))
+        self.assertEqual(before_events, self.events())
+
+    def test_allowed_transitions_each_append_an_audit_event(self):
+        snapshot = self.initialize()
+        targets = [
+            TaskState.READY_FOR_PROCESSING,
+            TaskState.AWAITING_OWNER_APPROVAL,
+            TaskState.APPROVED,
+            TaskState.EXECUTING,
+            TaskState.LEAD_REVIEW,
+            TaskState.CANDIDATE_READY,
+            TaskState.AWAITING_CODEX,
+            TaskState.CODEX_REJECTED,
+            TaskState.LEAD_REVIEW,
+        ]
+        for target in targets:
+            transition_task(
+                self.job, target, snapshot=snapshot,
+                actor_type="manager", actor_id="manager",
+            )
+        events = self.events()
+        self.assertEqual(2 + len(targets), len(events))
+        self.assertEqual(TaskState.LEAD_REVIEW.value, read_task_state(self.job)["state"])
+        for previous, current in zip(events, events[1:]):
+            self.assertEqual(previous["event_id"], current["parent_event_id"])
+
+    def test_tampered_snapshot_fails_closed(self):
+        snapshot = self.initialize()
+        snapshot["model"] = "other:model"
+        with self.assertRaisesRegex(LifecycleError, "model and tag differ"):
+            transition_task(
+                self.job, TaskState.READY_FOR_PROCESSING, snapshot=snapshot,
+                actor_type="manager", actor_id="manager",
+            )
+        self.assertEqual(TaskState.DRAFT.value, read_task_state(self.job)["state"])
+        self.assertEqual(2, len(self.events()))
+
+    def test_tampered_audit_chain_fails_closed(self):
+        self.initialize()
+        last = sorted((self.job / "audit" / "events").glob("*.json"))[-1]
+        last.chmod(0o600)
+        event = json.loads(last.read_text(encoding="utf-8"))
+        event["actor_id"] = "tampered"
+        last.write_text(json.dumps(event), encoding="utf-8")
+        with self.assertRaisesRegex(LifecycleError, "Audit event hash mismatch"):
+            read_task_state(self.job)
+
+
+if __name__ == "__main__":
+    unittest.main()

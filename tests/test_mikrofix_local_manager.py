@@ -65,6 +65,13 @@ class LocalManagerTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         ).stdout.strip()
 
+    def profile_snapshot(self, profile_id):
+        profile = manager.enabled_lead_profiles()[profile_id]
+        return manager.build_profile_snapshot(
+            profile, project_root=manager.PROJECT_ROOT,
+            model_digest="a" * 64,
+        )
+
     def test_normalize_overrides_all_trusted_fields(self):
         raw = "```json\n" + json.dumps(model_plan()) + "\n```"
         plan = manager.normalize_plan(
@@ -157,19 +164,24 @@ class LocalManagerTests(unittest.TestCase):
         def responder(message, **kwargs):
             self.assertEqual("Build the intake", message)
             self.assertEqual("qwen_thinking", kwargs["lead_profile"])
+            self.assertEqual(
+                "qwen3:4b-thinking-2507-q8_0",
+                kwargs["lead_snapshot"]["model"],
+            )
             return ({
                 "reply": "Kateri uporabnik sme potrditi prevzem?",
                 "routing": "NEEDS_INFO", "ready_task": "", "objective": "",
                 "allowed_files": [], "atoms": [], "constraints": [],
                 "acceptance_criteria": [],
             }, {
-                "session_id": "qwen-session", "memory_sha256": "memory",
+                "session_id": "qwen-session", "memory_sha256": "b" * 64,
                 "bridge_job_id": "MF-BRIDGE", "lead_profile": "qwen_thinking",
             })
 
         conversation = manager.start_conversation(
             "Build the intake", workspace=self.workspace,
             lead_profile="qwen_thinking", responder=responder,
+            snapshot_factory=self.profile_snapshot,
         )
         run_id = conversation["parent_run_id"]
         self.assertEqual("qwen_thinking", conversation["lead_profile"])
@@ -179,11 +191,57 @@ class LocalManagerTests(unittest.TestCase):
             (self.workspace / "jobs" / run_id / "request.json").read_text()
         )
         self.assertEqual("lead_conversation", request["kind"])
+        self.assertEqual("a" * 64, request["model_digest"])
+        snapshot = json.loads(
+            (self.workspace / "jobs" / run_id / "lead-profile-snapshot.json").read_text()
+        )
+        self.assertEqual(request["profile_snapshot_hash"], snapshot["profile_snapshot_hash"])
         with self.assertRaisesRegex(manager.ManagerError, "zaklenjen"):
             manager.talk(
                 "Switch", parent_run_id=run_id, workspace=self.workspace,
                 lead_profile="gpt_oss", responder=responder,
             )
+
+    def test_ready_conversation_moves_to_owner_approval_with_audit(self):
+        def responder(_message, **_kwargs):
+            return ({
+                "reply": "Predlog je pripravljen.",
+                "routing": "READY_FOR_PROCESSING",
+                "ready_task": "Implement the bounded behavior",
+                "objective": "Implement one bounded behavior",
+                "allowed_files": ["app.py", "tests/test_app.py"],
+                "atoms": [{
+                    "id": "A1", "task": "Implement and test",
+                    "expected_files": ["app.py", "tests/test_app.py"],
+                }],
+                "constraints": ["No unrelated changes"],
+                "acceptance_criteria": ["Regression test passes"],
+            }, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "gpt_oss",
+                "prompt_hash": "c" * 64,
+            })
+
+        with mock.patch.object(
+            manager, "submit", return_value={"run_id": "MF-CHILD"},
+        ):
+            conversation = manager.start_conversation(
+                "Implement it", workspace=self.workspace, lead_profile="gpt_oss",
+                responder=responder, snapshot_factory=self.profile_snapshot,
+            )
+        job_dir = self.workspace / "jobs" / conversation["parent_run_id"]
+        lifecycle = json.loads((job_dir / "task-state.json").read_text())
+        self.assertEqual("AWAITING_OWNER_APPROVAL", lifecycle["state"])
+        events = [
+            json.loads(path.read_text())
+            for path in sorted((job_dir / "audit" / "events").glob("*.json"))
+        ]
+        self.assertEqual(
+            ["TASK_CREATED", "LEAD_SELECTED", "LEAD_PROPOSED_PLAN",
+             "TASK_STATE_TRANSITION"],
+            [event["event_type"] for event in events],
+        )
+        self.assertEqual("MF-CHILD", conversation["active_run_id"])
 
     def test_semantic_feedback_reports_all_shape_and_context_errors(self):
         invalid = model_plan(
@@ -297,6 +355,64 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual("/candidate/manifest.json", state["checkpoint"])
         self.assertTrue(any("grant-lease" in call for call in calls))
         self.assertTrue(any("stop" in call for call in calls))
+
+    def test_execute_run_advances_parent_task_to_codex_gate(self):
+        parent_id = "MF-PARENT-LIFECYCLE"
+        parent = self.workspace / "jobs" / parent_id
+        parent.mkdir()
+        snapshot = self.profile_snapshot("gpt_oss")
+        manager.write_profile_snapshot(parent, snapshot)
+        manager.write_system_prompt_snapshot(
+            parent, project_root=manager.PROJECT_ROOT, snapshot=snapshot,
+        )
+        manager.initialize_task_lifecycle(
+            parent, task_id=parent_id, conversation_id=parent_id,
+            snapshot=snapshot, input_text="Owner request",
+        )
+        manager.transition_task(
+            parent, manager.TaskState.READY_FOR_PROCESSING,
+            snapshot=snapshot, actor_type="lead", actor_id="gpt_oss",
+            event_type="LEAD_PROPOSED_PLAN",
+        )
+        manager.transition_task(
+            parent, manager.TaskState.AWAITING_OWNER_APPROVAL,
+            snapshot=snapshot, actor_type="manager", actor_id="manager",
+        )
+
+        run_id = "MF-CHILD-LIFECYCLE"
+        job_dir = self.workspace / "jobs" / run_id
+        job_dir.mkdir()
+        supervisor_state = job_dir / "supervisor.json"
+        supervisor_state.write_text(json.dumps({
+            "stage": "PLANNED", "checkpoint": None, "feedback": "",
+        }), encoding="utf-8")
+        (job_dir / "request.json").write_text(json.dumps({
+            "run_id": run_id, "parent_run_id": parent_id,
+        }), encoding="utf-8")
+        (job_dir / "manager.json").write_text(json.dumps({
+            "schema_version": 1, "run_id": run_id,
+            "state": "READY_FOR_OWNER_LEASE",
+            "supervisor_state": str(supervisor_state),
+        }), encoding="utf-8")
+
+        def fake_command(args, **_kwargs):
+            if "resume" in args:
+                supervisor_state.write_text(json.dumps({
+                    "stage": "AWAIT_CODEX_REVIEW",
+                    "checkpoint": "/candidate/manifest.json", "feedback": "",
+                }), encoding="utf-8")
+            return "ok"
+
+        with mock.patch.object(manager, "command", side_effect=fake_command):
+            manager.execute_run(run_id, workspace=self.workspace)
+        lifecycle = manager.read_task_state(parent)
+        self.assertEqual("AWAITING_CODEX", lifecycle["state"])
+        event_types = [
+            json.loads(path.read_text())["event_type"]
+            for path in sorted((parent / "audit" / "events").glob("*.json"))
+        ]
+        self.assertIn("OWNER_APPROVED_PLAN", event_types)
+        self.assertIn("LEAD_ACCEPTED_CANDIDATE", event_types)
 
     def test_owner_prompt_timeout_keeps_validated_plan_retryable(self):
         run_id = "MF-LEASE-TIMEOUT"
