@@ -25,6 +25,11 @@ PLANNING_SOURCES = (
     "AGENTS.md",
 )
 
+CONVERSATION_SOURCES = (
+    "docs/local_agents/supervisor/PROTOCOL_V2.md",
+    "AGENTS.md",
+)
+
 
 def _atomic_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)

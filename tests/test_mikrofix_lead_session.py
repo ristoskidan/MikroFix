@@ -3,10 +3,21 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tools.mikrofix_lead_session import SOURCES, confirm_context, ensure_lead_session
+from tools.mikrofix_lead_session import (
+    CONVERSATION_SOURCES, SOURCES, confirm_context, ensure_lead_session,
+)
 
 
 class LeadSessionTests(unittest.TestCase):
+    def test_conversation_bootstrap_excludes_full_project_canon(self):
+        self.assertIn("AGENTS.md", CONVERSATION_SOURCES)
+        self.assertNotIn(
+            "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md", CONVERSATION_SOURCES,
+        )
+        self.assertNotIn(
+            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md", CONVERSATION_SOURCES,
+        )
+
     def test_context_is_built_once_acknowledged_and_reused(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "project"

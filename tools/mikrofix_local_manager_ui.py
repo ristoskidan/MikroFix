@@ -265,6 +265,10 @@ class LocalManagerUI:
         self.send_button = ttk.Button(actions, text="Pošlji lokalnemu vodji",
                                       command=self.send)
         self.send_button.pack(side="left")
+        self.plan_button = ttk.Button(
+            actions, text="Pripravi izvedbeni načrt", command=self.prepare_plan,
+        )
+        self.plan_button.pack(side="left", padx=(8, 0))
         self.execute_button = ttk.Button(actions, text="Dovoli in izvedi",
                                          command=self.execute_selected)
         self.execute_button.pack(side="left", padx=8)
@@ -332,6 +336,9 @@ class LocalManagerUI:
         self.execute_button.configure(
             state="normal" if state == "READY_FOR_OWNER_LEASE" else "disabled"
         )
+        self.plan_button.configure(
+            state="normal" if state == "CONVERSATION" else "disabled"
+        )
         self.codex_button.configure(
             state="normal" if state == "READY_FOR_CODEX_REVIEW" else "disabled"
         )
@@ -383,6 +390,13 @@ class LocalManagerUI:
             return
         self.spawn_manager(["execute", job["run_id"], "--lease-minutes", "30"])
         self.global_status.configure(text="Čakam na tvojo potrditev dovoljenja")
+
+    def prepare_plan(self) -> None:
+        job = self.selected_job()
+        if not job:
+            return
+        self.spawn_manager(["prepare-plan", job["run_id"]])
+        self.global_status.configure(text="Lokalni vodja pripravlja izvedbeni načrt")
 
     def run_manager_now(self, arguments: list[str]) -> dict[str, Any] | None:
         result = subprocess.run(

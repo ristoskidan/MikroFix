@@ -144,7 +144,7 @@ class LocalManagerTests(unittest.TestCase):
         gpt = manager.gpt_validation_prompt(
             "Implement feature", proposal, "abc123", "missing criterion"
         )
-        self.assertIn("Qwen ne odloča", gpt)
+        self.assertIn("Svetovalec ne odloča", gpt)
         self.assertIn("abc123", gpt)
         self.assertIn(proposal, gpt)
         self.assertIn("missing criterion", gpt)
@@ -154,11 +154,32 @@ class LocalManagerTests(unittest.TestCase):
             "Kaj še manjka?", parent_run_id="MF-ONE",
             turns=[{"role": "lead", "content": "Povej cilj."}],
             lead_profile="qwen_thinking",
+            repository_snapshot="commit: abc\nstatus: (clean)",
+            original_request="Office button is wrong",
         )
         self.assertIn("Qwen Thinking vodja", prompt)
         self.assertIn("Drugi profil", prompt)
         self.assertIn("strukturirani obliki", prompt)
+        self.assertIn("bralnimi orodji", prompt)
+        self.assertIn("/prepare-plan", prompt)
+        self.assertIn("strogo osredotočen", prompt)
+        self.assertIn("Office button is wrong", prompt)
         self.assertNotIn("ne v JSON-u", prompt)
+        planning = manager.lead_conversation_prompt(
+            "/prepare-plan", parent_run_id="MF-ONE", turns=[],
+            lead_profile="qwen_thinking", planning_requested=True,
+        )
+        self.assertIn("izrecno sprožil /prepare-plan", planning)
+        self.assertIn("lastnikova izbira", planning)
+        self.assertEqual(
+            ["reply"],
+            manager.conversation_response_schema(
+                planning_requested=False,
+            )["required"],
+        )
+        self.assertIn(
+            "routing", manager.conversation_response_schema()["required"],
+        )
 
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):
         def responder(message, **kwargs):
@@ -202,8 +223,14 @@ class LocalManagerTests(unittest.TestCase):
                 lead_profile="gpt_oss", responder=responder,
             )
 
-    def test_ready_conversation_moves_to_owner_approval_with_audit(self):
-        def responder(_message, **_kwargs):
+    def test_only_explicit_prepare_plan_moves_to_owner_approval_with_audit(self):
+        def responder(_message, **kwargs):
+            if not kwargs.get("planning_requested"):
+                return ({"reply": "Preveril sem relevantni del kode."}, {
+                    "session_id": "lead-session", "memory_sha256": "b" * 64,
+                    "bridge_job_id": "MF-BRIDGE", "lead_profile": "gpt_oss",
+                    "prompt_hash": "c" * 64,
+                })
             return ({
                 "reply": "Predlog je pripravljen.",
                 "routing": "READY_FOR_PROCESSING",
@@ -222,14 +249,46 @@ class LocalManagerTests(unittest.TestCase):
                 "prompt_hash": "c" * 64,
             })
 
-        with mock.patch.object(
-            manager, "submit", return_value={"run_id": "MF-CHILD"},
-        ):
+        with mock.patch.object(manager, "submit") as submit:
             conversation = manager.start_conversation(
                 "Implement it", workspace=self.workspace, lead_profile="gpt_oss",
                 responder=responder, snapshot_factory=self.profile_snapshot,
             )
+        submit.assert_not_called()
         job_dir = self.workspace / "jobs" / conversation["parent_run_id"]
+        lifecycle = json.loads((job_dir / "task-state.json").read_text())
+        self.assertEqual("DRAFT", lifecycle["state"])
+        self.assertEqual("", conversation["active_run_id"])
+        self.assertEqual("NEEDS_INFO", conversation["turns"][-1]["routing"])
+        self.assertEqual(
+            "Preveril sem relevantni del kode.",
+            conversation["turns"][-1]["content"],
+        )
+
+        def submit_stub(task, **kwargs):
+            kwargs["generator"](
+                task, job_dir=self.root / "generated",
+                repository=self.repository,
+            )
+            return {"run_id": "MF-CHILD"}
+
+        with mock.patch.object(
+            manager, "run_planner", return_value="{}",
+        ) as run_planner, mock.patch.object(
+            manager, "submit", side_effect=submit_stub,
+        ):
+            conversation = manager.prepare_plan(
+                conversation["parent_run_id"], workspace=self.workspace,
+                responder=responder,
+            )
+        planner_kwargs = run_planner.call_args.kwargs
+        self.assertEqual(
+            "Implement one bounded behavior",
+            planner_kwargs["advisor_proposal"]["objective"],
+        )
+        self.assertEqual(
+            "gpt_oss", planner_kwargs["advisor_snapshot"]["profile_id"],
+        )
         lifecycle = json.loads((job_dir / "task-state.json").read_text())
         self.assertEqual("AWAITING_OWNER_APPROVAL", lifecycle["state"])
         events = [
@@ -237,7 +296,8 @@ class LocalManagerTests(unittest.TestCase):
             for path in sorted((job_dir / "audit" / "events").glob("*.json"))
         ]
         self.assertEqual(
-            ["TASK_CREATED", "LEAD_SELECTED", "LEAD_PROPOSED_PLAN",
+            ["TASK_CREATED", "LEAD_SELECTED", "LEAD_MESSAGE",
+             "LEAD_PROPOSED_PLAN",
              "TASK_STATE_TRANSITION"],
             [event["event_type"] for event in events],
         )

@@ -395,6 +395,14 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                     ):
                         raise ValueError("Izberi veljaven obstoječi pogovor")
                     command, _, argument = message.strip().partition(" ")
+                    if command in {"/prepareplan", "/prepare-plan"}:
+                        if argument.strip():
+                            raise ValueError("/prepareplan ne sprejme dodatnega besedila")
+                        spawn_manager(
+                            self.server.workspace, ["prepare-plan", parent],
+                        )
+                        self.send_json(202, {"accepted": True})
+                        return
                     if command in {"/prepare-review", "/preparereview"}:
                         result = prepare_review(self.server.workspace, parent)
                         self.send_json(200, result)
@@ -420,6 +428,24 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                         "--profile", profile,
                     ]
                 spawn_manager(self.server.workspace, arguments)
+                self.send_json(202, {"accepted": True})
+                return
+            if self.path == "/api/prepare-plan":
+                run_id = value.get("run_id")
+                if not isinstance(run_id, str) or not re.fullmatch(
+                    r"[A-Za-z0-9_-]+", run_id
+                ):
+                    raise ValueError("Izberi veljaven pogovor")
+                selected = next(
+                    (job for job in list_jobs(self.server.workspace)
+                     if job["run_id"] == run_id),
+                    None,
+                )
+                if not selected or selected["state"] != "CONVERSATION":
+                    raise ValueError("Pogovor ni pripravljen za izdelavo načrta")
+                spawn_manager(
+                    self.server.workspace, ["prepare-plan", run_id],
+                )
                 self.send_json(202, {"accepted": True})
                 return
             if self.path == "/api/prepare-review":

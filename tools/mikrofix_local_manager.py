@@ -21,7 +21,9 @@ try:
     from tools.mikrofix_codex_review import (
         prepare_review, record_codex_approved, record_codex_rejected,
     )
-    from tools.mikrofix_lead_session import PLANNING_SOURCES, ensure_context_ready
+    from tools.mikrofix_lead_session import (
+        CONVERSATION_SOURCES, PLANNING_SOURCES, ensure_context_ready,
+    )
     from tools.mikrofix_supervisor import (
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
         validate_plan,
@@ -38,7 +40,7 @@ except ModuleNotFoundError:
         prepare_review, record_codex_approved, record_codex_rejected,
     )
     from mikrofix_lead_session import (  # type: ignore[no-redef]
-        PLANNING_SOURCES, ensure_context_ready,
+        CONVERSATION_SOURCES, PLANNING_SOURCES, ensure_context_ready,
     )
     from mikrofix_supervisor import (  # type: ignore[no-redef]
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
@@ -84,7 +86,13 @@ LEAD_CONVERSATION_SYSTEM = (
 MAX_CONVERSATION_TURNS = 40
 
 
-def conversation_response_schema() -> dict[str, Any]:
+def conversation_response_schema(*, planning_requested: bool = True) -> dict[str, Any]:
+    if not planning_requested:
+        return {
+            "type": "object", "additionalProperties": False,
+            "required": ["reply"],
+            "properties": {"reply": {"type": "string", "minLength": 1}},
+        }
     return {
         "type": "object", "additionalProperties": False,
         "required": [
@@ -403,11 +411,12 @@ def gpt_validation_prompt(
         if previous_error else ""
     )
     return (
-        "Kot glavni GPT-OSS vodja preveri Qwenov svetovalni predlog proti "
-        "lastnikovi zahtevi in skupnemu projektnemu spominu. Qwen ne odloča. "
+        "Kot konfigurirani neodvisni validator preveri predlog pogovornega "
+        "svetovalca proti lastnikovi zahtevi in projektnemu spominu. "
+        "Svetovalec ne odloča. "
         "Odpravi vse napake in vrni samo končni JSON načrt.\n\n"
         f"SKUPNI MEMORY SHA-256: {memory_hash}\n\n"
-        f"ZAHTEVA LASTNIKA:\n{task}\n\nQWENOV PREDLOG:\n{qwen_proposal}"
+        f"ZAHTEVA LASTNIKA:\n{task}\n\nPREDLOG SVETOVALCA:\n{qwen_proposal}"
         + correction
     )
 
@@ -426,7 +435,11 @@ def run_bridge_monitor(
     )
 
 
-def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
+def run_planner(
+    task: str, *, job_dir: Path, repository: Path,
+    advisor_proposal: dict[str, Any] | None = None,
+    advisor_snapshot: dict[str, Any] | None = None,
+) -> str:
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
     lead_home = Path.home() / ".local/share/mikrofix-bridge"
     gpt_model = str(template.get("model", "gpt-oss:20b"))
@@ -446,14 +459,18 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         num_ctx=min(gpt_num_ctx, 32768), keep_alive=gpt_keep_alive,
         sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
     )
-    qwen_lead = ensure_context_ready(
-        PROJECT_ROOT, planning_home / "qwen",
-        ollama_url=str(template["ollama_url"]), model=qwen_model,
-        num_ctx=qwen_num_ctx, keep_alive=qwen_keep_alive,
-        sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
-    )
-    if qwen_lead["memory_sha256"] != gpt_planner_lead["memory_sha256"]:
-        raise ManagerError("Qwen and GPT-OSS did not acknowledge the same project memory")
+    advisor_memory: dict[str, object] | None = None
+    if advisor_proposal is None:
+        advisor_memory = ensure_context_ready(
+            PROJECT_ROOT, planning_home / "advisor",
+            ollama_url=str(template["ollama_url"]), model=qwen_model,
+            num_ctx=qwen_num_ctx, keep_alive=qwen_keep_alive,
+            sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
+        )
+        if advisor_memory["memory_sha256"] != gpt_planner_lead["memory_sha256"]:
+            raise ManagerError(
+                "Planning advisor and validator did not acknowledge the same memory"
+            )
     runtime = job_dir / "planner-runtime"
     bridge_home = runtime / "bridge"
     qwen_bridge_home = runtime / "qwen-bridge"
@@ -493,17 +510,19 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         })
         return config_path
 
-    qwen_config = write_stage_config(
-        qwen_bridge_home, model=qwen_model, num_ctx=qwen_num_ctx,
-        keep_alive=qwen_keep_alive, system_prompt=QWEN_PLANNER_SYSTEM,
-        memory=qwen_lead, role="Qwen — svetovalec za razčlenjevanje", think=True,
-        require_tool_use=False,
-    )
+    advisor_config = None
+    if advisor_memory is not None:
+        advisor_config = write_stage_config(
+            qwen_bridge_home, model=qwen_model, num_ctx=qwen_num_ctx,
+            keep_alive=qwen_keep_alive, system_prompt=QWEN_PLANNER_SYSTEM,
+            memory=advisor_memory, role="Svetovalec za razčlenjevanje", think=True,
+            require_tool_use=False,
+        )
     bridge_config = write_stage_config(
         bridge_home, model=gpt_model, num_ctx=gpt_num_ctx,
         keep_alive=gpt_keep_alive, system_prompt=GPT_VALIDATOR_SYSTEM,
         memory=gpt_planner_lead,
-        role="GPT-OSS — glavni vodja in potrjevalec načrta",
+        role="Konfigurirani neodvisni potrjevalec načrta",
         think="low",
         require_tool_use=True,
     )
@@ -561,36 +580,56 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
 
     try:
         wait_for_executor(executor_url, token_file, process)
-        qwen_raw = ask_stage(
-            home=qwen_bridge_home, config=qwen_config,
-            display_name="Qwenov predlog razčlenitve",
-            prompt_factory=lambda error: qwen_planner_prompt(task, error),
+        if advisor_proposal is None:
+            assert advisor_config is not None
+            advisor_raw = ask_stage(
+                home=qwen_bridge_home, config=advisor_config,
+                display_name="Predlog svetovalca za razčlenitev",
+                prompt_factory=lambda error: qwen_planner_prompt(task, error),
+            )
+            normalized_advisor = parse_model_json(advisor_raw)
+        else:
+            normalized_advisor = advisor_proposal
+        atomic_write_immutable_json(
+            job_dir / "advisor-proposal.json", normalized_advisor,
         )
-        qwen_proposal = parse_model_json(qwen_raw)
-        atomic_write_immutable_json(job_dir / "qwen-proposal.json", qwen_proposal)
         final_raw = ask_stage(
             home=bridge_home, config=bridge_config,
-            display_name="GPT-OSS potrditev Qwenovega načrta",
+            display_name="Neodvisna potrditev načrta",
             prompt_factory=lambda error: gpt_validation_prompt(
-                task, json.dumps(qwen_proposal, ensure_ascii=False, indent=2),
+                task, json.dumps(normalized_advisor, ensure_ascii=False, indent=2),
                 str(gpt_planner_lead["memory_sha256"]), error,
             ),
         )
         final_proposal = parse_model_json(final_raw)
-        atomic_write_immutable_json(job_dir / "gpt-approved-plan.json", final_proposal)
+        atomic_write_immutable_json(
+            job_dir / "validator-approved-plan.json", final_proposal,
+        )
         atomic_write_immutable_json(job_dir / "planning-handoff.json", {
             "schema_version": 1,
             "shared_memory_sha256": gpt_planner_lead["memory_sha256"],
-            "qwen": {
+            "advisor": {
                 "role": "planning_advisor",
-                "model": qwen_model,
-                "session_id": qwen_lead["session_id"],
+                "profile_id": (
+                    advisor_snapshot.get("profile_id") if advisor_snapshot else None
+                ),
+                "model": (
+                    advisor_snapshot.get("model") if advisor_snapshot else qwen_model
+                ),
+                "model_digest": (
+                    advisor_snapshot.get("model_digest") if advisor_snapshot else None
+                ),
+                "session_id": (
+                    advisor_memory.get("session_id") if advisor_memory else None
+                ),
                 "proposal_sha256": hashlib.sha256(
-                    json.dumps(qwen_proposal, ensure_ascii=False, sort_keys=True).encode()
+                    json.dumps(
+                        normalized_advisor, ensure_ascii=False, sort_keys=True,
+                    ).encode()
                 ).hexdigest(),
             },
-            "gpt_oss": {
-                "role": "lead_and_plan_gate",
+            "validator": {
+                "role": "plan_validator",
                 "model": gpt_model,
                 "session_id": gpt_planner_lead["session_id"],
                 "execution_parent_session_id": lead["session_id"],
@@ -610,9 +649,28 @@ def run_planner(task: str, *, job_dir: Path, repository: Path) -> str:
         log.close()
 
 
+def repository_orientation(repository: Path) -> str:
+    """Return a compact, deterministic identity map instead of the whole codebase."""
+    head = command(["git", "rev-parse", "HEAD"], cwd=repository, timeout=30).strip()
+    status_lines = command(
+        ["git", "status", "--short"], cwd=repository, timeout=30,
+    ).splitlines()
+    top_level = sorted(path.name for path in repository.iterdir() if path.name != ".git")
+    rendered_status = "\n".join(status_lines[:200]) or "(clean)"
+    if len(status_lines) > 200:
+        rendered_status += f"\n... {len(status_lines) - 200} additional paths omitted"
+    return (
+        f"commit: {head}\n"
+        f"status:\n{rendered_status}\n"
+        f"top-level: {', '.join(top_level[:120])}"
+    )
+
+
 def lead_conversation_prompt(
     message: str, *, parent_run_id: str, turns: list[dict[str, str]],
     lead_profile: str, lead_display_name: str | None = None,
+    planning_requested: bool = False, repository_snapshot: str = "",
+    original_request: str = "",
 ) -> str:
     """Build one bounded continuation turn for one isolated persistent lead."""
     profile_name = lead_display_name or {
@@ -626,8 +684,26 @@ def lead_conversation_prompt(
         for turn in history
         if str(turn.get("content") or "").strip()
     )
+    mode_instruction = (
+        "Lastnik je izrecno sprožil /prepare-plan. Formalni izvedbeni načrt "
+        "pripravi samo, če so vzrok oziroma relevantne ugotovitve preverjene, "
+        "možnosti obravnavane in lastnikova izbira dovolj jasna. Če odločitev "
+        "ali dokaz manjka, vrni NEEDS_INFO in zahtevaj najmanjši manjkajoči "
+        "podatek. To še ni dovoljenje za izvedbo. "
+        if planning_requested else
+        "To je raziskovalni in svetovalni pogovor. Ostani strogo osredotočen "
+        "na prijavljeni simptom. Z bralnimi orodji preveri samo neposredno "
+        "relevantno kodo, teste in pravila; ne pregleduj nepovezanih delov "
+        "projekta. Če za usmerjen pregled manjka podatek o reprodukciji, "
+        "najprej postavi kratko konkretno vprašanje. Nato poročaj, kaj je "
+        "preverjeno, kaj je samo domneva, katere možnosti "
+        "obstajajo, njihove posledice in svoje priporočilo. Z lastnikom razčisti "
+        "izbiro. Odgovori naravno in samo o tem problemu. Načrt sme sprožiti "
+        "samo /prepare-plan. "
+    )
     return (
         "Nadaljuj neposredni pogovor z lastnikom v okviru že izbrane naloge. "
+        + mode_instruction +
         "To ni nova naloga. Drugi profil lokalnega vodje v tem pogovoru ne "
         "sodeluje, ne vidi zgodovine in ga ne smeš klicati ali prositi za "
         "pregled. Za dejstva o projektu uporabi samo bralna projektna orodja. "
@@ -635,6 +711,8 @@ def lead_conversation_prompt(
         "besedilo, ki ga vidi lastnik.\n\n"
         f"IZBRANI IN ZAKLENJENI PROFIL VODJE: {profile_name}\n"
         f"IZBRANA NALOGA: {parent_run_id}\n\n"
+        f"IZVIRNA ZAHTEVA LASTNIKA:\n{original_request.strip()}\n\n"
+        f"TRENUTNI REPOZITORIJSKI POSNETEK:\n{repository_snapshot}\n\n"
         f"DOSEDANJI POGOVOR:\n{rendered_history or '(še brez nadaljevanj)'}\n\n"
         f"NOVO SPOROČILO LASTNIKA:\n{message.strip()}"
     )
@@ -644,6 +722,7 @@ def run_lead_conversation(
     message: str, *, job_dir: Path, repository: Path,
     turns: list[dict[str, str]], lead_profile: str = "gpt_oss",
     lead_snapshot: dict[str, Any] | None = None,
+    planning_requested: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Ask only the selected persistent lead through a read-only executor."""
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
@@ -663,6 +742,8 @@ def run_lead_conversation(
         model=model, num_ctx=num_ctx, keep_alive=keep_alive,
         profile_snapshot_hash=str(snapshot["profile_snapshot_hash"]),
         model_digest=str(snapshot["model_digest"]),
+        sources=CONVERSATION_SOURCES,
+        memory_name="CONVERSATION_BOOTSTRAP.md",
     )
 
     turn_dir = job_dir / "conversation-runtime" / "turns" / f"turn-{time.time_ns()}"
@@ -686,12 +767,14 @@ def run_lead_conversation(
         "project_memory": str(lead["memory_file"]),
         "parent_session_id": str(lead["session_id"]),
         "num_ctx": num_ctx,
-        "max_steps": 40,
+        "max_steps": 40 if planning_requested else 12,
         "keep_alive": keep_alive,
         "think": think,
         "require_tool_use": True,
         "completion_policy": "supervisor_only",
-        "response_format": conversation_response_schema(),
+        "response_format": conversation_response_schema(
+            planning_requested=planning_requested,
+        ),
         "agent_role": role,
     })
     executor_env = {
@@ -721,6 +804,11 @@ def run_lead_conversation(
             message, parent_run_id=job_dir.name, turns=turns,
             lead_profile=lead_profile,
             lead_display_name=str(snapshot["display_name"]),
+            planning_requested=planning_requested,
+            repository_snapshot=repository_orientation(repository),
+            original_request=str(json.loads(
+                (job_dir / "request.json").read_text(encoding="utf-8")
+            ).get("task") or ""),
         )
         bridge_job_id = command(
             bridge + ["dispatch", "--name", f"Neposredni pogovor: {role}",
@@ -740,11 +828,15 @@ def run_lead_conversation(
             raise ManagerError("Izbrani lokalni vodja ni vrnil veljavne odločitve") from exc
         if not isinstance(decision, dict):
             raise ManagerError("Odločitev lokalnega vodje mora biti JSON objekt")
-        required = set(conversation_response_schema()["required"])
+        required = set(conversation_response_schema(
+            planning_requested=planning_requested,
+        )["required"])
         if set(decision) != required:
             raise ManagerError("Odločitev lokalnega vodje nima natančno zahtevanih polj")
-        routing = decision.get("routing")
-        if routing not in {"NEEDS_INFO", "READY_FOR_PROCESSING"}:
+        routing = decision.get("routing", "NEEDS_INFO")
+        if planning_requested and routing not in {
+            "NEEDS_INFO", "READY_FOR_PROCESSING",
+        }:
             raise ManagerError("Odločitev lokalnega vodje ima neveljaven routing")
         if not isinstance(decision.get("reply"), str) or not decision["reply"].strip():
             raise ManagerError("Odločitev lokalnega vodje nima odgovora za lastnika")
@@ -774,6 +866,7 @@ def talk(
     workspace: Path = DEFAULT_WORKSPACE,
     lead_profile: str = "gpt_oss",
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+    planning_requested: bool = False,
 ) -> dict[str, Any]:
     """Append one direct owner/lead turn without creating a new manager job."""
     workspace = workspace.expanduser().resolve()
@@ -816,9 +909,16 @@ def talk(
         decision, evidence = responder(
             clean_message, job_dir=job_dir, repository=repository, turns=turns,
             lead_profile=lead_profile, lead_snapshot=snapshot,
+            planning_requested=planning_requested,
         )
-        routing = str(decision["routing"])
+        reported_routing = str(decision.get("routing", "NEEDS_INFO"))
+        routing = reported_routing if planning_requested else "NEEDS_INFO"
         reply = str(decision["reply"]).strip()
+        if not planning_requested and reported_routing == "READY_FOR_PROCESSING":
+            reply += (
+                "\n\nIzvedbeni načrt ni bil ustvarjen. Ko želiš zaključiti pogovor "
+                "in pripraviti načrt, uporabi /prepare-plan."
+            )
         routed_run_id = ""
         event_hashes = {
             "prompt_hash": evidence.get("prompt_hash") or None,
@@ -855,8 +955,9 @@ def talk(
                 )
             routed = submit(
                 ready_task, workspace=workspace,
-                generator=lambda _task, **_kwargs: json.dumps(
-                    proposal, ensure_ascii=False
+                generator=lambda task, **kwargs: run_planner(
+                    task, advisor_proposal=proposal,
+                    advisor_snapshot=snapshot, **kwargs,
                 ),
                 initialize=True, parent_run_id=parent_run_id,
                 lead_snapshot=snapshot,
@@ -872,7 +973,11 @@ def talk(
             record_task_event(
                 job_dir, snapshot=snapshot, event_type="LEAD_MESSAGE",
                 actor_type="lead", actor_id=lead_profile, **event_hashes,
-                details={"routing": routing},
+                details={
+                    "routing": routing,
+                    "reported_routing": reported_routing,
+                    "planning_requested": planning_requested,
+                },
             )
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         turns.extend([
@@ -894,6 +999,33 @@ def talk(
         }
         atomic_write_json(conversation_file, conversation)
         return conversation
+
+
+def prepare_plan(
+    parent_run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
+    responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+) -> dict[str, Any]:
+    """Explicitly allow one conversation root to propose, but not execute, a plan."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    job_dir = workspace / "jobs" / parent_run_id
+    snapshot = read_profile_snapshot(job_dir)
+    lifecycle = read_task_state(job_dir)
+    if lifecycle["state"] != TaskState.DRAFT.value:
+        raise ManagerError(
+            f"Plan can only be prepared from DRAFT, not {lifecycle['state']}"
+        )
+    conversation = json.loads(
+        (job_dir / "conversation.json").read_text(encoding="utf-8")
+    )
+    if conversation.get("active_run_id"):
+        raise ManagerError("Conversation already has an active execution plan")
+    return talk(
+        "/prepareplan", parent_run_id=parent_run_id, workspace=workspace,
+        lead_profile=str(snapshot["profile_id"]), responder=responder,
+        planning_requested=True,
+    )
 
 
 def start_conversation(
@@ -1183,6 +1315,8 @@ def parse_args() -> argparse.Namespace:
     talk_parser.add_argument(
         "--profile", choices=tuple(enabled_lead_profiles()), default="gpt_oss"
     )
+    plan_parser = sub.add_parser("prepare-plan")
+    plan_parser.add_argument("run_id")
     execute_parser = sub.add_parser("execute")
     execute_parser.add_argument("run_id")
     execute_parser.add_argument("--lease-minutes", type=int, default=30)
@@ -1214,6 +1348,8 @@ def main() -> int:
                 args.message, parent_run_id=args.parent,
                 workspace=args.workspace, lead_profile=args.profile,
             )
+        elif args.command_name == "prepare-plan":
+            result = prepare_plan(args.run_id, workspace=args.workspace)
         elif args.command_name == "execute":
             result = execute_run(
                 args.run_id, workspace=args.workspace,
