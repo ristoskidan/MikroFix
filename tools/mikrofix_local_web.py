@@ -18,6 +18,10 @@ from urllib.parse import parse_qs, urlparse
 import urllib.request
 
 try:
+    from tools.mikrofix_codex_review import (
+        ReviewError, prepare_review, record_codex_approved,
+        record_codex_rejected,
+    )
     from tools.mikrofix_local_manager_ui import (
         DEFAULT_WORKSPACE,
         MANAGER,
@@ -28,6 +32,10 @@ try:
         render_job,
     )
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
+    from mikrofix_codex_review import (  # type: ignore[no-redef]
+        ReviewError, prepare_review, record_codex_approved,
+        record_codex_rejected,
+    )
     from mikrofix_local_manager_ui import (  # type: ignore[no-redef]
         DEFAULT_WORKSPACE,
         MANAGER,
@@ -57,13 +65,19 @@ def serialize_job(
     supervisor_path = manager.get("supervisor_state")
     if supervisor_path:
         supervisor = read_json(Path(supervisor_path))
+    review = read_json(job["directory"] / "codex-review.json")
+    state = effective["state"]
+    if review.get("status") == "REJECTED":
+        state = "CODEX_REJECTED"
+    elif review.get("status") == "APPLIED":
+        state = "APPLIED"
     return {
         "run_id": job["run_id"],
         "task": job["task"],
         "parent_run_id": job.get("parent_run_id"),
         "created_at": job["created_at"],
-        "state": effective["state"],
-        "state_label": STATE_LABELS.get(effective["state"], effective["state"]),
+        "state": state,
+        "state_label": STATE_LABELS.get(state, state),
         "lead_profile": read_json(job["directory"] / "conversation.json").get(
             "lead_profile", job["manager"].get("lead_profile", "")
         ),
@@ -73,6 +87,7 @@ def serialize_job(
         "events": supervisor.get("events", [])[-20:],
         "checkpoint": manager.get("checkpoint") or supervisor.get("checkpoint"),
         "reason": manager.get("exact_reason") or supervisor.get("feedback", ""),
+        "review": review,
     }
 
 
@@ -379,12 +394,57 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                         r"[A-Za-z0-9_-]+", parent
                     ):
                         raise ValueError("Izberi veljaven obstoječi pogovor")
+                    command, _, argument = message.strip().partition(" ")
+                    if command in {"/prepare-review", "/preparereview"}:
+                        result = prepare_review(self.server.workspace, parent)
+                        self.send_json(200, result)
+                        return
+                    if command in {"/codexrejected", "/codex-rejected"}:
+                        if not argument.strip():
+                            raise ValueError("Po ukazu napiši razlog zavrnitve")
+                        result = record_codex_rejected(
+                            self.server.workspace, parent, argument.strip(),
+                        )
+                        self.send_json(200, result)
+                        return
+                    if command in {"/codexapproved", "/codex-approved"}:
+                        if not argument.strip():
+                            raise ValueError("Po ukazu prilepi commit SHA")
+                        result = record_codex_approved(
+                            self.server.workspace, parent, argument.strip(),
+                        )
+                        self.send_json(200, result)
+                        return
                     arguments = [
                         "talk", "--message", message.strip(), "--parent", parent,
                         "--profile", profile,
                     ]
                 spawn_manager(self.server.workspace, arguments)
                 self.send_json(202, {"accepted": True})
+                return
+            if self.path == "/api/prepare-review":
+                run_id = value.get("run_id")
+                if not isinstance(run_id, str):
+                    raise ValueError("Izberi veljavno nalogo")
+                self.send_json(200, prepare_review(self.server.workspace, run_id))
+                return
+            if self.path == "/api/codex-rejected":
+                run_id = value.get("run_id")
+                feedback = value.get("feedback")
+                if not isinstance(run_id, str) or not isinstance(feedback, str):
+                    raise ValueError("Manjka naloga ali razlog zavrnitve")
+                self.send_json(200, record_codex_rejected(
+                    self.server.workspace, run_id, feedback,
+                ))
+                return
+            if self.path == "/api/codex-approved":
+                run_id = value.get("run_id")
+                commit = value.get("commit")
+                if not isinstance(run_id, str) or not isinstance(commit, str):
+                    raise ValueError("Manjka naloga ali commit SHA")
+                self.send_json(200, record_codex_approved(
+                    self.server.workspace, run_id, commit,
+                ))
                 return
             if self.path == "/api/execute":
                 run_id = value.get("run_id")
@@ -402,7 +462,7 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                 self.send_json(202, {"accepted": True})
                 return
             self.send_json(404, {"error": "Not found"})
-        except (ValueError, json.JSONDecodeError, OSError) as exc:
+        except (ValueError, ReviewError, json.JSONDecodeError, OSError) as exc:
             self.send_json(400, {"error": str(exc)})
 
 

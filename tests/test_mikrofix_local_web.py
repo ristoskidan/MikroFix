@@ -42,10 +42,18 @@ class LocalWebPayloadTests(unittest.TestCase):
 
     def test_html_is_local_and_exposes_required_owner_actions(self):
         html = web.HTML_FILE.read_text(encoding="utf-8")
-        for label in ("Nova naloga", "Pošlji lokalnemu vodji", "Dovoli in izvedi", "Kopiraj kandidata za Codex", "Vprašaj Codex za mnenje", "Živi potek", "Qwen Thinking vodja"):
+        for label in (
+            "Nova naloga", "Pošlji lokalnemu vodji", "Dovoli in izvedi",
+            "Pripravi Codex pregled", "Codex zavrnil", "Codex odobril",
+            "Vprašaj Codex za mnenje", "Živi potek", "Qwen Thinking vodja",
+        ):
             self.assertIn(label, html)
         self.assertIn("/api/start", html)
         self.assertIn("/api/talk", html)
+        self.assertIn("/api/prepare-review", html)
+        self.assertIn("/api/codex-rejected", html)
+        self.assertIn("/api/codex-approved", html)
+        self.assertIn("/preparereview", Path(web.__file__).read_text(encoding="utf-8"))
         self.assertIn("grid-template-rows:auto minmax(0,1fr) auto", html)
         self.assertEqual("127.0.0.1", web.HOST)
 

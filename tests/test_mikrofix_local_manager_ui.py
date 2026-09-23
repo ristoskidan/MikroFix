@@ -84,6 +84,19 @@ class LocalManagerUIPureTests(unittest.TestCase):
         self.assertEqual("READY_FOR_CODEX_REVIEW", job["state"])
         self.assertIn("/candidate/manual.json", ui.render_job(job))
 
+    def test_child_uses_parent_codex_verdict_state(self):
+        root = self.write_job("MF-ROOT", "Conversation", "CONVERSATION")
+        self.write_job(
+            "MF-CHILD", "Candidate", "READY_FOR_CODEX_REVIEW",
+            parent="MF-ROOT", created="2026-09-20T11:00:00Z",
+        )
+        (root / "codex-review.json").write_text(json.dumps({
+            "status": "REJECTED", "review_id": "RV-1",
+        }), encoding="utf-8")
+        child = ui.list_jobs(self.workspace)[0]
+        self.assertEqual("CODEX_REJECTED", child["state"])
+        self.assertEqual("REJECTED", child["review"]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

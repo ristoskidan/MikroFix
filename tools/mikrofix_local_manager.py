@@ -18,6 +18,9 @@ from typing import Any, Callable
 import urllib.request
 
 try:
+    from tools.mikrofix_codex_review import (
+        prepare_review, record_codex_approved, record_codex_rejected,
+    )
     from tools.mikrofix_lead_session import PLANNING_SOURCES, ensure_context_ready
     from tools.mikrofix_supervisor import (
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
@@ -31,6 +34,9 @@ try:
         write_system_prompt_snapshot,
     )
 except ModuleNotFoundError:
+    from mikrofix_codex_review import (  # type: ignore[no-redef]
+        prepare_review, record_codex_approved, record_codex_rejected,
+    )
     from mikrofix_lead_session import (  # type: ignore[no-redef]
         PLANNING_SOURCES, ensure_context_ready,
     )
@@ -1180,6 +1186,14 @@ def parse_args() -> argparse.Namespace:
     execute_parser = sub.add_parser("execute")
     execute_parser.add_argument("run_id")
     execute_parser.add_argument("--lease-minutes", type=int, default=30)
+    prepare_parser = sub.add_parser("prepare-review")
+    prepare_parser.add_argument("run_id")
+    rejected_parser = sub.add_parser("codex-rejected")
+    rejected_parser.add_argument("run_id")
+    rejected_parser.add_argument("--feedback", required=True)
+    approved_parser = sub.add_parser("codex-approved")
+    approved_parser.add_argument("run_id")
+    approved_parser.add_argument("--commit", required=True)
     return parser.parse_args()
 
 
@@ -1200,10 +1214,20 @@ def main() -> int:
                 args.message, parent_run_id=args.parent,
                 workspace=args.workspace, lead_profile=args.profile,
             )
-        else:
+        elif args.command_name == "execute":
             result = execute_run(
                 args.run_id, workspace=args.workspace,
                 lease_minutes=args.lease_minutes,
+            )
+        elif args.command_name == "prepare-review":
+            result = prepare_review(args.workspace, args.run_id)
+        elif args.command_name == "codex-rejected":
+            result = record_codex_rejected(
+                args.workspace, args.run_id, args.feedback,
+            )
+        else:
+            result = record_codex_approved(
+                args.workspace, args.run_id, args.commit,
             )
     except Exception as exc:
         print(json.dumps({"state": "BLOCKED", "exact_reason": str(exc)},

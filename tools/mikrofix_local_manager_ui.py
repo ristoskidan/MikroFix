@@ -7,11 +7,12 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
 
@@ -27,6 +28,8 @@ STATE_LABELS = {
     "WAITING_FOR_OWNER_LEASE": "Čaka na tvojo potrditev dovoljenja za pisanje",
     "RUNNING_LOCAL": "GPT-OSS izvaja nalogo in ločeni pregledovalec jo preverja",
     "READY_FOR_CODEX_REVIEW": "Kandidat je pripravljen za Codexov pregled",
+    "CODEX_REJECTED": "Codex je kandidata zavrnil — vrnjen je lokalnemu vodji",
+    "APPLIED": "Codex je spremembo odobril in vključitev je zabeležena",
     "BLOCKED": "Naloga potrebuje popravek ali konkretno odločitev",
     "PLAN_READY": "Načrt je pripravljen",
 }
@@ -37,6 +40,14 @@ def read_json(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
         return value if isinstance(value, dict) else {}
     except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def read_json_from_text(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
         return {}
 
 
@@ -65,6 +76,16 @@ def list_jobs(workspace: Path) -> list[dict[str, Any]]:
                 manager["exact_reason"] = supervisor.get("feedback", "")
             elif stage not in {None, "PLANNED", "NEEDS_WRITE_LEASE"}:
                 effective_state = "RUNNING_LOCAL"
+        parent_id = request.get("parent_run_id")
+        review_root = root / parent_id if (
+            isinstance(parent_id, str)
+            and re.fullmatch(r"[A-Za-z0-9_-]+", parent_id)
+        ) else directory
+        review = read_json(review_root / "codex-review.json")
+        if review.get("status") == "REJECTED":
+            effective_state = "CODEX_REJECTED"
+        elif review.get("status") == "APPLIED":
+            effective_state = "APPLIED"
         jobs.append({
             "run_id": request.get("run_id", directory.name),
             "task": request.get("task", ""),
@@ -74,6 +95,7 @@ def list_jobs(workspace: Path) -> list[dict[str, Any]]:
             "manager": manager,
             "directory": directory,
             "lead_profile": request.get("lead_profile", ""),
+            "review": review,
         })
     jobs.sort(key=lambda item: item["created_at"], reverse=True)
     return jobs
@@ -246,9 +268,17 @@ class LocalManagerUI:
         self.execute_button = ttk.Button(actions, text="Dovoli in izvedi",
                                          command=self.execute_selected)
         self.execute_button.pack(side="left", padx=8)
-        self.codex_button = ttk.Button(actions, text="Kopiraj za Codex",
-                                       command=self.copy_for_codex)
+        self.codex_button = ttk.Button(actions, text="Pripravi Codex pregled",
+                                       command=self.prepare_for_codex)
         self.codex_button.pack(side="left")
+        self.rejected_button = ttk.Button(
+            actions, text="Codex zavrnil", command=self.codex_rejected,
+        )
+        self.rejected_button.pack(side="left", padx=(8, 0))
+        self.approved_button = ttk.Button(
+            actions, text="Codex odobril", command=self.codex_approved,
+        )
+        self.approved_button.pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="Osveži", command=self.refresh).pack(side="right")
 
     def selected_job(self) -> dict[str, Any] | None:
@@ -305,6 +335,9 @@ class LocalManagerUI:
         self.codex_button.configure(
             state="normal" if state == "READY_FOR_CODEX_REVIEW" else "disabled"
         )
+        prepared = bool(job and job.get("review", {}).get("status") == "PREPARED")
+        self.rejected_button.configure(state="normal" if prepared else "disabled")
+        self.approved_button.configure(state="normal" if prepared else "disabled")
 
     def new_task(self) -> None:
         self.selected_run_id = None
@@ -351,15 +384,68 @@ class LocalManagerUI:
         self.spawn_manager(["execute", job["run_id"], "--lease-minutes", "30"])
         self.global_status.configure(text="Čakam na tvojo potrditev dovoljenja")
 
-    def copy_for_codex(self) -> None:
+    def run_manager_now(self, arguments: list[str]) -> dict[str, Any] | None:
+        result = subprocess.run(
+            [sys.executable, str(MANAGER), "--workspace", str(self.workspace),
+             *arguments],
+            cwd=PROJECT_ROOT, env={**os.environ, "MIKROFIX_VISIBLE_PLANNER": "0"},
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=30, check=False,
+        )
+        if result.returncode != 0:
+            error = read_json_from_text(result.stderr)
+            messagebox.showerror(
+                "MikroFix", str(error.get("exact_reason") or result.stderr.strip()),
+            )
+            return None
+        try:
+            value = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            messagebox.showerror("MikroFix", "Manager ni vrnil veljavnega odgovora.")
+            return None
+        return value if isinstance(value, dict) else None
+
+    def prepare_for_codex(self) -> None:
         job = self.selected_job()
         if not job:
             return
-        message = f"Preglej lokalnega kandidata {job['run_id']}"
+        result = self.run_manager_now(["prepare-review", job["run_id"]])
+        if not result:
+            return
+        message = f"Preglej pripravljeni Codex paket: {result['package_path']}"
         self.root.clipboard_clear()
         self.root.clipboard_append(message)
         self.root.update_idletasks()
-        self.global_status.configure(text="Sporočilo za Codex je kopirano")
+        self.global_status.configure(text="Pot do Codex paketa je kopirana")
+
+    def codex_rejected(self) -> None:
+        job = self.selected_job()
+        if not job:
+            return
+        feedback = simpledialog.askstring(
+            "Codex zavrnil", "Prilepi Codexove ugotovitve:", parent=self.root,
+        )
+        if not feedback or not feedback.strip():
+            return
+        if self.run_manager_now([
+            "codex-rejected", job["run_id"], "--feedback", feedback.strip(),
+        ]):
+            self.global_status.configure(text="Naloga je vrnjena lokalnemu vodji")
+
+    def codex_approved(self) -> None:
+        job = self.selected_job()
+        if not job:
+            return
+        commit = simpledialog.askstring(
+            "Codex odobril", "Prilepi commit SHA vključene spremembe:",
+            parent=self.root,
+        )
+        if not commit or not commit.strip():
+            return
+        if self.run_manager_now([
+            "codex-approved", job["run_id"], "--commit", commit.strip(),
+        ]):
+            self.global_status.configure(text="Odobritev in vključitev sta zabeleženi")
 
 
 def main() -> int:
