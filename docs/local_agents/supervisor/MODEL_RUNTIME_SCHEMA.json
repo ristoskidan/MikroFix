@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mikrofix.local/schemas/model-runtime-v1.json",
+  "title": "MikroFIX model runtime settings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "defaults", "overrides"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "defaults": {"$ref": "#/$defs/settings"},
+    "overrides": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/settings"}
+    }
+  },
+  "$defs": {
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "num_ctx", "conversation_num_ctx", "think", "keep_alive",
+        "conversation_keep_alive"
+      ],
+      "properties": {
+        "num_ctx": {"type": "integer", "minimum": 1024},
+        "conversation_num_ctx": {"type": "integer", "minimum": 1024},
+        "think": {"oneOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}]},
+        "keep_alive": {"type": "string", "minLength": 1},
+        "conversation_keep_alive": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

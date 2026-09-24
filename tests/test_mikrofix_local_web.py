@@ -46,12 +46,14 @@ class LocalWebPayloadTests(unittest.TestCase):
             "Nova naloga", "Pošlji lokalnemu vodji", "Pripravi izvedbeni načrt",
             "Dovoli in izvedi",
             "Pripravi Codex pregled", "Codex zavrnil", "Codex odobril",
-            "Vprašaj Codex za mnenje", "Živi potek", "GPT‑OSS vodi",
+            "Vprašaj Codex za mnenje", "Živi potek", "Vloga je stalna",
         ):
             self.assertIn(label, html)
         self.assertIn("/api/start", html)
         self.assertIn("/api/talk", html)
         self.assertIn("/api/command", html)
+        self.assertIn("/api/options", html)
+        self.assertIn("id=\"model\"", html)
         self.assertIn("/help", html)
         self.assertNotIn("Qwen Thinking vodja", html)
         self.assertIn("grid-template-rows:auto minmax(0,1fr) auto", html)

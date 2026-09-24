@@ -32,6 +32,9 @@ try:
         read_json,
         render_job,
     )
+    from tools.mikrofix_local_manager import (
+        enabled_role_profiles, installed_ollama_models,
+    )
     from tools.mikrofix_owner_commands import (
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
     )
@@ -48,6 +51,9 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
         planner_activity,
         read_json,
         render_job,
+    )
+    from mikrofix_local_manager import (  # type: ignore[no-redef]
+        enabled_role_profiles, installed_ollama_models,
     )
     from mikrofix_owner_commands import (  # type: ignore[no-redef]
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -78,6 +84,7 @@ def serialize_job(
         state = "CODEX_REJECTED"
     elif review.get("status") == "APPLIED":
         state = "APPLIED"
+    conversation = read_json(job["directory"] / "conversation.json")
     return {
         "run_id": job["run_id"],
         "task": job["task"],
@@ -85,9 +92,10 @@ def serialize_job(
         "created_at": job["created_at"],
         "state": state,
         "state_label": STATE_LABELS.get(state, state),
-        "lead_profile": read_json(job["directory"] / "conversation.json").get(
+        "lead_profile": conversation.get(
             "lead_profile", job["manager"].get("lead_profile", "")
         ),
+        "model_tag": conversation.get("model_tag", ""),
         "action_run_id": effective["run_id"] if action_job else "",
         "transcript": render_job(job),
         "activity": planner_activity(job["directory"], limit=20),
@@ -459,6 +467,14 @@ class LocalWebHandler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True})
         elif parsed.path == "/api/jobs":
             self.send_json(200, jobs_payload(self.server.workspace))
+        elif parsed.path == "/api/options":
+            self.send_json(200, {
+                "roles": [
+                    {"id": role_id, "display_name": role["display_name"]}
+                    for role_id, role in enabled_role_profiles().items()
+                ],
+                "models": installed_ollama_models(),
+            })
         elif parsed.path == "/api/trace":
             try:
                 run_id = (parse_qs(parsed.query).get("run_id") or [""])[0]
@@ -505,14 +521,20 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                 return
             if self.path in {"/api/start", "/api/talk"}:
                 message = value.get("message")
-                profile = value.get("profile", "gpt_oss")
+                profile = value.get("profile", "conversation_lead")
+                model = value.get("model")
                 if (
                     not isinstance(message, str) or not message.strip()
                     or len(message) > 12_000
                 ):
                     raise ValueError("Napiši veljavno sporočilo")
-                if profile not in {"gpt_oss", "qwen_thinking"}:
+                if profile not in enabled_role_profiles():
                     raise ValueError("Izberi veljaven profil lokalnega vodje")
+                if self.path == "/api/start" and (
+                    not isinstance(model, str)
+                    or model not in installed_ollama_models()
+                ):
+                    raise ValueError("Izberi nameščen lokalni model")
                 parsed_command = parse_owner_command(message)
                 if self.path == "/api/start":
                     if parsed_command is not None:
@@ -521,6 +543,7 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                         )
                     arguments = [
                         "start", "--message", message.strip(), "--profile", profile,
+                        "--model", model,
                     ]
                 else:
                     parent = value.get("parent_run_id")

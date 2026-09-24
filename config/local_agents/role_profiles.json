@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "roles": {
+    "conversation_lead": {
+      "version": 1,
+      "role": "conversation_lead",
+      "display_name": "Pogovorni lokalni vodja",
+      "system_prompt": "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md",
+      "enabled": true
+    }
+  }
+}

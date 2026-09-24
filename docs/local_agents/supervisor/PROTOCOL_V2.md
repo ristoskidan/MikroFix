@@ -13,9 +13,11 @@ ukaze, dovoljenja, retryje, dokazila in obvestila.
 - **Deterministični manager** trajno zapiše zahtevo, preveri strukturiran predlog,
   iz dejanskega repozitorija določi kontekst in teste ter pripravi nespremenljiv
   načrt.
-- **Qwen načrtovalni svetovalec** z bralnimi orodji pripravi prvi strukturirani
-  predlog razčlenitve. Ne piše datotek in nima pravice odobriti izvedbe.
-- **GPT-OSS lokalni vodja** neodvisno preveri Qwenov predlog proti lastnikovi
+- **Izbrani pogovorni model** v model-independent vlogi `conversation_lead` z
+  bralnimi orodji vodi naravni pogovor in ob `/prepare-plan` pripravi prvi
+  strukturirani predlog. Ne piše datotek in nima pravice odobriti izvedbe.
+- **GPT-OSS lokalni vodja** neodvisno preveri predlog izbranega pogovornega
+  modela proti lastnikovi
   zahtevi in skupnemu kontekstu ter ga popravi, zavrne ali potrdi.
 - **GPT-OSS izvajalec** deluje v ločeni, čisti izvedbeni seji in sme pisati samo
   v dovoljene datoteke izoliranega worktreeja.
@@ -39,10 +41,11 @@ določi, se odpre kot podizvajalska naloga z istim `parent_session_id`, istim
 projektnim spominom in že podanimi shemami orodij. Ob spremembi kateregakoli
 vira se stanje vrne v `AWAITING_CONTEXT_ACK` in celoten kontekst se potrdi znova.
 
-Qwen ima svojo trajno načrtovalno sejo. Njena skrita pogovorna zgodovina ni
-prenesena v GPT-OSS. Oba modela pa potrdita enak SHA-256 skupnega projektnega
-spomina. Med njima se prenese samo trenutna lastnikova zahteva, Qwenov omejeni
-JSON predlog in morebitna deterministična povratna informacija validatorja.
+Izbrani pogovorni model ima svojo trajno sejo. Njegova skrita pogovorna
+zgodovina ni prenesena v GPT-OSS. Oba modela pa potrdita enak SHA-256 skupnega
+projektnega spomina. Med njima se prenese samo trenutna lastnikova zahteva,
+omejeni JSON predlog izbranega modela in morebitna deterministična povratna
+informacija validatorja.
 Končni nespremenljiv načrt vedno izvira iz GPT-OSS potrditve in managerjevih
 mehanskih varnostnih pravil.
 
@@ -74,12 +77,19 @@ ostane ločen in še naprej upravlja lease, worktree, teste in checkpoint.
 
 ## Profil in revizijska sled
 
-`config/local_agents/lead_profiles.json` je deklarativen registry za nove
-naloge. Ob nastanku naloge manager razreši dejanski lokalni Ollama digest ter
-ustvari read-only `lead-profile-snapshot.json` in natančno kopijo sistemskega
+`config/local_agents/role_profiles.json` določa prompt in pogodbo vloge brez
+modela. `config/local_agents/model_runtime.json` določa samo tehnične privzete
+vrednosti in varne izjeme posameznih modelov. Ob nastanku naloge manager ločeno
+izbrano vlogo in model sestavi v immutable dokaz, razreši dejanski Ollama digest
+ter ustvari read-only `lead-profile-snapshot.json` in natančno kopijo sistemskega
 prompta. Nadaljevanje bere izključno ta snapshot; poznejša sprememba registryja
 na staro nalogo ne vpliva. Sprememba modela ali snapshota ustvari novo parent
 sejo in ne more tiho prevzeti obstoječe zgodovine.
+
+Open WebUI vsako vlogo prikaže samo enkrat. Pred prvim navadnim sporočilom
+lastnik z `/models` pregleda živi Ollama inventar in z `/model <tag>` izbere
+izvajalni model. Ta izbira ni del vloge in se ob nastanku naloge zaklene v
+immutable snapshot.
 
 Vsaka naloga ima append-only imenik `audit/events`. Posamezni dogodki so
 read-only datoteke z zaporedjem in `parent_event_id`; vsebujejo model, tag,

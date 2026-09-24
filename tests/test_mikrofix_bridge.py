@@ -322,8 +322,8 @@ class BridgeCompletionTests(unittest.TestCase):
         prompt = self.bridge.runtime_system_prompt()
         for required in (
             "Codex — vodja projekta in končni pregled",
-            "GPT-OSS — lokalni vodja izvedbe",
-            "Qwen — svetovalec za razčlenjevanje nalog",
+            "Pogovorni lokalni vodja — vloga s fiksnim promptom",
+            "GPT-OSS — privzeti validator načrta",
             "Bridge — nadzorni most",
             "Natančen vzrok:",
             "project_diff",

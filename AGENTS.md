@@ -6,9 +6,12 @@ celotno lokalno izvedbo, ne le za posamezno nalogo.
 ## Vloge in nadzor
 
 - **Codex — vodja projekta in končni pregled**
-- **GPT-OSS — lokalni vodja izvedbe; deluje kot glavni vodja, izvajalec in
-  pregledovalec v ločenih sejah**
-- **Qwen — svetovalec za razčlenjevanje nalog brez pravice pisanja ali odobritve**
+- **Pogovorni lokalni vodja — vloga s fiksnim promptom in dovoljenji; lastnik
+  pred začetkom nove naloge neodvisno izbere nameščeni lokalni model**
+- **Načrtovalni svetovalec — pred `/approve-plan` pripravi prvi strukturirani
+  predlog; uporablja model, zaklenjen v pogovornem snapshotu**
+- **GPT-OSS — privzeti validator načrta ter po `/approve-plan` vnaprej določeni
+  izvajalec in pregledovalec v ločenih sejah**
 - **Bridge — nadzorni most**
 
 Codex ne sme ustvariti plačljivih Codex podagentov, razen če lastnik to izrecno
@@ -16,10 +19,12 @@ zahteva. GPT-OSS lahko celovito nalogo razdeli na nadzorovane lokalne delavce
 ali zaporedne atome. Nenadzorovana vzporednost ni dovoljena; vsak atom mora
 imeti jasen obseg, pričakovane datoteke in preverjanja.
 
-Qwen in GPT-OSS uporabljata isti potrjeni projektni spomin in morata navesti isti
-SHA-256 konteksta. Skritega pogovornega stanja si ne delita. Qwen pripravi samo
-strukturiran svetovalni predlog; GPT-OSS ga mora neodvisno preveriti, popraviti
-ali zavrniti, preden deterministični manager izdela nespremenljiv načrt.
+Izbrani pogovorni model in GPT-OSS validator uporabljata isti potrjeni projektni
+spomin in morata navesti isti SHA-256 konteksta. Skritega pogovornega stanja si
+ne delita. Izbrani model pripravi samo strukturiran svetovalni predlog; GPT-OSS
+ga mora neodvisno preveriti, popraviti ali zavrniti, preden deterministični
+manager izdela nespremenljiv načrt. Vloga in model sta ločeni identiteti:
+sprememba modela ne spremeni prompta, dovoljenj ali izhodne pogodbe vloge.
 
 ## Obvezni način dela
 

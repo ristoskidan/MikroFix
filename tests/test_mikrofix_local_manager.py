@@ -66,11 +66,10 @@ class LocalManagerTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         ).stdout.strip()
 
-    def profile_snapshot(self, profile_id):
-        profile = manager.enabled_lead_profiles()[profile_id]
-        return manager.build_profile_snapshot(
-            profile, project_root=manager.PROJECT_ROOT,
-            model_digest="a" * 64,
+    def profile_snapshot(self, profile_id, *, model_tag=None):
+        return manager.snapshot_for_new_task(
+            profile_id, model_tag=model_tag or "gpt-oss:20b",
+            digest_resolver=lambda _url, _model: "a" * 64,
         )
 
     def test_normalize_overrides_all_trusted_fields(self):
@@ -195,7 +194,7 @@ class LocalManagerTests(unittest.TestCase):
         source = inspect.getsource(manager.run_lead_conversation)
         self.assertIn("ensure_conversation_session", source)
         self.assertNotIn("ensure_context_ready", source)
-        current = self.profile_snapshot("gpt_oss")
+        current = self.profile_snapshot("conversation_lead")
         self.assertEqual(
             (16384, "5m"), manager.conversation_runtime_settings(current),
         )
@@ -211,10 +210,31 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
         self.assertIn("timeout_seconds=900", source)
 
+    def test_role_identity_is_stable_while_model_selection_changes(self):
+        resolver = lambda _url, model: (
+            "a" * 64 if model == "gpt-oss:20b" else "b" * 64
+        )
+        first = manager.snapshot_for_new_task(
+            "conversation_lead", model_tag="gpt-oss:20b",
+            digest_resolver=resolver,
+        )
+        second = manager.snapshot_for_new_task(
+            "conversation_lead", model_tag="qwen3:14b-q4_K_M",
+            digest_resolver=resolver,
+        )
+        self.assertEqual(first["profile_id"], second["profile_id"])
+        self.assertEqual(first["role"], second["role"])
+        self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
+        self.assertNotEqual(first["model_tag"], second["model_tag"])
+        self.assertNotEqual(first["model_digest"], second["model_digest"])
+        self.assertNotEqual(
+            first["profile_snapshot_hash"], second["profile_snapshot_hash"],
+        )
+
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):
         def responder(message, **kwargs):
             self.assertEqual("Build the intake", message)
-            self.assertEqual("gpt_oss", kwargs["lead_profile"])
+            self.assertEqual("conversation_lead", kwargs["lead_profile"])
             self.assertEqual(
                 "gpt-oss:20b",
                 kwargs["lead_snapshot"]["model"],
@@ -226,16 +246,17 @@ class LocalManagerTests(unittest.TestCase):
                 "acceptance_criteria": [],
             }, {
                 "session_id": "lead-session", "memory_sha256": "b" * 64,
-                "bridge_job_id": "MF-BRIDGE", "lead_profile": "gpt_oss",
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "conversation_lead",
             })
 
         conversation = manager.start_conversation(
             "Build the intake", workspace=self.workspace,
-            lead_profile="gpt_oss", responder=responder,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=responder,
             snapshot_factory=self.profile_snapshot,
         )
         run_id = conversation["parent_run_id"]
-        self.assertEqual("gpt_oss", conversation["lead_profile"])
+        self.assertEqual("conversation_lead", conversation["lead_profile"])
         self.assertEqual(2, len(conversation["turns"]))
         self.assertEqual(1, len(list((self.workspace / "jobs").iterdir())))
         request = json.loads(
@@ -250,7 +271,7 @@ class LocalManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(manager.ManagerError, "zaklenjen"):
             manager.talk(
                 "Switch", parent_run_id=run_id, workspace=self.workspace,
-                lead_profile="qwen_thinking", responder=responder,
+                lead_profile="different_role", responder=responder,
             )
 
     def test_only_explicit_prepare_plan_moves_to_owner_approval_with_audit(self):
@@ -258,7 +279,7 @@ class LocalManagerTests(unittest.TestCase):
             if not kwargs.get("planning_requested"):
                 return ({"reply": "Preveril sem relevantni del kode."}, {
                     "session_id": "lead-session", "memory_sha256": "b" * 64,
-                    "bridge_job_id": "MF-BRIDGE", "lead_profile": "gpt_oss",
+                    "bridge_job_id": "MF-BRIDGE", "lead_profile": "conversation_lead",
                     "prompt_hash": "c" * 64,
                 })
             return ({
@@ -275,13 +296,14 @@ class LocalManagerTests(unittest.TestCase):
                 "acceptance_criteria": ["Regression test passes"],
             }, {
                 "session_id": "lead-session", "memory_sha256": "b" * 64,
-                "bridge_job_id": "MF-BRIDGE", "lead_profile": "gpt_oss",
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "conversation_lead",
                 "prompt_hash": "c" * 64,
             })
 
         with mock.patch.object(manager, "submit") as submit:
             conversation = manager.start_conversation(
-                "Implement it", workspace=self.workspace, lead_profile="gpt_oss",
+                "Implement it", workspace=self.workspace,
+                lead_profile="conversation_lead", model_tag="gpt-oss:20b",
                 responder=responder, snapshot_factory=self.profile_snapshot,
             )
         submit.assert_not_called()
@@ -317,7 +339,7 @@ class LocalManagerTests(unittest.TestCase):
             planner_kwargs["advisor_proposal"]["objective"],
         )
         self.assertEqual(
-            "gpt_oss", planner_kwargs["advisor_snapshot"]["profile_id"],
+            "conversation_lead", planner_kwargs["advisor_snapshot"]["profile_id"],
         )
         lifecycle = json.loads((job_dir / "task-state.json").read_text())
         self.assertEqual("AWAITING_OWNER_APPROVAL", lifecycle["state"])
@@ -450,7 +472,7 @@ class LocalManagerTests(unittest.TestCase):
         parent_id = "MF-PARENT-LIFECYCLE"
         parent = self.workspace / "jobs" / parent_id
         parent.mkdir()
-        snapshot = self.profile_snapshot("gpt_oss")
+        snapshot = self.profile_snapshot("conversation_lead")
         manager.write_profile_snapshot(parent, snapshot)
         manager.write_system_prompt_snapshot(
             parent, project_root=manager.PROJECT_ROOT, snapshot=snapshot,
@@ -461,7 +483,7 @@ class LocalManagerTests(unittest.TestCase):
         )
         manager.transition_task(
             parent, manager.TaskState.READY_FOR_PROCESSING,
-            snapshot=snapshot, actor_type="lead", actor_id="gpt_oss",
+            snapshot=snapshot, actor_type="lead", actor_id="conversation_lead",
             event_type="LEAD_PROPOSED_PLAN",
         )
         manager.transition_task(

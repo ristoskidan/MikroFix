@@ -55,7 +55,7 @@ class LocalManagerUIPureTests(unittest.TestCase):
         rendered = ui.render_job(jobs[0])
         self.assertIn("Owner clarification", rendered)
         self.assertIn("Nadaljevanje naloge: MF-1", rendered)
-        self.assertIn("Qwen razčlenjuje", rendered)
+        self.assertIn("Izbrani model pripravlja predlog", rendered)
         self.assertIn("GPT-OSS pa preverja", rendered)
 
     def test_ready_candidate_renders_checkpoint(self):

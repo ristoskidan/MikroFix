@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Callable
+import urllib.parse
 import urllib.request
 
 try:
@@ -58,6 +59,8 @@ except ModuleNotFoundError:
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
 BRIDGE_TEMPLATE = Path.home() / ".local/share/mikrofix-bridge/config.json"
 PROFILE_REGISTRY = PROJECT_ROOT / "config/local_agents/lead_profiles.json"
+ROLE_REGISTRY = PROJECT_ROOT / "config/local_agents/role_profiles.json"
+MODEL_RUNTIME = PROJECT_ROOT / "config/local_agents/model_runtime.json"
 PROPOSAL_SCHEMA = (
     PROJECT_ROOT / "docs/local_agents/supervisor/PLAN_PROPOSAL_SCHEMA.json"
 )
@@ -162,16 +165,129 @@ def enabled_lead_profiles() -> dict[str, dict[str, Any]]:
     }
 
 
+def enabled_role_profiles() -> dict[str, dict[str, Any]]:
+    """Load model-independent owner-selectable roles."""
+    try:
+        raw = json.loads(ROLE_REGISTRY.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManagerError(f"Cannot load role registry: {ROLE_REGISTRY}") from exc
+    if not isinstance(raw, dict) or set(raw) != {"schema_version", "roles"}:
+        raise ManagerError("Role registry has unknown or missing fields")
+    if raw["schema_version"] != 1 or not isinstance(raw["roles"], dict):
+        raise ManagerError("Unsupported role registry schema")
+    roles: dict[str, dict[str, Any]] = {}
+    expected = {"version", "role", "display_name", "system_prompt", "enabled"}
+    for role_id, role in raw["roles"].items():
+        if not isinstance(role_id, str) or not re.fullmatch(r"[a-z0-9_]+", role_id):
+            raise ManagerError(f"Unsafe role id: {role_id!r}")
+        if not isinstance(role, dict) or set(role) != expected:
+            raise ManagerError(f"Role {role_id} has unknown or missing fields")
+        if role.get("role") != role_id:
+            raise ManagerError(f"Role {role_id} identity mismatch")
+        if not isinstance(role.get("version"), int) or role["version"] < 1:
+            raise ManagerError(f"Role {role_id} version must be positive")
+        if not isinstance(role.get("enabled"), bool):
+            raise ManagerError(f"Role {role_id} enabled must be boolean")
+        for field in ("display_name", "system_prompt"):
+            if not isinstance(role.get(field), str) or not role[field].strip():
+                raise ManagerError(f"Role {role_id} {field} is invalid")
+        prompt = (PROJECT_ROOT / role["system_prompt"]).resolve()
+        try:
+            prompt.relative_to(PROJECT_ROOT.resolve())
+        except ValueError as exc:
+            raise ManagerError(f"Role {role_id} prompt escapes project") from exc
+        if not prompt.is_file():
+            raise ManagerError(f"Role {role_id} prompt does not exist")
+        if role["enabled"]:
+            roles[role_id] = {"profile_id": role_id, **role}
+    if not roles:
+        raise ManagerError("Role registry has no enabled roles")
+    return roles
+
+
+def model_runtime_settings(model_tag: str) -> dict[str, Any]:
+    """Resolve safe technical settings independently from the selected role."""
+    try:
+        raw = json.loads(MODEL_RUNTIME.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManagerError(f"Cannot load model runtime registry: {MODEL_RUNTIME}") from exc
+    if not isinstance(raw, dict) or set(raw) != {
+        "schema_version", "defaults", "overrides",
+    } or raw["schema_version"] != 1:
+        raise ManagerError("Invalid model runtime registry")
+    defaults = raw["defaults"]
+    overrides = raw["overrides"]
+    if not isinstance(defaults, dict) or not isinstance(overrides, dict):
+        raise ManagerError("Invalid model runtime settings")
+    settings = {**defaults, **(overrides.get(model_tag) or {})}
+    expected = {
+        "num_ctx", "conversation_num_ctx", "think", "keep_alive",
+        "conversation_keep_alive",
+    }
+    if set(settings) != expected:
+        raise ManagerError(f"Model settings for {model_tag} are incomplete")
+    if (
+        isinstance(settings["num_ctx"], bool)
+        or not isinstance(settings["num_ctx"], int)
+        or settings["num_ctx"] < 1024
+        or isinstance(settings["conversation_num_ctx"], bool)
+        or not isinstance(settings["conversation_num_ctx"], int)
+        or settings["conversation_num_ctx"] < 1024
+        or settings["conversation_num_ctx"] > settings["num_ctx"]
+    ):
+        raise ManagerError(f"Model context settings for {model_tag} are invalid")
+    if not isinstance(settings["think"], (bool, str)):
+        raise ManagerError(f"Model think setting for {model_tag} is invalid")
+    for field in ("keep_alive", "conversation_keep_alive"):
+        if not isinstance(settings[field], str) or not settings[field].strip():
+            raise ManagerError(f"Model {field} for {model_tag} is invalid")
+    return settings
+
+
+def installed_ollama_models() -> list[str]:
+    """Read the live local model inventory used by the Open WebUI selector."""
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    parsed = urllib.parse.urlsplit(str(template["ollama_url"]))
+    tags_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/api/tags", "", ""))
+    try:
+        with urllib.request.urlopen(tags_url, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ManagerError("Cannot read installed Ollama models") from exc
+    values = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        raise ManagerError("Ollama model inventory has an invalid shape")
+    names = {
+        str(item.get("name") or item.get("model") or "").strip()
+        for item in values if isinstance(item, dict)
+    }
+    return sorted(name for name in names if name)
+
+
 def snapshot_for_new_task(
-    lead_profile: str, *,
+    lead_profile: str, *, model_tag: str | None = None,
     digest_resolver: Callable[[str, str], str] = resolve_ollama_digest,
 ) -> dict[str, Any]:
-    profiles = enabled_lead_profiles()
-    if lead_profile not in profiles:
-        raise ManagerError(f"Unknown or disabled lead profile: {lead_profile}")
+    roles = enabled_role_profiles()
+    if lead_profile not in roles:
+        raise ManagerError(f"Unknown or disabled role profile: {lead_profile}")
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
-    profile = profiles[lead_profile]
-    digest = digest_resolver(str(template["ollama_url"]), str(profile["model"]))
+    selected_model = (model_tag or str(template["model"])).strip()
+    if not selected_model:
+        raise ManagerError("A local model must be selected")
+    role = roles[lead_profile]
+    runtime = model_runtime_settings(selected_model)
+    profile = {
+        "profile_id": lead_profile,
+        "version": role["version"],
+        "model": selected_model,
+        "role": role["role"],
+        "display_name": role["display_name"],
+        "system_prompt": role["system_prompt"],
+        "enabled": True,
+        **runtime,
+    }
+    digest = digest_resolver(str(template["ollama_url"]), selected_model)
     return build_profile_snapshot(
         profile, project_root=PROJECT_ROOT, model_digest=digest,
     )
@@ -726,7 +842,7 @@ def conversation_runtime_settings(snapshot: dict[str, Any]) -> tuple[int, str]:
 
 def run_lead_conversation(
     message: str, *, job_dir: Path, repository: Path,
-    turns: list[dict[str, str]], lead_profile: str = "gpt_oss",
+    turns: list[dict[str, str]], lead_profile: str = "conversation_lead",
     lead_snapshot: dict[str, Any] | None = None,
     planning_requested: bool = False,
 ) -> tuple[dict[str, Any], dict[str, str]]:
@@ -869,7 +985,7 @@ def run_lead_conversation(
 def talk(
     message: str, *, parent_run_id: str,
     workspace: Path = DEFAULT_WORKSPACE,
-    lead_profile: str = "gpt_oss",
+    lead_profile: str = "conversation_lead",
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     planning_requested: bool = False,
 ) -> dict[str, Any]:
@@ -1035,9 +1151,9 @@ def prepare_plan(
 
 def start_conversation(
     message: str, *, workspace: Path = DEFAULT_WORKSPACE,
-    lead_profile: str = "gpt_oss",
+    lead_profile: str = "conversation_lead", model_tag: str | None = None,
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
-    snapshot_factory: Callable[[str], dict[str, Any]] = snapshot_for_new_task,
+    snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
 ) -> dict[str, Any]:
     """Create one owner-visible conversation root, then ask only its chosen lead."""
     workspace = workspace.expanduser().resolve()
@@ -1052,7 +1168,7 @@ def start_conversation(
     checkpoint = command(
         ["git", "rev-parse", "HEAD"], cwd=repository, timeout=30,
     ).strip()
-    snapshot = snapshot_factory(lead_profile)
+    snapshot = snapshot_factory(lead_profile, model_tag=model_tag)
     if snapshot.get("profile_id") != lead_profile:
         raise ManagerError("Snapshot factory returned a different lead profile")
     run_id = new_run_id(workspace)
@@ -1081,7 +1197,8 @@ def start_conversation(
     })
     atomic_write_json(job_dir / "conversation.json", {
         "schema_version": 1, "parent_run_id": run_id,
-        "lead_profile": lead_profile, "turns": [], "active_run_id": "",
+        "lead_profile": lead_profile, "model_tag": snapshot["model_tag"],
+        "turns": [], "active_run_id": "",
         "updated_at": stamp,
     })
     try:
@@ -1312,13 +1429,16 @@ def parse_args() -> argparse.Namespace:
     start_parser = sub.add_parser("start")
     start_parser.add_argument("--message", required=True)
     start_parser.add_argument(
-        "--profile", choices=tuple(enabled_lead_profiles()), default="gpt_oss"
+        "--profile", choices=tuple(enabled_role_profiles()),
+        default="conversation_lead",
     )
+    start_parser.add_argument("--model")
     talk_parser = sub.add_parser("talk")
     talk_parser.add_argument("--message", required=True)
     talk_parser.add_argument("--parent", required=True)
     talk_parser.add_argument(
-        "--profile", choices=tuple(enabled_lead_profiles()), default="gpt_oss"
+        "--profile", choices=tuple(enabled_role_profiles()),
+        default="conversation_lead",
     )
     plan_parser = sub.add_parser("prepare-plan")
     plan_parser.add_argument("run_id")
@@ -1347,6 +1467,7 @@ def main() -> int:
         elif args.command_name == "start":
             result = start_conversation(
                 args.message, workspace=args.workspace, lead_profile=args.profile,
+                model_tag=args.model,
             )
         elif args.command_name == "talk":
             result = talk(

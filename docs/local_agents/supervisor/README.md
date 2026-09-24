@@ -133,16 +133,24 @@ claim creation and before queue acceptance is not retried automatically.
 
 ## Open WebUI front door
 
-`tools/mikrofix_openwebui_gateway.py` exposes one virtual OpenAI-compatible
-model, `mikrofix-local-team`. Open WebUI talks only to that front door; it does
-not choose the internal planning, execution or review role directly.
+`tools/mikrofix_openwebui_gateway.py` exposes an OpenAI-compatible front door.
+It exposes every enabled pre-approval role exactly once, independent of the
+installed model inventory. Open WebUI therefore shows a single
+`Pogovorni lokalni vodja` entry for `conversation_lead`, not one duplicate per
+LLM. `/models` reads the live Ollama inventory and `/model <tag>` chooses the
+LLM before the first ordinary message creates a task.
 
-Ordinary messages create or continue a conversation locked to the `gpt_oss`
-profile. The assistant response contains the immutable `MF-LOCAL-...` id, which
-the gateway reads from subsequent chat history. Owner slash commands are parsed
-by trusted Python code before routing and never reach a language model.
-`/prepare-plan` therefore invokes the existing Qwen planning advisor,
-GPT-OSS validator and deterministic manager flow exactly as the local UI does.
+Ordinary messages create or continue a conversation locked to the selected
+role and previously chosen model. The role determines the prompt and contract;
+the model runtime registry determines only technical context/thinking settings.
+The assistant
+response contains the immutable `MF-LOCAL-...` id, which the gateway reads from
+subsequent chat history. A silent role or model change in the same conversation
+fails closed. Owner slash commands are parsed by trusted Python code before
+routing and never reach a language model. `/prepare-plan` asks the selected
+conversation model for the structured first proposal, then invokes the fixed
+validator and deterministic manager. Roles after `/approve-plan` remain
+preconfigured in the supervisor flow.
 
 The gateway listens only on the Docker host bridge address, requires a bearer
 token stored outside the repository and intentionally exposes no generic file,

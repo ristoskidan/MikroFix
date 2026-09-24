@@ -15,6 +15,11 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
+try:
+    from tools.mikrofix_local_manager import installed_ollama_models
+except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
+    from mikrofix_local_manager import installed_ollama_models  # type: ignore[no-redef]
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
@@ -23,7 +28,7 @@ WINDOW_TITLE = "MikroFix – lokalni vodja projekta"
 
 STATE_LABELS = {
     "CONVERSATION": "Pogovor z izbranim lokalnim vodjo",
-    "PLANNING": "Qwen razčlenjuje nalogo, GPT-OSS pa preverja načrt",
+    "PLANNING": "Izbrani model pripravlja predlog, GPT-OSS pa preverja načrt",
     "READY_FOR_OWNER_LEASE": "Načrt je pripravljen — čaka tvojo odobritev izvedbe",
     "WAITING_FOR_OWNER_LEASE": "Čaka na tvojo potrditev dovoljenja za pisanje",
     "RUNNING_LOCAL": "GPT-OSS izvaja nalogo in ločeni pregledovalec jo preverja",
@@ -95,6 +100,7 @@ def list_jobs(workspace: Path) -> list[dict[str, Any]]:
             "manager": manager,
             "directory": directory,
             "lead_profile": request.get("lead_profile", ""),
+            "model_tag": request.get("model_tag", request.get("model", "")),
             "review": review,
         })
     jobs.sort(key=lambda item: item["created_at"], reverse=True)
@@ -143,11 +149,10 @@ def render_job(job: dict[str, Any]) -> str:
     conversation = read_json(job["directory"] / "conversation.json")
     turns = conversation.get("turns") or []
     if turns:
-        profile = str(conversation.get("lead_profile") or "gpt_oss")
-        lead_name = (
-            "QWEN THINKING VODJA" if profile == "qwen_thinking"
-            else "GPT-OSS VODJA"
+        model_tag = str(
+            conversation.get("model_tag") or job.get("model_tag") or "izbrani model"
         )
+        lead_name = f"POGOVORNI LOKALNI VODJA · {model_tag}"
         lines.extend(["", f"NEPOSREDNI POGOVOR · {lead_name}"])
         for turn in turns:
             if not isinstance(turn, dict):
@@ -256,12 +261,23 @@ class LocalManagerUI:
 
         actions = ttk.Frame(right)
         actions.pack(fill="x", pady=(8, 0))
-        self.profile = ttk.Combobox(
-            actions, state="readonly", width=22,
-            values=("GPT-OSS vodja", "Qwen Thinking vodja"),
+        ttk.Label(actions, text="Pogovorni lokalni vodja").pack(
+            side="left", padx=(0, 8)
         )
-        self.profile.current(0)
-        self.profile.pack(side="left", padx=(0, 8))
+        try:
+            model_values = tuple(sorted(installed_ollama_models()))
+        except Exception:
+            model_values = ()
+        self.model = ttk.Combobox(
+            actions, state="readonly", width=30, values=model_values,
+        )
+        if model_values:
+            preferred = (
+                model_values.index("gpt-oss:20b")
+                if "gpt-oss:20b" in model_values else 0
+            )
+            self.model.current(preferred)
+        self.model.pack(side="left", padx=(0, 8))
         self.send_button = ttk.Button(actions, text="Pošlji lokalnemu vodji",
                                       command=self.send)
         self.send_button.pack(side="left")
@@ -317,8 +333,9 @@ class LocalManagerUI:
     def show_selected(self) -> None:
         job = self.selected_job()
         text = render_job(job) if job else (
-            "Začni novo nalogo. Lokalni vodja bo pregledal projekt, pripravil načrt "
-            "in delo predal Qwenu šele po tvoji potrditvi.\n"
+            "Začni novo nalogo. Izbrani model bo v vlogi pogovornega lokalnega "
+            "vodje pregledal projekt in pripravil predlog. Po tvoji potrditvi "
+            "izvedbo prevzamejo vnaprej določene vloge.\n"
         )
         if text != self.last_render:
             self.transcript.configure(state="normal")
@@ -328,11 +345,15 @@ class LocalManagerUI:
             self.transcript.see("end")
             self.last_render = text
         state = job["state"] if job else ""
-        if job and job.get("lead_profile"):
-            self.profile.current(1 if job["lead_profile"] == "qwen_thinking" else 0)
-            self.profile.configure(state="disabled")
+        if job and job.get("model_tag"):
+            values = tuple(self.model.cget("values"))
+            if job["model_tag"] not in values:
+                values = (*values, job["model_tag"])
+                self.model.configure(values=values)
+            self.model.set(job["model_tag"])
+            self.model.configure(state="disabled")
         else:
-            self.profile.configure(state="readonly")
+            self.model.configure(state="readonly")
         self.execute_button.configure(
             state="normal" if state == "READY_FOR_OWNER_LEASE" else "disabled"
         )
@@ -352,7 +373,7 @@ class LocalManagerUI:
         self.input.delete("1.0", "end")
         self.input.focus_set()
         self.last_render = ""
-        self.profile.configure(state="readonly")
+        self.model.configure(state="readonly")
         self.show_selected()
 
     def spawn_manager(self, arguments: list[str]) -> None:
@@ -373,12 +394,18 @@ class LocalManagerUI:
         if not text:
             messagebox.showinfo("MikroFix", "Najprej napiši nalogo ali pojasnilo.")
             return
-        profile = "qwen_thinking" if self.profile.current() == 1 else "gpt_oss"
+        model_tag = self.model.get().strip()
+        if not self.selected_run_id and not model_tag:
+            messagebox.showerror(
+                "MikroFix", "Ni najdenega nameščenega lokalnega modela.",
+            )
+            return
         arguments = (
             ["talk", "--message", text, "--parent", self.selected_run_id,
-             "--profile", profile]
+             "--profile", "conversation_lead"]
             if self.selected_run_id else
-            ["start", "--message", text, "--profile", profile]
+            ["start", "--message", text, "--profile", "conversation_lead",
+             "--model", model_tag]
         )
         self.spawn_manager(arguments)
         self.input.delete("1.0", "end")
