@@ -274,9 +274,8 @@ async def _stream_response(
     task = asyncio.create_task(asyncio.to_thread(operation))
     yield _chunk(request_id, model_id, "", None)
     while not task.done():
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=10)
-        except asyncio.TimeoutError:
+        done, _pending = await asyncio.wait({task}, timeout=10)
+        if not done:
             # A standards-valid empty delta keeps the local connection alive.
             yield _chunk(request_id, model_id, "", None)
     try:

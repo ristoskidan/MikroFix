@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 from unittest import mock
 
@@ -115,6 +116,21 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             gateway.route_message(
                 "Preveri napako", "", "conversation_lead", "",
             )
+
+    def test_stream_finishes_cleanly_when_manager_operation_fails(self):
+        def fail() -> str:
+            raise RuntimeError("Dosežena omejitev korakov")
+
+        async def collect() -> list[str]:
+            return [
+                chunk async for chunk in gateway._stream_response(
+                    "chatcmpl-test", "mikrofix::conversation_lead", fail,
+                )
+            ]
+
+        chunks = asyncio.run(collect())
+        self.assertIn("MikroFIX je zahtevo varno zavrnil", "".join(chunks))
+        self.assertEqual("data: [DONE]\n\n", chunks[-1])
 
 
 if __name__ == "__main__":
