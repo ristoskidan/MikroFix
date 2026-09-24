@@ -44,7 +44,7 @@
         "num_predict": 8192
       },
       "deep": {
-        "num_ctx": 45056,
+        "num_ctx": 32768,
         "num_predict": 12288
       }
     }

@@ -143,7 +143,7 @@ a model-specific preset and a bounded allowlist of runtime values, for example:
 
 ```text
 /llm qwen3:4b-thinking-2507-q8_0 preset=deep
-/llm qwen3:4b-thinking-2507-q8_0 num_ctx=45056 num_predict=12288 temperature=0.6
+/llm qwen3:4b-thinking-2507-q8_0 num_ctx=32768 num_predict=12288 temperature=0.6
 ```
 
 `/llm-settings` shows the effective preselection or locked task settings, while

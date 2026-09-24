@@ -255,7 +255,7 @@ class LocalManagerTests(unittest.TestCase):
             "qwen3:4b-thinking-2507-q8_0", preset="deep",
             overrides={"temperature": 0.5},
         )
-        self.assertEqual(45056, selected["num_ctx"])
+        self.assertEqual(32768, selected["num_ctx"])
         self.assertEqual(12288, selected["num_predict"])
         snapshot = manager.snapshot_for_new_task(
             "conversation_lead",
@@ -264,7 +264,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=lambda _url, _model: "a" * 64,
         )
         self.assertEqual(3, snapshot["schema_version"])
-        self.assertEqual(45056, snapshot["conversation_num_ctx"])
+        self.assertEqual(32768, snapshot["conversation_num_ctx"])
         self.assertEqual(12288, snapshot["runtime_options"]["num_predict"])
         self.assertEqual(0.5, snapshot["runtime_options"]["temperature"])
         with self.assertRaisesRegex(manager.ManagerError, "num_ctx"):

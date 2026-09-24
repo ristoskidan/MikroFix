@@ -92,7 +92,7 @@ izvajalni model. Ta izbira ni del vloge in se ob nastanku naloge zaklene v
 immutable snapshot.
 
 Pred nastankom naloge lahko `/llm` vsebuje model-specific preset ali preverjene
-pare `ključ=vrednost`, na primer `preset=deep`, `num_ctx=45056` in
+pare `ključ=vrednost`, na primer `preset=deep`, `num_ctx=32768` in
 `num_predict=12288`. Gateway predizbiro podpiše; spremenjen ali neveljaven zapis
 se zavrne. `/llm-settings` pokaže dejanske vrednosti, `/llm-reset` pa sme
 odstraniti samo še nezaklenjeno predizbiro. Dovoljeni generacijski parametri se
