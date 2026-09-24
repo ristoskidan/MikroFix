@@ -30,7 +30,7 @@ try:
         validate_plan,
     )
     from tools.mikrofix_task_lifecycle import (
-        TaskState, build_profile_snapshot, initialize_task_lifecycle,
+        RUNTIME_OPTION_FIELDS, TaskState, build_profile_snapshot, initialize_task_lifecycle,
         load_profile_registry, read_profile_snapshot, read_task_state,
         read_system_prompt_snapshot, record_task_event, resolve_ollama_digest,
         sha256_text, transition_task, write_profile_snapshot,
@@ -48,7 +48,7 @@ except ModuleNotFoundError:
         validate_plan,
     )
     from mikrofix_task_lifecycle import (  # type: ignore[no-redef]
-        TaskState, build_profile_snapshot, initialize_task_lifecycle,
+        RUNTIME_OPTION_FIELDS, TaskState, build_profile_snapshot, initialize_task_lifecycle,
         load_profile_registry, read_profile_snapshot, read_task_state,
         read_system_prompt_snapshot, record_task_event, resolve_ollama_digest,
         sha256_text, transition_task, write_profile_snapshot,
@@ -205,20 +205,28 @@ def enabled_role_profiles() -> dict[str, dict[str, Any]]:
     return roles
 
 
-def model_runtime_settings(model_tag: str) -> dict[str, Any]:
-    """Resolve safe technical settings independently from the selected role."""
+def _model_runtime_registry() -> dict[str, Any]:
     try:
         raw = json.loads(MODEL_RUNTIME.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ManagerError(f"Cannot load model runtime registry: {MODEL_RUNTIME}") from exc
     if not isinstance(raw, dict) or set(raw) != {
-        "schema_version", "defaults", "overrides",
-    } or raw["schema_version"] != 1:
+        "schema_version", "defaults", "overrides", "presets",
+    } or raw["schema_version"] != 2:
         raise ManagerError("Invalid model runtime registry")
     defaults = raw["defaults"]
     overrides = raw["overrides"]
-    if not isinstance(defaults, dict) or not isinstance(overrides, dict):
+    presets = raw["presets"]
+    if not all(isinstance(value, dict) for value in (defaults, overrides, presets)):
         raise ManagerError("Invalid model runtime settings")
+    return raw
+
+
+def model_runtime_settings(model_tag: str) -> dict[str, Any]:
+    """Resolve safe technical settings independently from the selected role."""
+    raw = _model_runtime_registry()
+    defaults = raw["defaults"]
+    overrides = raw["overrides"]
     settings = {**defaults, **(overrides.get(model_tag) or {})}
     expected = {
         "num_ctx", "conversation_num_ctx", "think", "keep_alive",
@@ -244,6 +252,79 @@ def model_runtime_settings(model_tag: str) -> dict[str, Any]:
     return settings
 
 
+OWNER_RUNTIME_FIELDS = frozenset({"num_ctx", "think", *RUNTIME_OPTION_FIELDS})
+
+
+def model_runtime_presets(model_tag: str) -> dict[str, dict[str, Any]]:
+    values = _model_runtime_registry()["presets"].get(model_tag, {})
+    if not isinstance(values, dict):
+        raise ManagerError(f"Model presets for {model_tag} are invalid")
+    result: dict[str, dict[str, Any]] = {}
+    for name, preset in values.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9_-]*", name):
+            raise ManagerError(f"Unsafe runtime preset name: {name!r}")
+        if not isinstance(preset, dict):
+            raise ManagerError(f"Runtime preset {name} must be an object")
+        result[name] = normalize_runtime_selection(model_tag, preset)
+    return result
+
+
+def normalize_runtime_selection(
+    model_tag: str, values: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate owner-selectable runtime values against the model safety cap."""
+    selected = dict(values or {})
+    unknown = sorted(set(selected) - OWNER_RUNTIME_FIELDS)
+    if unknown:
+        raise ManagerError("Unsupported runtime setting(s): " + ", ".join(unknown))
+    base = model_runtime_settings(model_tag)
+
+    def integer(field: str, minimum: int, maximum: int) -> None:
+        if field not in selected:
+            return
+        value = selected[field]
+        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+            raise ManagerError(f"{field} must be an integer from {minimum} to {maximum}")
+
+    def number(field: str, minimum: float, maximum: float) -> None:
+        if field not in selected:
+            return
+        value = selected[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not minimum <= value <= maximum:
+            raise ManagerError(f"{field} must be a number from {minimum} to {maximum}")
+        selected[field] = float(value)
+
+    integer("num_ctx", 1024, int(base["num_ctx"]))
+    effective_ctx = int(selected.get("num_ctx", base["conversation_num_ctx"]))
+    integer("num_predict", 1, min(effective_ctx, 32768))
+    integer("top_k", 0, 1000)
+    integer("seed", -1, 2**31 - 1)
+    number("temperature", 0, 2)
+    number("top_p", 0, 1)
+    number("min_p", 0, 1)
+    number("repeat_penalty", 0, 2)
+    if "think" in selected:
+        think = selected["think"]
+        if isinstance(base["think"], bool):
+            if not isinstance(think, bool):
+                raise ManagerError("think must be true or false for this model")
+        elif think not in {"low", "medium", "high", "max"}:
+            raise ManagerError("think must be low, medium, high or max for this model")
+    return {field: selected[field] for field in sorted(selected)}
+
+
+def resolve_runtime_selection(
+    model_tag: str, *, preset: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    presets = model_runtime_presets(model_tag)
+    if preset is not None and preset not in presets:
+        choices = ", ".join(sorted(presets)) or "(none)"
+        raise ManagerError(f"Unknown preset {preset!r} for {model_tag}; available: {choices}")
+    merged = {**(presets.get(preset, {})), **(overrides or {})}
+    return normalize_runtime_selection(model_tag, merged)
+
+
 def installed_ollama_models() -> list[str]:
     """Read the live local model inventory used by the Open WebUI selector."""
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
@@ -266,6 +347,7 @@ def installed_ollama_models() -> list[str]:
 
 def snapshot_for_new_task(
     lead_profile: str, *, model_tag: str | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
     digest_resolver: Callable[[str, str], str] = resolve_ollama_digest,
 ) -> dict[str, Any]:
     roles = enabled_role_profiles()
@@ -277,6 +359,12 @@ def snapshot_for_new_task(
         raise ManagerError("A local model must be selected")
     role = roles[lead_profile]
     runtime = model_runtime_settings(selected_model)
+    selected_runtime = normalize_runtime_selection(selected_model, runtime_overrides)
+    if "num_ctx" in selected_runtime:
+        runtime["num_ctx"] = selected_runtime["num_ctx"]
+        runtime["conversation_num_ctx"] = selected_runtime["num_ctx"]
+    if "think" in selected_runtime:
+        runtime["think"] = selected_runtime["think"]
     profile = {
         "profile_id": lead_profile,
         "version": role["version"],
@@ -285,6 +373,9 @@ def snapshot_for_new_task(
         "display_name": role["display_name"],
         "system_prompt": role["system_prompt"],
         "enabled": True,
+        "runtime_options": {
+            field: selected_runtime.get(field) for field in RUNTIME_OPTION_FIELDS
+        },
         **runtime,
     }
     digest = digest_resolver(str(template["ollama_url"]), selected_model)
@@ -946,7 +1037,7 @@ def run_lead_conversation(
     token_file = executor_config / "token"
     executor_url = f"http://127.0.0.1:{port}"
     config_path = bridge_home / "config.json"
-    atomic_write_immutable_json(config_path, {
+    bridge_config = {
         "ollama_url": template["ollama_url"],
         "model": model,
         "executor_url": executor_url,
@@ -969,7 +1060,12 @@ def run_lead_conversation(
             planning_requested=planning_requested,
         ),
         "agent_role": role,
-    })
+    }
+    runtime_options = snapshot.get("runtime_options") or {}
+    for field in RUNTIME_OPTION_FIELDS:
+        if runtime_options.get(field) is not None:
+            bridge_config[field] = runtime_options[field]
+    atomic_write_immutable_json(config_path, bridge_config)
     executor_env = {
         "MIKROFIX_EXECUTOR_ROOT": str(repository),
         "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config),
@@ -1227,6 +1323,7 @@ def prepare_plan(
 def start_conversation(
     message: str, *, workspace: Path = DEFAULT_WORKSPACE,
     lead_profile: str = "conversation_lead", model_tag: str | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -1244,7 +1341,10 @@ def start_conversation(
     checkpoint = command(
         ["git", "rev-parse", "HEAD"], cwd=repository, timeout=30,
     ).strip()
-    snapshot = snapshot_factory(lead_profile, model_tag=model_tag)
+    snapshot_kwargs: dict[str, Any] = {"model_tag": model_tag}
+    if runtime_overrides:
+        snapshot_kwargs["runtime_overrides"] = runtime_overrides
+    snapshot = snapshot_factory(lead_profile, **snapshot_kwargs)
     if snapshot.get("profile_id") != lead_profile:
         raise ManagerError("Snapshot factory returned a different lead profile")
     run_id = new_run_id(workspace)

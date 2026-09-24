@@ -138,11 +138,30 @@ It exposes every enabled pre-approval role exactly once, independent of the
 installed model inventory. Open WebUI therefore shows a single
 `Pogovorni lokalni vodja` entry for `conversation_lead`, not one duplicate per
 LLM. `/llms` reads the live Ollama inventory and `/llm <tag>` chooses the
-LLM before the first ordinary message creates a task.
+LLM before the first ordinary message creates a task. The same command accepts
+a model-specific preset and a bounded allowlist of runtime values, for example:
+
+```text
+/llm qwen3:4b-thinking-2507-q8_0 preset=deep
+/llm qwen3:4b-thinking-2507-q8_0 num_ctx=49152 num_predict=12288 temperature=0.6
+```
+
+`/llm-settings` shows the effective preselection or locked task settings, while
+`/llm-reset` clears only an unlocked preselection. The gateway signs the
+preselection embedded in chat history. Unknown, duplicated, malformed or
+out-of-range values fail closed, and editing the marker invalidates its
+signature. Only `num_ctx`, `num_predict`, `temperature`, `top_k`, `top_p`,
+`min_p`, `repeat_penalty`, `seed` and `think` are owner-selectable. Hardware and
+contract controls such as GPU layers, threads, batching, stop sequences and
+output format remain manager-owned.
 
 Ordinary messages create or continue a conversation locked to the selected
 role and previously chosen model. The role determines the prompt and contract;
-the model runtime registry determines only technical context/thinking settings.
+the model runtime registry determines technical defaults and safe per-model
+caps. The first ordinary message expands the signed selection into the
+immutable profile snapshot. Effective generation options participate in the
+snapshot hash and are copied into every bridge turn; later chat controls cannot
+silently change them.
 The assistant
 response contains the immutable `MF-LOCAL-...` id, which the gateway reads from
 subsequent chat history. A silent role or model change in the same conversation

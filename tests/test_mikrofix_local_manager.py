@@ -250,6 +250,50 @@ class LocalManagerTests(unittest.TestCase):
             first["profile_snapshot_hash"], second["profile_snapshot_hash"],
         )
 
+    def test_runtime_preset_and_overrides_are_validated_and_snapshotted(self):
+        selected = manager.resolve_runtime_selection(
+            "qwen3:4b-thinking-2507-q8_0", preset="deep",
+            overrides={"temperature": 0.5},
+        )
+        self.assertEqual(49152, selected["num_ctx"])
+        self.assertEqual(12288, selected["num_predict"])
+        snapshot = manager.snapshot_for_new_task(
+            "conversation_lead",
+            model_tag="qwen3:4b-thinking-2507-q8_0",
+            runtime_overrides=selected,
+            digest_resolver=lambda _url, _model: "a" * 64,
+        )
+        self.assertEqual(3, snapshot["schema_version"])
+        self.assertEqual(49152, snapshot["conversation_num_ctx"])
+        self.assertEqual(12288, snapshot["runtime_options"]["num_predict"])
+        self.assertEqual(0.5, snapshot["runtime_options"]["temperature"])
+        with self.assertRaisesRegex(manager.ManagerError, "num_ctx"):
+            manager.resolve_runtime_selection(
+                "qwen3:4b-thinking-2507-q8_0",
+                overrides={"num_ctx": 65536},
+            )
+
+    def test_start_conversation_passes_runtime_into_snapshot_factory(self):
+        captured = {}
+
+        def snapshot_factory(profile_id, **kwargs):
+            captured.update(kwargs)
+            return self.profile_snapshot(profile_id, model_tag=kwargs["model_tag"])
+
+        def responder(_message, **_kwargs):
+            return ({"reply": "Ugotovitev"}, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "conversation_lead",
+            })
+
+        manager.start_conversation(
+            "Preveri", workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            runtime_overrides={"num_predict": 4096}, responder=responder,
+            snapshot_factory=snapshot_factory,
+        )
+        self.assertEqual({"num_predict": 4096}, captured["runtime_overrides"])
+
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):
         def responder(message, **kwargs):
             self.assertEqual("Build the intake", message)

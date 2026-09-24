@@ -61,6 +61,14 @@ PROJECT = Path(CFG["project"])
 SYSTEM_PROMPT = Path(CFG["system_prompt"])
 MAX_STEPS = int(CFG.get("max_steps", 30))
 NUM_CTX = int(CFG.get("num_ctx", 65536))
+RUNTIME_OPTIONS = {
+    field: CFG[field]
+    for field in (
+        "num_predict", "temperature", "top_k", "top_p", "min_p",
+        "repeat_penalty", "seed",
+    )
+    if CFG.get(field) is not None
+}
 KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
 THINK = CFG.get("think")
 REQUIRE_TOOL_USE = bool(CFG.get("require_tool_use", True))
@@ -518,7 +526,7 @@ def call_qwen(messages, *, structured=False):
             "model": MODEL,
             "stream": False,
             "keep_alive": KEEP_ALIVE,
-            "options": {"num_ctx": NUM_CTX},
+            "options": {"num_ctx": NUM_CTX, **RUNTIME_OPTIONS},
             "messages": messages,
     }
     if THINK is not None:

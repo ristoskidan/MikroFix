@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "defaults": {
     "num_ctx": 32768,
     "conversation_num_ctx": 16384,
@@ -30,11 +30,23 @@
       "conversation_keep_alive": "5m"
     },
     "qwen3:4b-thinking-2507-q8_0": {
-      "num_ctx": 32768,
+      "num_ctx": 49152,
       "conversation_num_ctx": 16384,
       "think": true,
       "keep_alive": "15m",
       "conversation_keep_alive": "5m"
+    }
+  },
+  "presets": {
+    "qwen3:4b-thinking-2507-q8_0": {
+      "balanced": {
+        "num_ctx": 32768,
+        "num_predict": 8192
+      },
+      "deep": {
+        "num_ctx": 49152,
+        "num_predict": 12288
+      }
     }
   }
 }

@@ -91,6 +91,14 @@ lastnik z `/llms` pregleda živi Ollama inventar in z `/llm <tag>` izbere
 izvajalni model. Ta izbira ni del vloge in se ob nastanku naloge zaklene v
 immutable snapshot.
 
+Pred nastankom naloge lahko `/llm` vsebuje model-specific preset ali preverjene
+pare `ključ=vrednost`, na primer `preset=deep`, `num_ctx=49152` in
+`num_predict=12288`. Gateway predizbiro podpiše; spremenjen ali neveljaven zapis
+se zavrne. `/llm-settings` pokaže dejanske vrednosti, `/llm-reset` pa sme
+odstraniti samo še nezaklenjeno predizbiro. Dovoljeni generacijski parametri se
+ob prvem navadnem sporočilu vključijo v schema-v3 profilni snapshot in njegov
+hash. Sprememba po nastanku naloge zahteva nov pogovor.
+
 Modelov dejansko vrnjeni `thinking` se lahko med pretočnim Open WebUI odgovorom
 prikaže kot zložljiv `reasoning_content`, skupaj z omejenimi oznakami orodnih
 klicev. Ta prikaz je samo sprotna diagnostika po zaključenih modelskih korakih;

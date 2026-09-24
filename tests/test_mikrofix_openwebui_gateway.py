@@ -9,7 +9,7 @@ from tools import mikrofix_openwebui_gateway as gateway
 
 class OpenWebUIGatewayTests(unittest.TestCase):
     def test_extracts_latest_user_message_and_visible_run_marker(self):
-        message, run_id, model_tag = gateway.extract_request([
+        message, run_id, model_tag, runtime = gateway.extract_request([
             {"role": "user", "content": "Prva zahteva"},
             {"role": "assistant", "content": (
                 "Odgovor\n\nMikroFIX pogovor: MF-LOCAL-1"
@@ -20,6 +20,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         self.assertEqual("Nadaljuj", message)
         self.assertEqual("MF-LOCAL-1", run_id)
         self.assertEqual("qwen3:14b", model_tag)
+        self.assertEqual({}, runtime)
 
     def test_new_conversation_keeps_role_and_model_independent(self):
         conversation = {
@@ -36,6 +37,24 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         self.assertIn("MF-LOCAL-2", result)
         self.assertEqual("conversation_lead", start.call_args.kwargs["lead_profile"])
         self.assertEqual("deepseek-r1:14b", start.call_args.kwargs["model_tag"])
+
+    def test_new_conversation_passes_selected_runtime_to_manager(self):
+        conversation = {
+            "parent_run_id": "MF-LOCAL-2A",
+            "turns": [{"role": "lead", "content": "Ugotovitev"}],
+        }
+        with mock.patch.object(
+            gateway, "start_conversation", return_value=conversation,
+        ) as start:
+            gateway.route_message(
+                "Preveri napako", "", "conversation_lead",
+                "qwen3:4b-thinking-2507-q8_0",
+                selected_runtime={"num_ctx": 49152, "num_predict": 12288},
+            )
+        self.assertEqual(
+            {"num_ctx": 49152, "num_predict": 12288},
+            start.call_args.kwargs["runtime_overrides"],
+        )
 
     def test_prepare_plan_is_dispatched_without_reaching_a_model(self):
         with (
@@ -93,13 +112,67 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             )
 
     def test_model_command_selects_installed_model_before_task(self):
-        with mock.patch.object(
-            gateway, "installed_ollama_models", return_value=["qwen3:14b"],
+        with (
+            mock.patch.object(
+                gateway, "installed_ollama_models", return_value=["qwen3:14b"],
+            ),
+            mock.patch.object(gateway, "_read_token", return_value="test-secret"),
+            mock.patch.object(gateway, "model_runtime_presets", return_value={}),
+            mock.patch.object(gateway, "resolve_runtime_selection", return_value={}),
+            mock.patch.object(gateway, "model_runtime_settings", return_value={
+                "conversation_num_ctx": 16384, "think": True,
+            }),
         ):
             result = gateway.route_message(
                 "/llm qwen3:14b", "", "conversation_lead", "",
             )
         self.assertIn("MikroFIX izbrani model: qwen3:14b", result)
+        self.assertIn("MikroFIX izbor:", result)
+
+    def test_model_command_round_trips_signed_preset_and_overrides(self):
+        with (
+            mock.patch.object(
+                gateway, "installed_ollama_models",
+                return_value=["qwen3:4b-thinking-2507-q8_0"],
+            ),
+            mock.patch.object(gateway, "_read_token", return_value="test-secret"),
+        ):
+            response = gateway.route_message(
+                "/llm qwen3:4b-thinking-2507-q8_0 preset=deep temperature=0.5",
+                "", "conversation_lead", "",
+            )
+            message, run_id, model, runtime = gateway.extract_request([
+                {"role": "assistant", "content": response},
+                {"role": "user", "content": "Preveri napako"},
+            ])
+        self.assertEqual("Preveri napako", message)
+        self.assertEqual("", run_id)
+        self.assertEqual("qwen3:4b-thinking-2507-q8_0", model)
+        self.assertEqual(49152, runtime["num_ctx"])
+        self.assertEqual(12288, runtime["num_predict"])
+        self.assertEqual(0.5, runtime["temperature"])
+
+    def test_tampered_model_selection_fails_closed(self):
+        with mock.patch.object(gateway, "_read_token", return_value="test-secret"):
+            token = gateway._encode_selection("qwen3:14b", {"num_ctx": 4096})
+            tampered = token[:-1] + ("0" if token[-1] != "0" else "1")
+            with self.assertRaisesRegex(ValueError, "Podpis"):
+                gateway.extract_request([
+                    {"role": "assistant", "content": f"MikroFIX izbor: {tampered}"},
+                    {"role": "user", "content": "Test"},
+                ])
+
+    def test_reset_marker_clears_previous_selection(self):
+        with mock.patch.object(gateway, "_read_token", return_value="test-secret"):
+            token = gateway._encode_selection("qwen3:14b", {})
+            _message, _run_id, model, runtime = gateway.extract_request([
+                {"role": "assistant", "content": f"MikroFIX izbor: {token}"},
+                {"role": "user", "content": "/llm-reset"},
+                {"role": "assistant", "content": gateway.SELECTION_RESET_MARKER},
+                {"role": "user", "content": "Nova naloga"},
+            ])
+        self.assertEqual("", model)
+        self.assertEqual({}, runtime)
 
     def test_model_switch_after_task_start_fails_closed(self):
         with mock.patch.object(

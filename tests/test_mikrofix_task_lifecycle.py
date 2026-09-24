@@ -98,6 +98,7 @@ class TaskLifecycleTests(unittest.TestCase):
         snapshot = self.snapshot(DIGEST_A)
         snapshot.pop("conversation_num_ctx")
         snapshot.pop("conversation_keep_alive")
+        snapshot.pop("runtime_options")
         snapshot["schema_version"] = 1
         snapshot.pop("profile_snapshot_hash")
         snapshot["profile_snapshot_hash"] = sha256_value(snapshot)
@@ -106,6 +107,20 @@ class TaskLifecycleTests(unittest.TestCase):
         persisted = read_profile_snapshot(self.job)
         self.assertEqual(1, persisted["schema_version"])
         self.assertNotIn("conversation_num_ctx", persisted)
+
+    def test_runtime_options_are_part_of_snapshot_identity(self):
+        first = self.snapshot(DIGEST_A)
+        profile = load_profile_registry(self.registry_path, self.project)["test_lead"]
+        profile["runtime_options"] = {
+            "num_predict": 4096, "temperature": 0.5, "top_k": 20,
+            "top_p": 0.95, "min_p": 0.0, "repeat_penalty": 1.0,
+            "seed": -1,
+        }
+        second = build_profile_snapshot(
+            profile, project_root=self.project, model_digest=DIGEST_A,
+        )
+        self.assertNotEqual(first["profile_snapshot_hash"], second["profile_snapshot_hash"])
+        self.assertEqual(4096, second["runtime_options"]["num_predict"])
 
     def test_v2_registry_rejects_invalid_conversation_context(self):
         raw = json.loads(self.registry_path.read_text(encoding="utf-8"))

@@ -109,6 +109,26 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertNotIn("format", calls[0])
         self.assertIn("tools", calls[0])
 
+    def test_runtime_generation_options_are_forwarded_to_ollama(self):
+        calls = []
+
+        def fake_request(_url, **kwargs):
+            calls.append(kwargs["data"])
+            return {"message": {"content": "done"}}
+
+        with (
+            mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
+            mock.patch.object(self.bridge, "NUM_CTX", 49152),
+            mock.patch.object(self.bridge, "RUNTIME_OPTIONS", {
+                "num_predict": 12288, "temperature": 0.6,
+                "top_k": 20, "top_p": 0.95,
+            }),
+        ):
+            self.bridge.call_qwen([{"role": "user", "content": "inspect"}])
+        self.assertEqual(49152, calls[0]["options"]["num_ctx"])
+        self.assertEqual(12288, calls[0]["options"]["num_predict"])
+        self.assertEqual(0.6, calls[0]["options"]["temperature"])
+
     def test_structured_mode_omits_tools(self):
         schema = {"type": "object", "required": ["reply"]}
         calls = []

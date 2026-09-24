@@ -20,6 +20,10 @@ import uuid
 
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+RUNTIME_OPTION_FIELDS = (
+    "num_predict", "temperature", "top_k", "top_p", "min_p",
+    "repeat_penalty", "seed",
+)
 
 
 class LifecycleError(RuntimeError):
@@ -239,8 +243,13 @@ def build_profile_snapshot(
     if not SHA256_RE.fullmatch(digest):
         raise LifecycleError("model_digest must be a SHA-256 digest")
     prompt_path = (project_root / str(profile["system_prompt"])).resolve()
+    runtime_options = {
+        field: (profile.get("runtime_options") or {}).get(field)
+        for field in RUNTIME_OPTION_FIELDS
+    }
+    _validate_runtime_options(runtime_options)
     snapshot = {
-        "schema_version": 2,
+        "schema_version": 3,
         "profile_id": profile["profile_id"],
         "profile_version": profile["version"],
         "model": profile["model"],
@@ -255,6 +264,7 @@ def build_profile_snapshot(
         "system_prompt_hash": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
         "keep_alive": profile["keep_alive"],
         "conversation_keep_alive": profile["conversation_keep_alive"],
+        "runtime_options": runtime_options,
         "created_at": utc_timestamp(),
     }
     snapshot["profile_snapshot_hash"] = sha256_value(snapshot)
@@ -270,12 +280,17 @@ def validate_profile_snapshot(snapshot: object) -> dict[str, Any]:
         "system_prompt", "system_prompt_hash", "keep_alive", "created_at",
         "profile_snapshot_hash",
     }
-    current_required = legacy_required | {
+    v2_required = legacy_required | {
         "conversation_num_ctx", "conversation_keep_alive",
     }
+    current_required = v2_required | {"runtime_options"}
     schema_version = snapshot.get("schema_version")
-    required = legacy_required if schema_version == 1 else current_required
-    if schema_version not in {1, 2} or set(snapshot) != required:
+    required = (
+        legacy_required if schema_version == 1
+        else v2_required if schema_version == 2
+        else current_required
+    )
+    if schema_version not in {1, 2, 3} or set(snapshot) != required:
         raise LifecycleError("Lead profile snapshot has unknown or missing fields")
     if snapshot["model"] != snapshot["model_tag"]:
         raise LifecycleError("Lead profile model and tag differ")
@@ -292,7 +307,7 @@ def validate_profile_snapshot(snapshot: object) -> dict[str, Any]:
             or not isinstance(snapshot["num_ctx"], int)
             or snapshot["num_ctx"] < 1024):
         raise LifecycleError("num_ctx is invalid")
-    if schema_version == 2:
+    if schema_version in {2, 3}:
         _required_string(
             snapshot.get("conversation_keep_alive"),
             "conversation_keep_alive",
@@ -304,6 +319,8 @@ def validate_profile_snapshot(snapshot: object) -> dict[str, Any]:
             or snapshot["conversation_num_ctx"] > snapshot["num_ctx"]
         ):
             raise LifecycleError("conversation_num_ctx is invalid")
+    if schema_version == 3:
+        _validate_runtime_options(snapshot["runtime_options"])
     if not isinstance(snapshot["think"], (bool, str)):
         raise LifecycleError("think is invalid")
     for field in ("model_digest", "system_prompt_hash", "profile_snapshot_hash"):
@@ -314,6 +331,34 @@ def validate_profile_snapshot(snapshot: object) -> dict[str, Any]:
     if sha256_value(identity) != expected:
         raise LifecycleError("Lead profile snapshot hash mismatch")
     return dict(snapshot)
+
+
+def _validate_runtime_options(value: object) -> None:
+    if not isinstance(value, dict) or set(value) != set(RUNTIME_OPTION_FIELDS):
+        raise LifecycleError("runtime_options has unknown or missing fields")
+    integer_fields = {"num_predict", "top_k", "seed"}
+    number_fields = {"temperature", "top_p", "min_p", "repeat_penalty"}
+    for field in integer_fields:
+        item = value[field]
+        if item is not None and (isinstance(item, bool) or not isinstance(item, int)):
+            raise LifecycleError(f"runtime_options.{field} must be integer or null")
+    for field in number_fields:
+        item = value[field]
+        if item is not None and (isinstance(item, bool) or not isinstance(item, (int, float))):
+            raise LifecycleError(f"runtime_options.{field} must be number or null")
+    if value["num_predict"] is not None and value["num_predict"] < 1:
+        raise LifecycleError("runtime_options.num_predict is out of range")
+    if value["top_k"] is not None and not 0 <= value["top_k"] <= 1000:
+        raise LifecycleError("runtime_options.top_k is out of range")
+    if value["seed"] is not None and value["seed"] < -1:
+        raise LifecycleError("runtime_options.seed is out of range")
+    for field in ("top_p", "min_p"):
+        if value[field] is not None and not 0 <= value[field] <= 1:
+            raise LifecycleError(f"runtime_options.{field} is out of range")
+    if value["temperature"] is not None and not 0 <= value["temperature"] <= 2:
+        raise LifecycleError("runtime_options.temperature is out of range")
+    if value["repeat_penalty"] is not None and not 0 <= value["repeat_penalty"] <= 2:
+        raise LifecycleError("runtime_options.repeat_penalty is out of range")
 
 
 def write_profile_snapshot(job_dir: Path, snapshot: dict[str, Any]) -> Path:

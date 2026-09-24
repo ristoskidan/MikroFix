@@ -1,19 +1,42 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://mikrofix.local/schemas/model-runtime-v1.json",
+  "$id": "https://mikrofix.local/schemas/model-runtime-v2.json",
   "title": "MikroFIX model runtime settings",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "defaults", "overrides"],
+  "required": ["schema_version", "defaults", "overrides", "presets"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "defaults": {"$ref": "#/$defs/settings"},
     "overrides": {
       "type": "object",
       "additionalProperties": {"$ref": "#/$defs/settings"}
+    },
+    "presets": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "propertyNames": {"pattern": "^[a-z][a-z0-9_-]*$"},
+        "additionalProperties": {"$ref": "#/$defs/selection"}
+      }
     }
   },
   "$defs": {
+    "selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "num_ctx": {"type": "integer", "minimum": 1024},
+        "num_predict": {"type": "integer", "minimum": 1},
+        "temperature": {"type": "number", "minimum": 0, "maximum": 2},
+        "top_k": {"type": "integer", "minimum": 0, "maximum": 1000},
+        "top_p": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_p": {"type": "number", "minimum": 0, "maximum": 1},
+        "repeat_penalty": {"type": "number", "minimum": 0, "maximum": 2},
+        "seed": {"type": "integer", "minimum": -1},
+        "think": {"oneOf": [{"type": "boolean"}, {"type": "string", "minLength": 1}]}
+      }
+    },
     "settings": {
       "type": "object",
       "additionalProperties": false,
