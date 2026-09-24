@@ -148,7 +148,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         self.assertEqual("Preveri napako", message)
         self.assertEqual("", run_id)
         self.assertEqual("qwen3:4b-thinking-2507-q8_0", model)
-        self.assertEqual(49152, runtime["num_ctx"])
+        self.assertEqual(45056, runtime["num_ctx"])
         self.assertEqual(12288, runtime["num_predict"])
         self.assertEqual(0.5, runtime["temperature"])
 
