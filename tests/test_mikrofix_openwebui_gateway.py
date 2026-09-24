@@ -96,7 +96,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             gateway, "installed_ollama_models", return_value=["qwen3:14b"],
         ):
             result = gateway.route_message(
-                "/model qwen3:14b", "", "conversation_lead", "",
+                "/llm qwen3:14b", "", "conversation_lead", "",
             )
         self.assertIn("MikroFIX izbrani model: qwen3:14b", result)
 
@@ -106,7 +106,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "zaklenjena"):
                 gateway.route_message(
-                    "/model qwen3:14b", "MF-LOCAL-5",
+                    "/llm qwen3:14b", "MF-LOCAL-5",
                     "conversation_lead", "gpt-oss:20b",
                 )
 

@@ -167,11 +167,11 @@ def _model_selection_command(
     clean = message.strip()
     token, _, argument = clean.partition(" ")
     command = token.lower()
-    if command not in {"/model", "/models"}:
+    if command not in {"/llm", "/llms"}:
         return None
-    if command == "/models":
+    if command == "/llms":
         if argument.strip():
-            raise ValueError("Ukaz /models ne sprejme dodatnega besedila.")
+            raise ValueError("Ukaz /llms ne sprejme dodatnega besedila.")
         models = installed_ollama_models()
         lines = ["Nameščeni lokalni modeli:"]
         lines.extend(f"- {model}" for model in models)
@@ -179,11 +179,11 @@ def _model_selection_command(
             lines.append(f"\nTa naloga je zaklenjena na: {_locked_model(run_id, role_id)}")
         elif selected_model:
             lines.append(f"\nTrenutno izbran za novo nalogo: {selected_model}")
-        lines.append("\nIzberi z: /model <točen tag>")
+        lines.append("\nIzberi z: /llm <točen tag>")
         return "\n".join(lines)
     model_tag = argument.strip()
     if not model_tag:
-        raise ValueError("Po ukazu /model napiši točen tag. Uporabi /models.")
+        raise ValueError("Po ukazu /llm napiši točen tag. Uporabi /llms.")
     if run_id:
         locked = _locked_model(run_id, role_id)
         raise ValueError(
@@ -220,8 +220,8 @@ def route_message(
         response = str(result.get("message") or "Ukaz je bil sprejet.").strip()
         if command.name == "/help":
             response += (
-                "\n/model <tag> — izbere nameščeni LLM za novo nalogo"
-                "\n/models — pokaže nameščene lokalne modele"
+                "\n/llm <tag> — izbere nameščeni LLM za novo nalogo"
+                "\n/llms — pokaže nameščene lokalne modele"
             )
         return response + (f"\n\nMikroFIX pogovor: {run_id}" if run_id else "")
     if run_id:
@@ -234,8 +234,8 @@ def route_message(
         model_tag = selected_model
         if not model_tag:
             raise ValueError(
-                "Najprej izberi lokalni model z /model <tag>. "
-                "Seznam dobiš z /models."
+                "Najprej izberi lokalni model z /llm <tag>. "
+                "Seznam dobiš z /llms."
             )
         if model_tag not in installed_ollama_models():
             raise ValueError(f"Izbrani model ni več nameščen: {model_tag}")
@@ -324,7 +324,7 @@ async def chat_completions(
         message, run_id, selected_model = extract_request(body.get("messages"))
         # Parse before starting any model work so unknown slash commands fail closed.
         gateway_command = message.strip().split(None, 1)[0].lower()
-        if gateway_command not in {"/model", "/models"}:
+        if gateway_command not in {"/llm", "/llms"}:
             parse_owner_command(message)
     except (ValueError, OwnerCommandError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -137,7 +137,7 @@ claim creation and before queue acceptance is not retried automatically.
 It exposes every enabled pre-approval role exactly once, independent of the
 installed model inventory. Open WebUI therefore shows a single
 `Pogovorni lokalni vodja` entry for `conversation_lead`, not one duplicate per
-LLM. `/models` reads the live Ollama inventory and `/model <tag>` chooses the
+LLM. `/llms` reads the live Ollama inventory and `/llm <tag>` chooses the
 LLM before the first ordinary message creates a task.
 
 Ordinary messages create or continue a conversation locked to the selected

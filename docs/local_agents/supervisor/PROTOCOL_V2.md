@@ -87,7 +87,7 @@ na staro nalogo ne vpliva. Sprememba modela ali snapshota ustvari novo parent
 sejo in ne more tiho prevzeti obstoječe zgodovine.
 
 Open WebUI vsako vlogo prikaže samo enkrat. Pred prvim navadnim sporočilom
-lastnik z `/models` pregleda živi Ollama inventar in z `/model <tag>` izbere
+lastnik z `/llms` pregleda živi Ollama inventar in z `/llm <tag>` izbere
 izvajalni model. Ta izbira ni del vloge in se ob nastanku naloge zaklene v
 immutable snapshot.
 
