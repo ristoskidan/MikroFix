@@ -51,14 +51,79 @@ class LocalWebPayloadTests(unittest.TestCase):
             self.assertIn(label, html)
         self.assertIn("/api/start", html)
         self.assertIn("/api/talk", html)
-        self.assertIn("/api/prepare-plan", html)
-        self.assertIn("/api/prepare-review", html)
-        self.assertIn("/api/codex-rejected", html)
-        self.assertIn("/api/codex-approved", html)
-        self.assertIn("/preparereview", Path(web.__file__).read_text(encoding="utf-8"))
-        self.assertIn("/prepareplan", Path(web.__file__).read_text(encoding="utf-8"))
+        self.assertIn("/api/command", html)
+        self.assertIn("/help", html)
         self.assertIn("grid-template-rows:auto minmax(0,1fr) auto", html)
         self.assertEqual("127.0.0.1", web.HOST)
+
+    def test_help_does_not_require_an_existing_conversation(self):
+        result = web.dispatch_owner_command(self.workspace, "", "/help")
+        self.assertIn("/prepare-plan", result["message"])
+
+    def test_owner_command_dispatch_is_shared_by_buttons_and_typed_input(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "MF-CHILD",
+            "state": "READY_FOR_OWNER_LEASE", "state_label": "Čaka dovoljenje",
+            "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/approve-plan",
+            )
+        self.assertTrue(result["accepted"])
+        spawn.assert_called_once_with(
+            self.workspace,
+            ["execute", "MF-CHILD", "--lease-minutes", "30"],
+        )
+
+    def test_owner_command_dispatch_rejects_wrong_state_before_action(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "",
+            "state": "CONVERSATION", "state_label": "Pogovor", "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            with self.assertRaisesRegex(ValueError, "ni dovoljen"):
+                web.dispatch_owner_command(
+                    self.workspace, "MF-ROOT", "/approve-plan",
+                )
+        spawn.assert_not_called()
+
+    def test_status_lists_only_commands_allowed_in_current_state(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "",
+            "state": "CONVERSATION", "state_label": "Pogovor", "review": {},
+        }
+        with mock.patch.object(
+            web, "jobs_payload", return_value={"jobs": [job]},
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/status",
+            )
+        self.assertIn("/prepare-plan", result["allowed_commands"])
+        self.assertNotIn("/approve-plan", result["allowed_commands"])
+
+    def test_codex_opinion_only_prepares_clipboard_text(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "MF-CHILD",
+            "state": "READY_FOR_CODEX_REVIEW",
+            "state_label": "Kandidat pripravljen", "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/codex-opinion Preveri robne primere.",
+            )
+        self.assertIn("MF-CHILD", result["clipboard_text"])
+        self.assertIn("Preveri robne primere.", result["clipboard_text"])
+        spawn.assert_not_called()
 
     def test_routed_candidate_is_grouped_under_lead_conversation(self):
         root = self.workspace / "jobs" / "MF-ROOT"

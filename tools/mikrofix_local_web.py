@@ -31,6 +31,9 @@ try:
         read_json,
         render_job,
     )
+    from tools.mikrofix_owner_commands import (
+        OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
+    )
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_codex_review import (  # type: ignore[no-redef]
         ReviewError, prepare_review, record_codex_approved,
@@ -44,6 +47,9 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
         planner_activity,
         read_json,
         render_job,
+    )
+    from mikrofix_owner_commands import (  # type: ignore[no-redef]
+        OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
     )
 
 
@@ -110,6 +116,111 @@ def jobs_payload(workspace: Path) -> dict[str, Any]:
             if job["run_id"] not in routed_ids
         ]
     }
+
+
+def _selected_job(workspace: Path, run_id: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", run_id):
+        raise ValueError("Izberi veljaven obstoječi pogovor")
+    roots = jobs_payload(workspace)["jobs"]
+    selected = next((job for job in roots if job["run_id"] == run_id), None)
+    if selected is None:
+        raw = next(
+            (job for job in list_jobs(workspace) if job["run_id"] == run_id), None,
+        )
+        parent = str((raw or {}).get("parent_run_id") or "")
+        selected = next((job for job in roots if job["run_id"] == parent), None)
+    if selected is None:
+        raise ValueError("Izbrani pogovor ne obstaja")
+    return selected
+
+
+def allowed_owner_commands(job: dict[str, Any]) -> list[str]:
+    allowed = ["/status", "/help", "/codex-opinion"]
+    state = job["state"]
+    if state == "CONVERSATION" and not job.get("action_run_id"):
+        allowed.append("/prepare-plan")
+    if state == "READY_FOR_OWNER_LEASE":
+        allowed.append("/approve-plan")
+    if state == "READY_FOR_CODEX_REVIEW":
+        allowed.append("/prepare-review")
+    if (job.get("review") or {}).get("status") == "PREPARED":
+        allowed.extend(("/codex-rejected", "/codex-approved"))
+    return allowed
+
+
+def _require_allowed(command: OwnerCommand, job: dict[str, Any]) -> None:
+    if command.name not in allowed_owner_commands(job):
+        raise ValueError(
+            f"Ukaz {command.name} ni dovoljen v stanju {job['state']}. "
+            f"Dovoljeni ukazi: {', '.join(allowed_owner_commands(job))}"
+        )
+
+
+def dispatch_owner_command(
+    workspace: Path, run_id: str, message: str,
+) -> dict[str, Any]:
+    """Execute one allow-listed owner command without involving an LLM or shell."""
+    command = parse_owner_command(message)
+    if command is None:
+        raise ValueError("Sporočilo ni ukaz")
+    if command.name == "/help":
+        return {"command": command.name, "message": help_text()}
+    job = _selected_job(workspace, run_id)
+    _require_allowed(command, job)
+    action_run_id = str(job.get("action_run_id") or job["run_id"])
+    if command.name == "/status":
+        return {
+            "command": command.name,
+            "state": job["state"],
+            "state_label": job["state_label"],
+            "allowed_commands": allowed_owner_commands(job),
+            "message": (
+                f"Stanje: {job['state_label']}\nDovoljeni ukazi: "
+                + ", ".join(allowed_owner_commands(job))
+            ),
+        }
+    if command.name == "/prepare-plan":
+        spawn_manager(workspace, ["prepare-plan", job["run_id"]])
+        return {
+            "command": command.name, "accepted": True,
+            "message": "Lokalni vodja pripravlja izvedbeni načrt.",
+        }
+    if command.name == "/approve-plan":
+        spawn_manager(
+            workspace, ["execute", action_run_id, "--lease-minutes", "30"],
+        )
+        return {
+            "command": command.name, "accepted": True,
+            "message": "Varna lokalna izvedba se zaganja.",
+        }
+    if command.name == "/prepare-review":
+        result = prepare_review(workspace, action_run_id)
+        return {"command": command.name, **result}
+    if command.name == "/codex-rejected":
+        result = record_codex_rejected(workspace, action_run_id, command.argument)
+        return {"command": command.name, **result}
+    if command.name == "/codex-approved":
+        result = record_codex_approved(workspace, action_run_id, command.argument)
+        return {"command": command.name, **result}
+    if command.name == "/codex-opinion":
+        question = command.argument or (
+            "Povej svoje mnenje in predlagaj naslednji korak, vendar ničesar "
+            "ne spreminjaj brez moje izrecne zahteve."
+        )
+        candidate = (
+            f" Aktivni izvedbeni kandidat je {job['action_run_id']}."
+            if job.get("action_run_id") else ""
+        )
+        clipboard = (
+            f"Preglej pogovor lokalnega vodje pri nalogi {job['run_id']}."
+            f"{candidate} {question}"
+        )
+        return {
+            "command": command.name,
+            "clipboard_text": clipboard,
+            "message": "Vprašanje za Codex je pripravljeno za kopiranje.",
+        }
+    raise ValueError(f"Ukaz nima izvajalca: {command.name}")
 
 
 def _read_trace_file(path: Path, limit: int = 200_000) -> str:
@@ -384,7 +495,12 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                     raise ValueError("Napiši veljavno sporočilo")
                 if profile not in {"gpt_oss", "qwen_thinking"}:
                     raise ValueError("Izberi veljaven profil lokalnega vodje")
+                parsed_command = parse_owner_command(message)
                 if self.path == "/api/start":
+                    if parsed_command is not None:
+                        raise ValueError(
+                            "Pred uporabo ukaza izberi obstoječi pogovor."
+                        )
                     arguments = [
                         "start", "--message", message.strip(), "--profile", profile,
                     ]
@@ -394,34 +510,13 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                         r"[A-Za-z0-9_-]+", parent
                     ):
                         raise ValueError("Izberi veljaven obstoječi pogovor")
-                    command, _, argument = message.strip().partition(" ")
-                    if command in {"/prepareplan", "/prepare-plan"}:
-                        if argument.strip():
-                            raise ValueError("/prepareplan ne sprejme dodatnega besedila")
-                        spawn_manager(
-                            self.server.workspace, ["prepare-plan", parent],
+                    if parsed_command is not None:
+                        result = dispatch_owner_command(
+                            self.server.workspace, parent, message,
                         )
-                        self.send_json(202, {"accepted": True})
-                        return
-                    if command in {"/prepare-review", "/preparereview"}:
-                        result = prepare_review(self.server.workspace, parent)
-                        self.send_json(200, result)
-                        return
-                    if command in {"/codexrejected", "/codex-rejected"}:
-                        if not argument.strip():
-                            raise ValueError("Po ukazu napiši razlog zavrnitve")
-                        result = record_codex_rejected(
-                            self.server.workspace, parent, argument.strip(),
+                        self.send_json(
+                            202 if result.get("accepted") else 200, result,
                         )
-                        self.send_json(200, result)
-                        return
-                    if command in {"/codexapproved", "/codex-approved"}:
-                        if not argument.strip():
-                            raise ValueError("Po ukazu prilepi commit SHA")
-                        result = record_codex_approved(
-                            self.server.workspace, parent, argument.strip(),
-                        )
-                        self.send_json(200, result)
                         return
                     arguments = [
                         "talk", "--message", message.strip(), "--parent", parent,
@@ -430,37 +525,41 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                 spawn_manager(self.server.workspace, arguments)
                 self.send_json(202, {"accepted": True})
                 return
+            if self.path == "/api/command":
+                run_id = value.get("run_id")
+                command = value.get("command")
+                if not isinstance(run_id, str) or not isinstance(command, str):
+                    raise ValueError("Manjka pogovor ali ukaz")
+                result = dispatch_owner_command(
+                    self.server.workspace, run_id, command,
+                )
+                self.send_json(202 if result.get("accepted") else 200, result)
+                return
             if self.path == "/api/prepare-plan":
                 run_id = value.get("run_id")
-                if not isinstance(run_id, str) or not re.fullmatch(
-                    r"[A-Za-z0-9_-]+", run_id
-                ):
+                if not isinstance(run_id, str):
                     raise ValueError("Izberi veljaven pogovor")
-                selected = next(
-                    (job for job in list_jobs(self.server.workspace)
-                     if job["run_id"] == run_id),
-                    None,
+                result = dispatch_owner_command(
+                    self.server.workspace, run_id, "/prepare-plan",
                 )
-                if not selected or selected["state"] != "CONVERSATION":
-                    raise ValueError("Pogovor ni pripravljen za izdelavo načrta")
-                spawn_manager(
-                    self.server.workspace, ["prepare-plan", run_id],
-                )
-                self.send_json(202, {"accepted": True})
+                self.send_json(202, result)
                 return
             if self.path == "/api/prepare-review":
                 run_id = value.get("run_id")
                 if not isinstance(run_id, str):
                     raise ValueError("Izberi veljavno nalogo")
-                self.send_json(200, prepare_review(self.server.workspace, run_id))
+                self.send_json(200, dispatch_owner_command(
+                    self.server.workspace, run_id, "/prepare-review",
+                ))
                 return
             if self.path == "/api/codex-rejected":
                 run_id = value.get("run_id")
                 feedback = value.get("feedback")
                 if not isinstance(run_id, str) or not isinstance(feedback, str):
                     raise ValueError("Manjka naloga ali razlog zavrnitve")
-                self.send_json(200, record_codex_rejected(
-                    self.server.workspace, run_id, feedback,
+                self.send_json(200, dispatch_owner_command(
+                    self.server.workspace, run_id,
+                    f"/codex-rejected {feedback}",
                 ))
                 return
             if self.path == "/api/codex-approved":
@@ -468,27 +567,25 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                 commit = value.get("commit")
                 if not isinstance(run_id, str) or not isinstance(commit, str):
                     raise ValueError("Manjka naloga ali commit SHA")
-                self.send_json(200, record_codex_approved(
-                    self.server.workspace, run_id, commit,
+                self.send_json(200, dispatch_owner_command(
+                    self.server.workspace, run_id,
+                    f"/codex-approved {commit}",
                 ))
                 return
             if self.path == "/api/execute":
                 run_id = value.get("run_id")
-                selected = next(
-                    (job for job in list_jobs(self.server.workspace)
-                     if job["run_id"] == run_id),
-                    None,
+                if not isinstance(run_id, str):
+                    raise ValueError("Izberi veljavno nalogo")
+                result = dispatch_owner_command(
+                    self.server.workspace, run_id, "/approve-plan",
                 )
-                if not selected or selected["state"] != "READY_FOR_OWNER_LEASE":
-                    raise ValueError("Naloga še ni pripravljena za dovoljenje izvedbe")
-                spawn_manager(
-                    self.server.workspace,
-                    ["execute", str(run_id), "--lease-minutes", "30"],
-                )
-                self.send_json(202, {"accepted": True})
+                self.send_json(202, result)
                 return
             self.send_json(404, {"error": "Not found"})
-        except (ValueError, ReviewError, json.JSONDecodeError, OSError) as exc:
+        except (
+            ValueError, OwnerCommandError, ReviewError, json.JSONDecodeError,
+            OSError,
+        ) as exc:
             self.send_json(400, {"error": str(exc)})
 
 
