@@ -88,8 +88,44 @@ class BridgeCompletionTests(unittest.TestCase):
             mock.patch.object(self.bridge, "RESPONSE_FORMAT", schema),
             mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
         ):
-            self.bridge.call_qwen([{"role": "user", "content": "plan"}])
+            self.bridge.call_qwen(
+                [{"role": "user", "content": "plan"}], structured=True,
+            )
         self.assertEqual(schema, calls[0][1]["data"]["format"])
+
+    def test_tool_mode_omits_competing_response_schema(self):
+        schema = {"type": "object", "required": ["reply"]}
+        calls = []
+
+        def fake_request(_url, **kwargs):
+            calls.append(kwargs["data"])
+            return {"message": {"tool_calls": []}}
+
+        with (
+            mock.patch.object(self.bridge, "RESPONSE_FORMAT", schema),
+            mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
+        ):
+            self.bridge.call_qwen([{"role": "user", "content": "inspect"}])
+        self.assertNotIn("format", calls[0])
+        self.assertIn("tools", calls[0])
+
+    def test_structured_mode_omits_tools(self):
+        schema = {"type": "object", "required": ["reply"]}
+        calls = []
+
+        def fake_request(_url, **kwargs):
+            calls.append(kwargs["data"])
+            return {"message": {"content": '{"reply":"done"}'}}
+
+        with (
+            mock.patch.object(self.bridge, "RESPONSE_FORMAT", schema),
+            mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
+        ):
+            self.bridge.call_qwen(
+                [{"role": "user", "content": "finalize"}], structured=True,
+            )
+        self.assertEqual(schema, calls[0]["format"])
+        self.assertNotIn("tools", calls[0])
 
     def test_terminal_notification_is_at_most_once_across_replay(self):
         job = self.bridge.create_job(
@@ -162,11 +198,41 @@ class BridgeCompletionTests(unittest.TestCase):
                 ),
             ))
 
-        with mock.patch.object(self.bridge, "call_qwen", side_effect=lambda _m: next(responses)), \
+        with mock.patch.object(self.bridge, "call_qwen", side_effect=lambda _m, **_k: next(responses)), \
                 mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}), \
                 mock.patch.object(self.bridge, "notify_job_completion", side_effect=callback):
             self.bridge.process_job(job["id"])
         self.assertEqual([("completed", "finished\n")], observed)
+
+    def test_tool_review_and_structured_finalization_are_separate_calls(self):
+        job = self.bridge.create_job("Inspect then answer")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {"content": "Preverjeno; pripravljam odgovor."}},
+            {"message": {"content": '{"reply":"Končni odgovor"}'}},
+        ])
+        modes = []
+
+        def answer(_messages, **kwargs):
+            modes.append(kwargs.get("structured", False))
+            return next(responses)
+
+        with (
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+            mock.patch.object(
+                self.bridge, "RESPONSE_FORMAT",
+                {"type": "object", "required": ["reply"]},
+            ),
+            mock.patch.object(self.bridge, "MINIMUM_SUCCESSFUL_TOOL_CALLS", 1),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual([False, False, True], modes)
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual('{"reply":"Končni odgovor"}', persisted["result"])
 
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
         job = self.bridge.create_job("Verify with a successful tool")
@@ -192,7 +258,7 @@ class BridgeCompletionTests(unittest.TestCase):
         self.bridge.MAX_STEPS = 4
         try:
             with mock.patch.object(
-                self.bridge, "call_qwen", side_effect=lambda _m: next(responses)
+                self.bridge, "call_qwen", side_effect=lambda _m, **_k: next(responses)
             ), mock.patch.object(self.bridge, "execute_tool", side_effect=execute):
                 self.bridge.process_job(job["id"])
         finally:
@@ -200,6 +266,24 @@ class BridgeCompletionTests(unittest.TestCase):
         persisted = self.bridge.load_job(job["id"])
         self.assertEqual("completed", persisted["status"])
         self.assertEqual("verified", persisted["result"])
+
+    def test_repeated_textual_tool_names_fail_closed(self):
+        job = self.bridge.create_job("Inspect through tools")
+        responses = iter([
+            {"message": {"content": "Uporabil bom project_search."}},
+            {"message": {"content": "Orodni poziv: project_search."}},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _m, **_k: next(responses),
+            ),
+            mock.patch.object(self.bridge, "MAX_TOOLLESS_RESPONSES", 2),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertIn("strukturiranega klica", persisted["error"])
 
     def test_runtime_prompt_always_contains_persistent_lead_rules(self):
         prompt = self.bridge.runtime_system_prompt()

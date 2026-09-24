@@ -64,11 +64,23 @@ NUM_CTX = int(CFG.get("num_ctx", 65536))
 KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
 THINK = CFG.get("think")
 REQUIRE_TOOL_USE = bool(CFG.get("require_tool_use", True))
+REQUEST_TIMEOUT_SECONDS = int(CFG.get("request_timeout_seconds", 900))
+MINIMUM_SUCCESSFUL_TOOL_CALLS = int(CFG.get("minimum_successful_tool_calls", 1))
+MAX_TOOLLESS_RESPONSES = int(CFG.get("max_toolless_responses", 2))
 RESPONSE_FORMAT = CFG.get("response_format")
 AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
 COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
 PROJECT_MEMORY = Path(CFG["project_memory"]) if CFG.get("project_memory") else None
 PARENT_SESSION_ID = str(CFG.get("parent_session_id", ""))
+
+if not 30 <= REQUEST_TIMEOUT_SECONDS <= 1800:
+    raise RuntimeError("request_timeout_seconds must be between 30 and 1800")
+if not 1 <= MINIMUM_SUCCESSFUL_TOOL_CALLS <= MAX_STEPS:
+    raise RuntimeError(
+        "minimum_successful_tool_calls must be between 1 and max_steps"
+    )
+if not 1 <= MAX_TOOLLESS_RESPONSES <= MAX_STEPS:
+    raise RuntimeError("max_toolless_responses must be between 1 and max_steps")
 
 
 TOOLS = [
@@ -493,24 +505,31 @@ def execute_tool(name, arguments):
     )
 
 
-def call_qwen(messages):
+def call_qwen(messages, *, structured=False):
+    """Call Ollama in either tool-use or final structured-output mode.
+
+    Ollama models may treat ``tools`` and a strict JSON ``format`` as competing
+    output contracts.  Keep the schema out of evidence-gathering calls and add
+    it only after the required real tool calls have succeeded.
+    """
     payload = {
             "model": MODEL,
             "stream": False,
             "keep_alive": KEEP_ALIVE,
             "options": {"num_ctx": NUM_CTX},
             "messages": messages,
-            "tools": TOOLS
     }
     if THINK is not None:
         payload["think"] = THINK
-    if RESPONSE_FORMAT is not None:
+    if structured and RESPONSE_FORMAT is not None:
         payload["format"] = RESPONSE_FORMAT
+    else:
+        payload["tools"] = TOOLS
     return request_json(
         OLLAMA,
         method="POST",
         data=payload,
-        timeout=900
+        timeout=REQUEST_TIMEOUT_SECONDS
     )
 
 
@@ -734,6 +753,8 @@ def process_job(job_id):
 
     tool_use_count = 0
     successful_tool_use_count = 0
+    tool_less_response_count = 0
+    finalization_requested = False
 
     try:
         for step in range(1, MAX_STEPS + 1):
@@ -745,7 +766,8 @@ def process_job(job_id):
                 f"Izvajalec korak {step}/{MAX_STEPS}"
             )
 
-            response = call_qwen(messages)
+            structured = finalization_requested
+            response = call_qwen(messages, structured=structured)
 
             message = response.get("message", {})
             tool_calls = message.get("tool_calls") or []
@@ -768,10 +790,20 @@ def process_job(job_id):
 
                 # Model ne sme zaključiti projektne naloge,
                 # ne da bi dejansko uporabil vsaj eno orodje.
-                if REQUIRE_TOOL_USE and successful_tool_use_count == 0:
+                if (
+                    REQUIRE_TOOL_USE
+                    and successful_tool_use_count < MINIMUM_SUCCESSFUL_TOOL_CALLS
+                ):
+                    tool_less_response_count += 1
+                    if tool_less_response_count >= MAX_TOOLLESS_RESPONSES:
+                        raise RuntimeError(
+                            "Model ni vrnil strukturiranega klica projektnega "
+                            "orodja; imen orodij v besedilu bridge ne izvaja."
+                        )
                     write_log(
                         job_id,
-                        "Izvajalec je poskusil zaključiti brez uporabe orodij; zahtevam dejanski pregled."
+                        "Model ni uporabil dejanskega orodja; zahtevam "
+                        "strukturirani tool_calls odgovor."
                     )
 
                     messages.append(message)
@@ -780,14 +812,34 @@ def process_job(job_id):
                         "role": "user",
                         "content": (
                             "Ne zaključuj še. Naloga zahteva dejanski pregled projekta. "
-                            "Vsaj en orodni klic mora biti uspešen. Uporabi "
+                            f"Vsaj {MINIMUM_SUCCESSFUL_TOOL_CALLS} dejanska "
+                            "strukturirana orodna klica morata biti uspešna. Uporabi "
                             "razpoložljiva projektna orodja "
                             "(project_status, project_list, project_search, project_read "
-                            "in po potrebi project_diff), preveri dejansko stanje "
+                            "in po potrebi project_diff). Imena orodja ne napiši v "
+                            "reply in ne prosi lastnika za pot, ki jo lahko sam poiščeš. "
+                            "Vrni pravi tool_calls odgovor, preveri dejansko stanje "
                             "in šele nato pripravi končni odgovor."
                         )
                     })
 
+                    continue
+
+                if RESPONSE_FORMAT is not None and not structured:
+                    messages.append(message)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Pregled z orodji je končan. Zdaj ne kliči več orodij. "
+                            "Na podlagi že preverjenih rezultatov vrni samo končni "
+                            "odgovor v zahtevani strukturirani obliki."
+                        ),
+                    })
+                    finalization_requested = True
+                    write_log(
+                        job_id,
+                        "Dokazi so zbrani; zahtevam ločen strukturirani končni odgovor."
+                    )
                     continue
 
                 if not result:
@@ -821,6 +873,8 @@ def process_job(job_id):
                 notify_job_completion(job)
                 return
 
+            tool_less_response_count = 0
+            finalization_requested = False
             messages.append(message)
 
             for call in tool_calls:
@@ -835,6 +889,7 @@ def process_job(job_id):
                         arguments = {}
 
                 tool_use_count += 1
+                job["tool_calls"] = tool_use_count
 
                 write_log(
                     job_id,
@@ -863,6 +918,7 @@ def process_job(job_id):
                         "result": result
                     }
                     successful_tool_use_count += 1
+                    job["successful_tool_calls"] = successful_tool_use_count
 
                     write_log(
                         job_id,
@@ -904,6 +960,7 @@ def process_job(job_id):
                         ensure_ascii=False
                     )
                 })
+                save_job(job)
 
         raise RuntimeError(
             f"Dosežena omejitev {MAX_STEPS} korakov izvajalca."

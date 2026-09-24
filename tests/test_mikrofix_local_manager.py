@@ -205,6 +205,9 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual(
             (16384, "5m"), manager.conversation_runtime_settings(legacy),
         )
+        self.assertIn('"request_timeout_seconds": 360', source)
+        self.assertIn('"minimum_successful_tool_calls": 2', source)
+        self.assertIn("timeout_seconds=900", source)
 
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):
         def responder(message, **kwargs):

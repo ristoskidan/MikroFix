@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -315,9 +316,14 @@ def build_trace(workspace: Path, run_id: str) -> str:
         raise ValueError("Naloga ne obstaja")
 
     sections: list[str] = []
+    conversation_jobs: list[dict[str, Any]] = []
     for turn_root in sorted(
         (job_dir / "conversation-runtime" / "turns").glob("turn-*")
     ):
+        for bridge_job in sorted((turn_root / "bridge" / "jobs").glob("MF-*")):
+            state = read_json(bridge_job / "job.json")
+            if state:
+                conversation_jobs.append(state)
         sections.extend(_bridge_trace_sections(
             turn_root / "bridge" / "jobs",
             "IZBRANI LOKALNI VODJA · POGOVOR IN PREMISLEK",
@@ -357,10 +363,21 @@ def build_trace(workspace: Path, run_id: str) -> str:
         sections.append("=== LOKALNI TESTI ===\n" + str(supervisor["test_evidence"]))
     if supervisor.get("review_evidence"):
         sections.append("=== GPT-OSS · LOKALNI PREGLED ===\n" + str(supervisor["review_evidence"]))
+    if supervisor:
+        progress = f"Izvedbeni poskus: {supervisor.get('attempt', 0)}"
+    elif conversation_jobs:
+        latest = conversation_jobs[-1]
+        progress = (
+            f"Pogovorni korak: {latest.get('steps', 0)}; "
+            f"dejanski klici orodij: {latest.get('successful_tool_calls', 0)}; "
+            f"bridge: {latest.get('status', 'unknown')}"
+        )
+    else:
+        progress = "Pogovorni korak: še ni začet"
     sections.append(
         "=== TRENUTNO STANJE ===\n"
         f"Stopnja: {supervisor.get('stage', manager.get('state', 'UNKNOWN'))}\n"
-        f"Poskus: {supervisor.get('attempt', 0)}\n"
+        f"{progress}\n"
         f"Razlog / povratna informacija: {supervisor.get('feedback') or manager.get('exact_reason') or '-'}"
     )
     conversation = read_json(job_dir / "conversation.json")
@@ -387,7 +404,7 @@ def spawn_manager(workspace: Path, arguments: list[str]) -> Path:
     reports.mkdir(parents=True, exist_ok=True)
     log_path = reports / f"web-{int(time.time() * 1000)}.log"
     log = log_path.open("w", encoding="utf-8")
-    subprocess.Popen(
+    process = subprocess.Popen(
         [sys.executable, str(MANAGER), "--workspace", str(workspace), *arguments],
         cwd=PROJECT_ROOT,
         env={**os.environ, "MIKROFIX_VISIBLE_PLANNER": "0"},
@@ -396,6 +413,7 @@ def spawn_manager(workspace: Path, arguments: list[str]) -> Path:
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    threading.Thread(target=process.wait, daemon=True).start()
     log.close()
     return log_path
 

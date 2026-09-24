@@ -423,7 +423,7 @@ def gpt_validation_prompt(
 
 def run_bridge_monitor(
     bridge: list[str], bridge_env: dict[str, str], bridge_home: Path,
-    job_id: str,
+    job_id: str, *, timeout_seconds: int = 1800,
 ) -> None:
     """Run the planner worker directly; the owner UI reads its durable log."""
     del bridge_home, job_id
@@ -431,7 +431,7 @@ def run_bridge_monitor(
         bridge + ["monitor", "--once"],
         cwd=PROJECT_ROOT,
         env=bridge_env,
-        timeout=1800,
+        timeout=timeout_seconds,
     )
 
 
@@ -769,10 +769,13 @@ def run_lead_conversation(
         "project_memory": str(lead["memory_file"]),
         "parent_session_id": str(lead["session_id"]),
         "num_ctx": num_ctx,
-        "max_steps": 40 if planning_requested else 12,
+        "max_steps": 20 if planning_requested else 8,
         "keep_alive": keep_alive,
         "think": think,
         "require_tool_use": True,
+        "request_timeout_seconds": 360,
+        "minimum_successful_tool_calls": 2,
+        "max_toolless_responses": 2,
         "completion_policy": "supervisor_only",
         "response_format": conversation_response_schema(
             planning_requested=planning_requested,
@@ -812,7 +815,10 @@ def run_lead_conversation(
                       "--task", prompt],
             cwd=PROJECT_ROOT, env=bridge_env, timeout=30,
         ).splitlines()[-1]
-        run_bridge_monitor(bridge, bridge_env, bridge_home, bridge_job_id)
+        run_bridge_monitor(
+            bridge, bridge_env, bridge_home, bridge_job_id,
+            timeout_seconds=900,
+        )
         raw_response = command(
             bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
             env=bridge_env, timeout=30,

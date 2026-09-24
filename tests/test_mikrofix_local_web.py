@@ -256,6 +256,9 @@ class LocalWebPayloadTests(unittest.TestCase):
             "type": "model", "role": "Qwen Thinking vodja", "step": 1,
             "content": "Najprej preverim obstoječi tok.", "tool_call_count": 1,
         }) + "\n", encoding="utf-8")
+        (trace_dir / "job.json").write_text(json.dumps({
+            "status": "running", "steps": 2, "successful_tool_calls": 1,
+        }), encoding="utf-8")
         (directory / "request.json").write_text(json.dumps({
             "run_id": "MF-TALK", "task": "Talk", "created_at": "now",
         }), encoding="utf-8")
@@ -265,6 +268,9 @@ class LocalWebPayloadTests(unittest.TestCase):
         trace = web.build_trace(self.workspace, "MF-TALK")
         self.assertIn("LOKALNI VODJA · POGOVOR IN PREMISLEK", trace)
         self.assertIn("Najprej preverim obstoječi tok.", trace)
+        self.assertIn("Pogovorni korak: 2", trace)
+        self.assertIn("dejanski klici orodij: 1", trace)
+        self.assertNotIn("Poskus: 0", trace)
 
 
 if __name__ == "__main__":
