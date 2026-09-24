@@ -774,7 +774,7 @@ def run_lead_conversation(
         "think": think,
         "require_tool_use": True,
         "request_timeout_seconds": 360,
-        "minimum_successful_tool_calls": 2,
+        "minimum_successful_tool_calls": 4,
         "max_toolless_responses": 2,
         "completion_policy": "supervisor_only",
         "response_format": conversation_response_schema(
@@ -787,6 +787,7 @@ def run_lead_conversation(
         "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config),
         "MIKROFIX_EXECUTOR_STATE_DIR": str(executor_state),
         "PYTHONDONTWRITEBYTECODE": "1",
+        "MIKROFIX_EXECUTOR_READ_ONLY_CHECKS": "decimal_value_edges",
     }
     log_path = turn_dir / "executor.log"
     log = log_path.open("w", encoding="utf-8")

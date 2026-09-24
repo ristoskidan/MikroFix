@@ -16,6 +16,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Literal
@@ -52,6 +53,11 @@ EXPECTED_PLAN_SHA256 = os.environ.get("MIKROFIX_EXECUTOR_PLAN_SHA256", "").strip
 EXPECTED_ALLOWED_FILES_SHA256 = os.environ.get(
     "MIKROFIX_EXECUTOR_ALLOWED_FILES_SHA256", ""
 ).strip()
+READ_ONLY_CHECK_PROFILES = frozenset(
+    item.strip()
+    for item in os.environ.get("MIKROFIX_EXECUTOR_READ_ONLY_CHECKS", "").split(",")
+    if item.strip()
+)
 
 READABLE_SUFFIXES = {
     ".py", ".md", ".txt", ".toml", ".ini", ".json", ".yaml", ".yml",
@@ -304,6 +310,7 @@ class CheckRequest(BaseModel):
         "desktop_unit_tests",
         "central_api_tests",
         "syntax_changed_python",
+        "decimal_value_edges",
     ]
 
 
@@ -618,6 +625,11 @@ CHECKS: dict[str, tuple[list[str], int]] = {
     "local_agent_tests": ([".venv/bin/python", "-m", "unittest", "-v", "tests/test_mikrofix_local_agent.py"], 180),
     "desktop_unit_tests": ([".venv/bin/python", "-m", "unittest", "discover", "-v"], 900),
     "central_api_tests": ([".venv-server/bin/python", "-m", "unittest", "-v", "test_v32_central_api.py"], 600),
+    "decimal_value_edges": ([
+        sys.executable,
+        str(Path(__file__).resolve().parent / "probes" / "decimal_value_edges.py"),
+        str(PROJECT_ROOT),
+    ], 30),
 }
 
 
@@ -631,7 +643,8 @@ def project_run_check(request: CheckRequest) -> dict[str, object]:
                 "the supervisor owns the fail-closed sandboxed test gate"
             ),
         )
-    require_lease()
+    if request.profile not in READ_ONLY_CHECK_PROFILES:
+        require_lease()
     if request.profile == "syntax_changed_python":
         changed = run_command(["git", "diff", "--name-only", "--diff-filter=ACM", "--", "*.py"]).stdout.splitlines()
         files = [item for item in changed if safe_path(item).suffix == ".py"]

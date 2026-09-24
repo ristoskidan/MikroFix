@@ -273,6 +273,23 @@ deleted file mode 100644
         require_lease.assert_not_called()
         run_command.assert_not_called()
 
+    def test_explicit_read_only_check_runs_without_write_lease(self):
+        request = server.CheckRequest(profile="decimal_value_edges")
+        completed = server.subprocess.CompletedProcess([], 0, "probe output", "")
+        with (
+            mock.patch.object(
+                server, "READ_ONLY_CHECK_PROFILES", frozenset({"decimal_value_edges"})
+            ),
+            mock.patch.object(server, "EXPECTED_RUN_ID", ""),
+            mock.patch.object(server, "require_lease") as require_lease,
+            mock.patch.object(server, "run_command", return_value=completed) as run,
+        ):
+            result = server.project_run_check(request)
+        require_lease.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(0, result["exit_code"])
+        self.assertEqual("probe output", result["output"])
+
     def test_supervised_run_rejects_desktop_action_before_lease_or_xdotool(self):
         request = server.DesktopActionRequest(action="press_key", key="F1")
         with (

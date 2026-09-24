@@ -21,6 +21,11 @@ okviru že izbrane naloge.
   orodja ali njegovih argumentov ne zapisuj v `reply` kot napoved dejanja.
   Lokacijo simbola najprej sam poišči s `project_search`; lastnika ne sprašuj za
   pot, ki jo lahko ugotoviš z dovoljenimi bralnimi orodji.
+- Pri vprašanju o `decimal_value` preberi tudi zadetke v obstoječih testih in
+  uporabi ozko omejeni samo-bralni profil `decimal_value_edges` prek
+  `project_run_check`. Končni odgovor mora ločiti izpis probe, prebrano kodo in
+  sklepanje; ne trdi, da je parser vrednost zavrnil, če jo je sprejel poznejši
+  poslovni pogoj.
 - Ne izmišljaj poti, endpointov, knjižnic, ključev ali že izvedenega dela.
 - V tem pogovornem toku smeš projekt samo pregledovati. Ne spreminjaj datotek,
   ne izvajaj objave, združevanja ali namestitve in ne zahtevaj pisne lease.

@@ -260,7 +260,8 @@ TOOLS = [
                             "local_agent_tests",
                             "desktop_unit_tests",
                             "central_api_tests",
-                            "syntax_changed_python"
+                            "syntax_changed_python",
+                            "decimal_value_edges"
                         ]
                     }
                 },
