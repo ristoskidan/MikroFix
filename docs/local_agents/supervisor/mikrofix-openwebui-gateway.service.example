@@ -1,0 +1,15 @@
+[Unit]
+Description=MikroFIX Open WebUI manager gateway
+After=network.target mikrofix-local-executor.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV
+ExecStart=/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/.venv-server/bin/python -m tools.mikrofix_openwebui_gateway --host 172.17.0.1 --port 8767
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

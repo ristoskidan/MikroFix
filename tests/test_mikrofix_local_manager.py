@@ -195,7 +195,7 @@ class LocalManagerTests(unittest.TestCase):
         source = inspect.getsource(manager.run_lead_conversation)
         self.assertIn("ensure_conversation_session", source)
         self.assertNotIn("ensure_context_ready", source)
-        current = self.profile_snapshot("qwen_thinking")
+        current = self.profile_snapshot("gpt_oss")
         self.assertEqual(
             (16384, "5m"), manager.conversation_runtime_settings(current),
         )
@@ -214,9 +214,9 @@ class LocalManagerTests(unittest.TestCase):
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):
         def responder(message, **kwargs):
             self.assertEqual("Build the intake", message)
-            self.assertEqual("qwen_thinking", kwargs["lead_profile"])
+            self.assertEqual("gpt_oss", kwargs["lead_profile"])
             self.assertEqual(
-                "qwen3:4b-thinking-2507-q8_0",
+                "gpt-oss:20b",
                 kwargs["lead_snapshot"]["model"],
             )
             return ({
@@ -225,17 +225,17 @@ class LocalManagerTests(unittest.TestCase):
                 "allowed_files": [], "atoms": [], "constraints": [],
                 "acceptance_criteria": [],
             }, {
-                "session_id": "qwen-session", "memory_sha256": "b" * 64,
-                "bridge_job_id": "MF-BRIDGE", "lead_profile": "qwen_thinking",
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "gpt_oss",
             })
 
         conversation = manager.start_conversation(
             "Build the intake", workspace=self.workspace,
-            lead_profile="qwen_thinking", responder=responder,
+            lead_profile="gpt_oss", responder=responder,
             snapshot_factory=self.profile_snapshot,
         )
         run_id = conversation["parent_run_id"]
-        self.assertEqual("qwen_thinking", conversation["lead_profile"])
+        self.assertEqual("gpt_oss", conversation["lead_profile"])
         self.assertEqual(2, len(conversation["turns"]))
         self.assertEqual(1, len(list((self.workspace / "jobs").iterdir())))
         request = json.loads(
@@ -250,7 +250,7 @@ class LocalManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(manager.ManagerError, "zaklenjen"):
             manager.talk(
                 "Switch", parent_run_id=run_id, workspace=self.workspace,
-                lead_profile="gpt_oss", responder=responder,
+                lead_profile="qwen_thinking", responder=responder,
             )
 
     def test_only_explicit_prepare_plan_moves_to_owner_approval_with_audit(self):
