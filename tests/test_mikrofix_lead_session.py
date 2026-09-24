@@ -4,19 +4,29 @@ import tempfile
 import unittest
 
 from tools.mikrofix_lead_session import (
-    CONVERSATION_SOURCES, SOURCES, confirm_context, ensure_lead_session,
+    SOURCES, confirm_context, ensure_conversation_session, ensure_lead_session,
 )
 
 
 class LeadSessionTests(unittest.TestCase):
-    def test_conversation_bootstrap_excludes_full_project_canon(self):
-        self.assertIn("AGENTS.md", CONVERSATION_SOURCES)
-        self.assertNotIn(
-            "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md", CONVERSATION_SOURCES,
-        )
-        self.assertNotIn(
-            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md", CONVERSATION_SOURCES,
-        )
+    def test_conversation_session_is_small_ready_and_needs_no_model_ack(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "state"
+            first = ensure_conversation_session(
+                home, profile_snapshot_hash="a" * 64,
+                model="model:first", model_digest="b" * 64,
+            )
+            self.assertEqual("CONVERSATION_READY", first["state"])
+            self.assertEqual({}, first["source_manifest"])
+            memory = Path(str(first["memory_file"])).read_text(encoding="utf-8")
+            self.assertLess(len(memory.encode("utf-8")), 1024)
+            self.assertIn("/prepare-plan", memory)
+            self.assertFalse((home / "context-ready.json").exists())
+            second = ensure_conversation_session(
+                home, profile_snapshot_hash="a" * 64,
+                model="model:first", model_digest="b" * 64,
+            )
+            self.assertEqual(first["session_id"], second["session_id"])
 
     def test_context_is_built_once_acknowledged_and_reused(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import subprocess
@@ -151,23 +152,32 @@ class LocalManagerTests(unittest.TestCase):
 
     def test_lead_profiles_are_isolated_and_prompt_is_natural_structured(self):
         prompt = manager.lead_conversation_prompt(
-            "Kaj še manjka?", parent_run_id="MF-ONE",
-            turns=[{"role": "lead", "content": "Povej cilj."}],
-            lead_profile="qwen_thinking",
+            "Kaj še manjka?",
+            turns=[
+                {"role": "owner", "content": "Office button is wrong"},
+                {"role": "lead", "content": "Povej cilj."},
+            ],
             repository_snapshot="commit: abc\nstatus: (clean)",
-            original_request="Office button is wrong",
         )
-        self.assertIn("Qwen Thinking vodja", prompt)
         self.assertIn("Drugi profil", prompt)
         self.assertIn("strukturirani obliki", prompt)
         self.assertIn("bralnimi orodji", prompt)
         self.assertIn("/prepare-plan", prompt)
         self.assertIn("strogo osredotočen", prompt)
         self.assertIn("Office button is wrong", prompt)
+        self.assertIn("Kaj še manjka?", prompt)
+        self.assertNotIn("MF-ONE", prompt)
+        self.assertNotIn("IZBRANI IN ZAKLENJENI PROFIL", prompt)
+        self.assertNotIn("IZVIRNA ZAHTEVA", prompt)
         self.assertNotIn("ne v JSON-u", prompt)
+        first = manager.lead_conversation_prompt(
+            "Enkratno prvo vprašanje", turns=[],
+            repository_snapshot="commit: abc\ndelovno drevo: clean",
+        )
+        self.assertEqual(1, first.count("Enkratno prvo vprašanje"))
+        self.assertNotIn("DOSEDANJI POGOVOR", first)
         planning = manager.lead_conversation_prompt(
-            "/prepare-plan", parent_run_id="MF-ONE", turns=[],
-            lead_profile="qwen_thinking", planning_requested=True,
+            "/prepare-plan", turns=[], planning_requested=True,
         )
         self.assertIn("izrecno sprožil /prepare-plan", planning)
         self.assertIn("lastnikova izbira", planning)
@@ -179,6 +189,21 @@ class LocalManagerTests(unittest.TestCase):
         )
         self.assertIn(
             "routing", manager.conversation_response_schema()["required"],
+        )
+
+    def test_conversation_runtime_skips_context_acknowledgement(self):
+        source = inspect.getsource(manager.run_lead_conversation)
+        self.assertIn("ensure_conversation_session", source)
+        self.assertNotIn("ensure_context_ready", source)
+        current = self.profile_snapshot("qwen_thinking")
+        self.assertEqual(
+            (16384, "5m"), manager.conversation_runtime_settings(current),
+        )
+        legacy = dict(current)
+        legacy.pop("conversation_num_ctx")
+        legacy.pop("conversation_keep_alive")
+        self.assertEqual(
+            (16384, "5m"), manager.conversation_runtime_settings(legacy),
         )
 
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):

@@ -25,10 +25,12 @@ PLANNING_SOURCES = (
     "AGENTS.md",
 )
 
-CONVERSATION_SOURCES = (
-    "docs/local_agents/supervisor/PROTOCOL_V2.md",
-    "AGENTS.md",
-)
+CONVERSATION_MEMORY = """# MikroFIX — lahki pogovorni kontekst
+
+To je neposredni pogovor z lastnikom. Dejstva o trenutni kodi pridobi samo z
+bralnimi projektnimi orodji in samo v obsegu konkretnega vprašanja. Do ukaza
+/prepare-plan ne pripravljaj formalnega izvedbenega načrta in ne spreminjaj kode.
+"""
 
 
 def _atomic_text(path: Path, content: str) -> None:
@@ -111,6 +113,54 @@ def ensure_lead_session(
     }
     if acknowledged:
         state["acknowledgement_file"] = str(acknowledgement_file)
+    _atomic_text(state_file, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    return state
+
+
+def ensure_conversation_session(
+    home: Path, *, profile_snapshot_hash: str, model: str, model_digest: str,
+    memory_name: str = "CONVERSATION_MEMORY.md",
+) -> dict[str, object]:
+    """Create a tiny trusted conversation session without a model handshake."""
+    home = home.expanduser().resolve()
+    memory = CONVERSATION_MEMORY.rstrip() + "\n"
+    memory_hash = hashlib.sha256(memory.encode("utf-8")).hexdigest()
+    state_file = home / "conversation-session.json"
+    old: dict[str, object] = {}
+    if state_file.is_file():
+        try:
+            value = json.loads(state_file.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                old = value
+        except (OSError, ValueError, json.JSONDecodeError):
+            old = {}
+    identity = {
+        "profile_snapshot_hash": profile_snapshot_hash,
+        "model": model,
+        "model_digest": model_digest,
+    }
+    same_identity = all(old.get(key, "") == value for key, value in identity.items())
+    session_id = str(
+        old.get("session_id")
+        if same_identity and old.get("session_id")
+        else f"CONVERSATION-{uuid.uuid4().hex[:16]}"
+    )
+    memory_file = home / memory_name
+    if (
+        not memory_file.is_file()
+        or old.get("memory_sha256") != memory_hash
+    ):
+        _atomic_text(memory_file, memory)
+        memory_file.chmod(0o400)
+    state = {
+        "schema_version": 1,
+        "session_id": session_id,
+        "state": "CONVERSATION_READY",
+        "memory_file": str(memory_file),
+        "memory_sha256": memory_hash,
+        "source_manifest": {},
+        **identity,
+    }
     _atomic_text(state_file, json.dumps(state, ensure_ascii=False, indent=2) + "\n")
     return state
 

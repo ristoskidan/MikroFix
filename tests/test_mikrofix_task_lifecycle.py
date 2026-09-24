@@ -11,6 +11,7 @@ from tools.mikrofix_task_lifecycle import (
     load_profile_registry,
     read_profile_snapshot,
     read_task_state,
+    sha256_value,
     transition_task,
     write_profile_snapshot,
     write_system_prompt_snapshot,
@@ -89,7 +90,32 @@ class TaskLifecycleTests(unittest.TestCase):
         persisted = read_profile_snapshot(self.job)
         self.assertEqual("model:first", persisted["model"])
         self.assertEqual(DIGEST_A, persisted["model_digest"])
+        self.assertEqual(4096, persisted["conversation_num_ctx"])
+        self.assertEqual("5m", persisted["conversation_keep_alive"])
         self.assertNotEqual(first["profile_snapshot_hash"], second["profile_snapshot_hash"])
+
+    def test_legacy_v1_snapshot_remains_readable(self):
+        snapshot = self.snapshot(DIGEST_A)
+        snapshot.pop("conversation_num_ctx")
+        snapshot.pop("conversation_keep_alive")
+        snapshot["schema_version"] = 1
+        snapshot.pop("profile_snapshot_hash")
+        snapshot["profile_snapshot_hash"] = sha256_value(snapshot)
+        self.job.mkdir()
+        write_profile_snapshot(self.job, snapshot)
+        persisted = read_profile_snapshot(self.job)
+        self.assertEqual(1, persisted["schema_version"])
+        self.assertNotIn("conversation_num_ctx", persisted)
+
+    def test_v2_registry_rejects_invalid_conversation_context(self):
+        raw = json.loads(self.registry_path.read_text(encoding="utf-8"))
+        raw["schema_version"] = 2
+        profile = raw["profiles"]["test_lead"]
+        profile["conversation_num_ctx"] = 8192
+        profile["conversation_keep_alive"] = "5m"
+        self.registry_path.write_text(json.dumps(raw), encoding="utf-8")
+        with self.assertRaisesRegex(LifecycleError, "conversation_num_ctx"):
+            load_profile_registry(self.registry_path, self.project)
 
     def test_initial_events_are_immutable_and_parent_linked(self):
         snapshot = self.initialize()

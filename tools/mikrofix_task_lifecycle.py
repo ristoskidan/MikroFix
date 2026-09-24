@@ -137,13 +137,16 @@ def load_profile_registry(path: Path, project_root: Path) -> dict[str, dict[str,
         raise LifecycleError(f"Cannot load lead profile registry: {path}") from exc
     if not isinstance(raw, dict) or set(raw) != {"schema_version", "profiles"}:
         raise LifecycleError("Lead profile registry has unknown or missing fields")
-    if raw["schema_version"] != 1 or not isinstance(raw["profiles"], dict):
+    schema_version = raw["schema_version"]
+    if schema_version not in {1, 2} or not isinstance(raw["profiles"], dict):
         raise LifecycleError("Unsupported lead profile registry schema")
     result: dict[str, dict[str, Any]] = {}
     expected = {
         "version", "model", "role", "display_name", "num_ctx", "think",
         "system_prompt", "keep_alive", "enabled",
     }
+    if schema_version == 2:
+        expected |= {"conversation_num_ctx", "conversation_keep_alive"}
     for profile_id, profile in raw["profiles"].items():
         if not isinstance(profile_id, str) or not re.fullmatch(r"[a-z0-9_]+", profile_id):
             raise LifecycleError(f"Unsafe lead profile id: {profile_id!r}")
@@ -155,6 +158,19 @@ def load_profile_registry(path: Path, project_root: Path) -> dict[str, dict[str,
             raise LifecycleError(f"Profile {profile_id} version must be positive")
         if isinstance(num_ctx, bool) or not isinstance(num_ctx, int) or num_ctx < 1024:
             raise LifecycleError(f"Profile {profile_id} num_ctx is invalid")
+        conversation_num_ctx = (
+            profile["conversation_num_ctx"]
+            if schema_version == 2 else min(num_ctx, 16384)
+        )
+        if (
+            isinstance(conversation_num_ctx, bool)
+            or not isinstance(conversation_num_ctx, int)
+            or conversation_num_ctx < 1024
+            or conversation_num_ctx > num_ctx
+        ):
+            raise LifecycleError(
+                f"Profile {profile_id} conversation_num_ctx is invalid"
+            )
         if not isinstance(profile["enabled"], bool):
             raise LifecycleError(f"Profile {profile_id} enabled must be boolean")
         think = profile["think"]
@@ -178,9 +194,14 @@ def load_profile_registry(path: Path, project_root: Path) -> dict[str, dict[str,
             "role": _required_string(profile["role"], "role"),
             "display_name": _required_string(profile["display_name"], "display_name"),
             "num_ctx": num_ctx,
+            "conversation_num_ctx": conversation_num_ctx,
             "think": think,
             "system_prompt": relative_prompt,
             "keep_alive": _required_string(profile["keep_alive"], "keep_alive"),
+            "conversation_keep_alive": _required_string(
+                profile.get("conversation_keep_alive", "5m"),
+                "conversation_keep_alive",
+            ),
             "enabled": profile["enabled"],
         }
     if not result:
@@ -219,7 +240,7 @@ def build_profile_snapshot(
         raise LifecycleError("model_digest must be a SHA-256 digest")
     prompt_path = (project_root / str(profile["system_prompt"])).resolve()
     snapshot = {
-        "schema_version": 1,
+        "schema_version": 2,
         "profile_id": profile["profile_id"],
         "profile_version": profile["version"],
         "model": profile["model"],
@@ -228,10 +249,12 @@ def build_profile_snapshot(
         "role": profile["role"],
         "display_name": profile["display_name"],
         "num_ctx": profile["num_ctx"],
+        "conversation_num_ctx": profile["conversation_num_ctx"],
         "think": profile["think"],
         "system_prompt": profile["system_prompt"],
         "system_prompt_hash": hashlib.sha256(prompt_path.read_bytes()).hexdigest(),
         "keep_alive": profile["keep_alive"],
+        "conversation_keep_alive": profile["conversation_keep_alive"],
         "created_at": utc_timestamp(),
     }
     snapshot["profile_snapshot_hash"] = sha256_value(snapshot)
@@ -241,13 +264,18 @@ def build_profile_snapshot(
 def validate_profile_snapshot(snapshot: object) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         raise LifecycleError("Lead profile snapshot must be an object")
-    required = {
+    legacy_required = {
         "schema_version", "profile_id", "profile_version", "model", "model_tag",
         "model_digest", "role", "display_name", "num_ctx", "think",
         "system_prompt", "system_prompt_hash", "keep_alive", "created_at",
         "profile_snapshot_hash",
     }
-    if set(snapshot) != required or snapshot.get("schema_version") != 1:
+    current_required = legacy_required | {
+        "conversation_num_ctx", "conversation_keep_alive",
+    }
+    schema_version = snapshot.get("schema_version")
+    required = legacy_required if schema_version == 1 else current_required
+    if schema_version not in {1, 2} or set(snapshot) != required:
         raise LifecycleError("Lead profile snapshot has unknown or missing fields")
     if snapshot["model"] != snapshot["model_tag"]:
         raise LifecycleError("Lead profile model and tag differ")
@@ -264,6 +292,18 @@ def validate_profile_snapshot(snapshot: object) -> dict[str, Any]:
             or not isinstance(snapshot["num_ctx"], int)
             or snapshot["num_ctx"] < 1024):
         raise LifecycleError("num_ctx is invalid")
+    if schema_version == 2:
+        _required_string(
+            snapshot.get("conversation_keep_alive"),
+            "conversation_keep_alive",
+        )
+        if (
+            isinstance(snapshot["conversation_num_ctx"], bool)
+            or not isinstance(snapshot["conversation_num_ctx"], int)
+            or snapshot["conversation_num_ctx"] < 1024
+            or snapshot["conversation_num_ctx"] > snapshot["num_ctx"]
+        ):
+            raise LifecycleError("conversation_num_ctx is invalid")
     if not isinstance(snapshot["think"], (bool, str)):
         raise LifecycleError("think is invalid")
     for field in ("model_digest", "system_prompt_hash", "profile_snapshot_hash"):

@@ -22,7 +22,7 @@ try:
         prepare_review, record_codex_approved, record_codex_rejected,
     )
     from tools.mikrofix_lead_session import (
-        CONVERSATION_SOURCES, PLANNING_SOURCES, ensure_context_ready,
+        PLANNING_SOURCES, ensure_context_ready, ensure_conversation_session,
     )
     from tools.mikrofix_supervisor import (
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
@@ -40,7 +40,7 @@ except ModuleNotFoundError:
         prepare_review, record_codex_approved, record_codex_rejected,
     )
     from mikrofix_lead_session import (  # type: ignore[no-redef]
-        CONVERSATION_SOURCES, PLANNING_SOURCES, ensure_context_ready,
+        PLANNING_SOURCES, ensure_context_ready, ensure_conversation_session,
     )
     from mikrofix_supervisor import (  # type: ignore[no-redef]
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
@@ -650,36 +650,27 @@ def run_planner(
 
 
 def repository_orientation(repository: Path) -> str:
-    """Return a compact, deterministic identity map instead of the whole codebase."""
+    """Return only the current revision and a bounded dirty-worktree summary."""
     head = command(["git", "rev-parse", "HEAD"], cwd=repository, timeout=30).strip()
     status_lines = command(
         ["git", "status", "--short"], cwd=repository, timeout=30,
     ).splitlines()
-    top_level = sorted(path.name for path in repository.iterdir() if path.name != ".git")
-    rendered_status = "\n".join(status_lines[:200]) or "(clean)"
-    if len(status_lines) > 200:
-        rendered_status += f"\n... {len(status_lines) - 200} additional paths omitted"
-    return (
-        f"commit: {head}\n"
-        f"status:\n{rendered_status}\n"
-        f"top-level: {', '.join(top_level[:120])}"
-    )
+    if not status_lines:
+        return f"commit: {head}\ndelovno drevo: clean"
+    rendered = "\n".join(status_lines[:20])
+    if len(status_lines) > 20:
+        rendered += f"\n... {len(status_lines) - 20} dodatnih poti ni prikazanih"
+    return f"commit: {head}\nspremenjene poti ({len(status_lines)}):\n{rendered}"
 
 
 def lead_conversation_prompt(
-    message: str, *, parent_run_id: str, turns: list[dict[str, str]],
-    lead_profile: str, lead_display_name: str | None = None,
+    message: str, *, turns: list[dict[str, str]],
     planning_requested: bool = False, repository_snapshot: str = "",
-    original_request: str = "",
 ) -> str:
     """Build one bounded continuation turn for one isolated persistent lead."""
-    profile_name = lead_display_name or {
-        "qwen_thinking": "Qwen Thinking vodja",
-        "gpt_oss": "GPT-OSS vodja",
-    }.get(lead_profile, lead_profile)
     history = turns[-MAX_CONVERSATION_TURNS:]
     rendered_history = "\n\n".join(
-        ("LASTNIK" if turn.get("role") == "owner" else profile_name.upper())
+        ("LASTNIK" if turn.get("role") == "owner" else "VODJA")
         + ":\n" + str(turn.get("content") or "").strip()
         for turn in history
         if str(turn.get("content") or "").strip()
@@ -701,20 +692,35 @@ def lead_conversation_prompt(
         "izbiro. Odgovori naravno in samo o tem problemu. Načrt sme sprožiti "
         "samo /prepare-plan. "
     )
-    return (
-        "Nadaljuj neposredni pogovor z lastnikom v okviru že izbrane naloge. "
-        + mode_instruction +
+    sections = [
+        "Neposredno odgovori lastniku. " + mode_instruction +
         "To ni nova naloga. Drugi profil lokalnega vodje v tem pogovoru ne "
         "sodeluje, ne vidi zgodovine in ga ne smeš klicati ali prositi za "
         "pregled. Za dejstva o projektu uporabi samo bralna projektna orodja. "
         "Vrni odločitev v točno zahtevani strukturirani obliki; polje reply je "
-        "besedilo, ki ga vidi lastnik.\n\n"
-        f"IZBRANI IN ZAKLENJENI PROFIL VODJE: {profile_name}\n"
-        f"IZBRANA NALOGA: {parent_run_id}\n\n"
-        f"IZVIRNA ZAHTEVA LASTNIKA:\n{original_request.strip()}\n\n"
-        f"TRENUTNI REPOZITORIJSKI POSNETEK:\n{repository_snapshot}\n\n"
-        f"DOSEDANJI POGOVOR:\n{rendered_history or '(še brez nadaljevanj)'}\n\n"
-        f"NOVO SPOROČILO LASTNIKA:\n{message.strip()}"
+        "besedilo, ki ga vidi lastnik."
+    ]
+    if repository_snapshot.strip():
+        sections.append(
+            "TRENUTNO STANJE REPOZITORIJA:\n" + repository_snapshot.strip()
+        )
+    if rendered_history:
+        sections.append("DOSEDANJI POGOVOR:\n" + rendered_history)
+    sections.append(
+        "UKAZ LASTNIKA:\n/prepare-plan"
+        if planning_requested else
+        "SPOROČILO LASTNIKA:\n" + message.strip()
+    )
+    return "\n\n".join(sections)
+
+
+def conversation_runtime_settings(snapshot: dict[str, Any]) -> tuple[int, str]:
+    """Resolve snapshotted conversation limits, with a safe legacy fallback."""
+    return (
+        int(snapshot.get(
+            "conversation_num_ctx", min(snapshot["num_ctx"], 16384),
+        )),
+        str(snapshot.get("conversation_keep_alive", "5m")),
     )
 
 
@@ -732,18 +738,14 @@ def run_lead_conversation(
     base_home = Path.home() / ".local/share/mikrofix-bridge/lead-profiles"
     lead_home = base_home / lead_profile / job_dir.name
     model = str(snapshot["model"])
-    num_ctx = int(snapshot["num_ctx"])
-    keep_alive = str(snapshot["keep_alive"])
+    num_ctx, keep_alive = conversation_runtime_settings(snapshot)
     think: bool | str = snapshot["think"]
     role = f"{snapshot['display_name']} — glavni lokalni vodja v pogovoru"
     system_prompt = read_system_prompt_snapshot(job_dir, snapshot)
-    lead = ensure_context_ready(
-        PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
-        model=model, num_ctx=num_ctx, keep_alive=keep_alive,
+    lead = ensure_conversation_session(
+        lead_home, model=model,
         profile_snapshot_hash=str(snapshot["profile_snapshot_hash"]),
         model_digest=str(snapshot["model_digest"]),
-        sources=CONVERSATION_SOURCES,
-        memory_name="CONVERSATION_BOOTSTRAP.md",
     )
 
     turn_dir = job_dir / "conversation-runtime" / "turns" / f"turn-{time.time_ns()}"
@@ -801,14 +803,9 @@ def run_lead_conversation(
     try:
         wait_for_executor(executor_url, token_file, process)
         prompt = lead_conversation_prompt(
-            message, parent_run_id=job_dir.name, turns=turns,
-            lead_profile=lead_profile,
-            lead_display_name=str(snapshot["display_name"]),
+            message, turns=turns,
             planning_requested=planning_requested,
             repository_snapshot=repository_orientation(repository),
-            original_request=str(json.loads(
-                (job_dir / "request.json").read_text(encoding="utf-8")
-            ).get("task") or ""),
         )
         bridge_job_id = command(
             bridge + ["dispatch", "--name", f"Neposredni pogovor: {role}",
@@ -1022,7 +1019,7 @@ def prepare_plan(
     if conversation.get("active_run_id"):
         raise ManagerError("Conversation already has an active execution plan")
     return talk(
-        "/prepareplan", parent_run_id=parent_run_id, workspace=workspace,
+        "/prepare-plan", parent_run_id=parent_run_id, workspace=workspace,
         lead_profile=str(snapshot["profile_id"]), responder=responder,
         planning_requested=True,
     )
