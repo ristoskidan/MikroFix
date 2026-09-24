@@ -234,6 +234,39 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual("completed", persisted["status"])
         self.assertEqual('{"reply":"Končni odgovor"}', persisted["result"])
 
+    def test_plain_conversation_reply_is_wrapped_without_second_model_call(self):
+        job = self.bridge.create_job("Inspect then answer once")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {"content": "Dokazan naravni odgovor."}},
+        ])
+        calls = []
+
+        def answer(_messages, **kwargs):
+            calls.append(kwargs.get("structured", False))
+            return next(responses)
+
+        with (
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+            mock.patch.object(
+                self.bridge, "RESPONSE_FORMAT",
+                {"type": "object", "required": ["reply"]},
+            ),
+            mock.patch.object(self.bridge, "MINIMUM_SUCCESSFUL_TOOL_CALLS", 1),
+            mock.patch.object(self.bridge, "DETERMINISTIC_REPLY_WRAPPER", True),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual([False, False], calls)
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(
+            {"reply": "Dokazan naravni odgovor."},
+            json.loads(persisted["result"]),
+        )
+
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
         job = self.bridge.create_job("Verify with a successful tool")
         responses = iter([

@@ -208,6 +208,7 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn('"request_timeout_seconds": 360', source)
         self.assertIn('"minimum_successful_tool_calls": 4', source)
         self.assertIn("MIKROFIX_EXECUTOR_READ_ONLY_CHECKS", source)
+        self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
         self.assertIn("timeout_seconds=900", source)
 
     def test_start_conversation_keeps_one_root_and_locks_lead_profile(self):

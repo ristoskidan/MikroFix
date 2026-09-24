@@ -15,6 +15,10 @@ def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: decimal_value_edges.py PROJECT_ROOT")
     project = Path(sys.argv[1]).resolve()
+    implementation_path = project / "mikrofix_v30_receipts.py"
+    tests_path = project / "test_v30_receipts.py"
+    implementation_lines = implementation_path.read_text(encoding="utf-8").splitlines()
+    test_lines = tests_path.read_text(encoding="utf-8").splitlines()
     sys.path.insert(0, str(project))
     from mikrofix_v30_receipts import decimal_value  # noqa: PLC0415
 
@@ -30,7 +34,19 @@ def main() -> int:
                 "input": repr(value), "outcome": "error",
                 "error_type": type(exc).__name__, "message": str(exc),
             })
-    print(json.dumps({"observations": observations}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "implementation": {
+            "path": implementation_path.name,
+            "lines": "47-75",
+            "content": "\n".join(implementation_lines[46:75]),
+        },
+        "existing_tests": {
+            "path": tests_path.name,
+            "lines": "60-73",
+            "content": "\n".join(test_lines[59:73]),
+        },
+        "observations": observations,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 

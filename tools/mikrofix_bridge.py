@@ -67,6 +67,7 @@ REQUIRE_TOOL_USE = bool(CFG.get("require_tool_use", True))
 REQUEST_TIMEOUT_SECONDS = int(CFG.get("request_timeout_seconds", 900))
 MINIMUM_SUCCESSFUL_TOOL_CALLS = int(CFG.get("minimum_successful_tool_calls", 1))
 MAX_TOOLLESS_RESPONSES = int(CFG.get("max_toolless_responses", 2))
+DETERMINISTIC_REPLY_WRAPPER = bool(CFG.get("deterministic_reply_wrapper", False))
 RESPONSE_FORMAT = CFG.get("response_format")
 AGENT_ROLE = str(CFG.get("agent_role", "lokalni agent"))
 COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
@@ -827,6 +828,31 @@ def process_job(job_id):
                     continue
 
                 if RESPONSE_FORMAT is not None and not structured:
+                    if DETERMINISTIC_REPLY_WRAPPER:
+                        reply = result
+                        try:
+                            decoded = json.loads(result)
+                            if isinstance(decoded, dict) and isinstance(
+                                decoded.get("reply"), str
+                            ):
+                                reply = decoded["reply"].strip()
+                        except json.JSONDecodeError:
+                            pass
+                        result = json.dumps(
+                            {"reply": reply}, ensure_ascii=False, indent=2,
+                        )
+                        atomic_text(job_dir(job_id) / "result.txt", result + "\n")
+                        job["status"] = "completed"
+                        job["finished_at"] = now()
+                        job["result"] = result
+                        save_job(job)
+                        write_log(
+                            job_id,
+                            "Pogovorni odgovor je deterministično zapakiran; "
+                            "dodatni modelski klic ni potreben."
+                        )
+                        notify_job_completion(job)
+                        return
                     messages.append(message)
                     messages.append({
                         "role": "user",

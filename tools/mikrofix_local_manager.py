@@ -776,6 +776,7 @@ def run_lead_conversation(
         "request_timeout_seconds": 360,
         "minimum_successful_tool_calls": 4,
         "max_toolless_responses": 2,
+        "deterministic_reply_wrapper": not planning_requested,
         "completion_policy": "supervisor_only",
         "response_format": conversation_response_schema(
             planning_requested=planning_requested,
