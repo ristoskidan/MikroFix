@@ -152,6 +152,16 @@ conversation model for the structured first proposal, then invokes the fixed
 validator and deterministic manager. Roles after `/approve-plan` remain
 preconfigured in the supervisor flow.
 
+During a streamed conversation, the gateway forwards the `thinking` text that
+Ollama actually returned as OpenAI-compatible `reasoning_content`. Open WebUI
+can therefore render it in its separate collapsible reasoning block. Progress
+appears after each completed model step, together with bounded tool-call and
+tool-result labels; the bridge deliberately remains non-streaming within an
+individual Ollama call so its existing supervised tool loop is unchanged.
+Request content and full tool results are not copied into the reasoning stream.
+This display is diagnostic only: the append-only bridge trace remains the
+authoritative evidence of model and tool activity.
+
 The gateway listens only on the Docker host bridge address, requires a bearer
 token stored outside the repository and intentionally exposes no generic file,
 shell or model-selection endpoint. Install the example user unit, then add an

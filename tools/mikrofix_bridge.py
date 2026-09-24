@@ -773,17 +773,21 @@ def process_job(job_id):
 
             message = response.get("message", {})
             tool_calls = message.get("tool_calls") or []
-            write_trace(job_id, {
+            trace_event = {
                 "type": "model",
                 "role": AGENT_ROLE,
                 "step": step,
                 "content": str(message.get("content") or "").strip(),
                 "tool_call_count": len(tool_calls),
                 "note": (
-                    "Prikazani so dejanski odgovor, klici orodij in rezultati; "
-                    "skrito notranje razmišljanje ni del pregledovalnika."
+                    "Prikazani so dejanski odgovor, modelov vrnjeni premislek, "
+                    "klici orodij in rezultati."
                 ),
-            })
+            }
+            thinking = str(message.get("thinking") or "").strip()
+            if thinking:
+                trace_event["thinking"] = thinking
+            write_trace(job_id, trace_event)
 
             if not tool_calls:
                 result = (

@@ -132,6 +132,50 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         self.assertIn("MikroFIX je zahtevo varno zavrnil", "".join(chunks))
         self.assertEqual("data: [DONE]\n\n", chunks[-1])
 
+    def test_progress_reasoning_exposes_thinking_without_request_content(self):
+        self.assertEqual(
+            "Preverjam dejansko implementacijo.\n",
+            gateway.progress_reasoning({
+                "type": "model",
+                "thinking": "Preverjam dejansko implementacijo.",
+            }),
+        )
+        self.assertIn(
+            "project_search",
+            gateway.progress_reasoning({
+                "type": "tool_call", "tool": "project_search",
+                "arguments": {"query": "decimal_value"},
+            }),
+        )
+        self.assertEqual(
+            "", gateway.progress_reasoning({
+                "type": "request", "content": "zasebna zahteva",
+            }),
+        )
+
+    def test_stream_emits_reasoning_content_and_final_answer(self):
+        async def collect() -> list[str]:
+            progress: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            progress.put_nowait({
+                "type": "model", "thinking": "Iščem simbol.",
+            })
+            progress.put_nowait({
+                "type": "tool_result", "tool": "project_search", "ok": True,
+            })
+            return [
+                chunk async for chunk in gateway._stream_response(
+                    "chatcmpl-test", "mikrofix::conversation_lead",
+                    lambda: "Končni odgovor", progress,
+                )
+            ]
+
+        chunks = asyncio.run(collect())
+        rendered = "".join(chunks)
+        self.assertIn('"reasoning_content": "Iščem simbol.\\n"', rendered)
+        self.assertIn("Rezultat `project_search`: uspešno.", rendered)
+        self.assertIn('"content": "Končni odgovor"', rendered)
+        self.assertEqual("data: [DONE]\n\n", chunks[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

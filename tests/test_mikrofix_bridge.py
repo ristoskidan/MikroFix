@@ -204,6 +204,44 @@ class BridgeCompletionTests(unittest.TestCase):
             self.bridge.process_job(job["id"])
         self.assertEqual([("completed", "finished\n")], observed)
 
+    def test_process_persists_model_returned_thinking_in_trace(self):
+        job = self.bridge.create_job("Inspect with visible reasoning")
+        responses = iter([
+            {"message": {
+                "thinking": "Najprej moram preveriti stanje projekta.",
+                "tool_calls": [{
+                    "function": {"name": "project_status", "arguments": {}}
+                }],
+            }},
+            {"message": {
+                "thinking": "Dokaz je zbran, zato lahko odgovorim.",
+                "content": "Preverjeno.",
+            }},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _messages, **_kwargs: next(responses),
+            ),
+            mock.patch.object(
+                self.bridge, "execute_tool", return_value={"ok": True},
+            ),
+            mock.patch.object(self.bridge, "MINIMUM_SUCCESSFUL_TOOL_CALLS", 1),
+        ):
+            self.bridge.process_job(job["id"])
+
+        events = [
+            json.loads(line)
+            for line in (
+                self.bridge.job_dir(job["id"]) / "trace.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        model_events = [event for event in events if event["type"] == "model"]
+        self.assertEqual([
+            "Najprej moram preveriti stanje projekta.",
+            "Dokaz je zbran, zato lahko odgovorim.",
+        ], [event["thinking"] for event in model_events])
+
     def test_tool_review_and_structured_finalization_are_separate_calls(self):
         job = self.bridge.create_job("Inspect then answer")
         responses = iter([

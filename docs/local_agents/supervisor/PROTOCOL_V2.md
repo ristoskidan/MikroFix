@@ -91,6 +91,11 @@ lastnik z `/llms` pregleda živi Ollama inventar in z `/llm <tag>` izbere
 izvajalni model. Ta izbira ni del vloge in se ob nastanku naloge zaklene v
 immutable snapshot.
 
+Modelov dejansko vrnjeni `thinking` se lahko med pretočnim Open WebUI odgovorom
+prikaže kot zložljiv `reasoning_content`, skupaj z omejenimi oznakami orodnih
+klicev. Ta prikaz je samo sprotna diagnostika po zaključenih modelskih korakih;
+append-only `trace.jsonl` in audit dogodki ostanejo trajni vir dokazov.
+
 Vsaka naloga ima append-only imenik `audit/events`. Posamezni dogodki so
 read-only datoteke z zaporedjem in `parent_event_id`; vsebujejo model, tag,
 digest, hash profila, prompta, konteksta, checkpointa ter vhodnega in izhodnega

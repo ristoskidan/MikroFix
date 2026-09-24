@@ -199,6 +199,7 @@ def _model_selection_command(
 
 def route_message(
     message: str, run_id: str, role_id: str, selected_model: str,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
     """Route slash commands to trusted code and ordinary text to the locked lead."""
     model_response = _model_selection_command(
@@ -228,7 +229,7 @@ def route_message(
         model_tag = _locked_model(run_id, role_id)
         conversation = talk(
             message, parent_run_id=run_id, workspace=WORKSPACE,
-            lead_profile=role_id,
+            lead_profile=role_id, progress_callback=progress_callback,
         )
     else:
         model_tag = selected_model
@@ -241,7 +242,7 @@ def route_message(
             raise ValueError(f"Izbrani model ni več nameščen: {model_tag}")
         conversation = start_conversation(
             message, workspace=WORKSPACE, lead_profile=role_id,
-            model_tag=model_tag,
+            model_tag=model_tag, progress_callback=progress_callback,
         )
     reply, actual_run_id = _latest_reply(conversation)
     return (
@@ -253,7 +254,13 @@ def route_message(
 
 def _chunk(
     request_id: str, model_id: str, content: str, finish_reason: str | None,
+    *, reasoning_content: str = "",
 ) -> str:
+    delta: dict[str, str] = {}
+    if content:
+        delta["content"] = content
+    if reasoning_content:
+        delta["reasoning_content"] = reasoning_content
     payload = {
         "id": request_id,
         "object": "chat.completion.chunk",
@@ -261,7 +268,7 @@ def _chunk(
         "model": model_id,
         "choices": [{
             "index": 0,
-            "delta": {"content": content},
+            "delta": delta,
             "finish_reason": finish_reason,
         }],
     }
@@ -270,20 +277,64 @@ def _chunk(
 
 async def _stream_response(
     request_id: str, model_id: str, operation: Callable[[], str],
+    progress_queue: asyncio.Queue[dict[str, Any]] | None = None,
 ):
     task = asyncio.create_task(asyncio.to_thread(operation))
     yield _chunk(request_id, model_id, "", None)
+    last_keepalive = time.monotonic()
     while not task.done():
-        done, _pending = await asyncio.wait({task}, timeout=10)
-        if not done:
+        if progress_queue is not None:
+            try:
+                event = progress_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                event = None
+            if event is not None:
+                reasoning = progress_reasoning(event)
+                if reasoning:
+                    yield _chunk(
+                        request_id, model_id, "", None,
+                        reasoning_content=reasoning,
+                    )
+                continue
+        done, _pending = await asyncio.wait({task}, timeout=0.2)
+        if not done and time.monotonic() - last_keepalive >= 10:
             # A standards-valid empty delta keeps the local connection alive.
             yield _chunk(request_id, model_id, "", None)
+            last_keepalive = time.monotonic()
+    if progress_queue is not None:
+        while not progress_queue.empty():
+            reasoning = progress_reasoning(progress_queue.get_nowait())
+            if reasoning:
+                yield _chunk(
+                    request_id, model_id, "", None,
+                    reasoning_content=reasoning,
+                )
     try:
         content = task.result()
     except Exception as exc:  # streamed responses can no longer change HTTP status
         content = f"MikroFIX je zahtevo varno zavrnil: {exc}"
     yield _chunk(request_id, model_id, content, "stop")
     yield "data: [DONE]\n\n"
+
+
+def progress_reasoning(event: dict[str, Any]) -> str:
+    """Render one trusted bridge event as compact Open WebUI reasoning."""
+    event_type = str(event.get("type") or "")
+    if event_type == "model":
+        thinking = str(event.get("thinking") or "").strip()
+        return thinking + "\n" if thinking else ""
+    if event_type == "tool_call":
+        tool = str(event.get("tool") or "orodje")
+        arguments = event.get("arguments")
+        rendered = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
+        if len(rendered) > 500:
+            rendered = rendered[:497] + "..."
+        return f"\nUporabljam `{tool}`: `{rendered}`\n"
+    if event_type == "tool_result":
+        tool = str(event.get("tool") or "orodje")
+        status = "uspešno" if event.get("ok") is True else "napaka"
+        return f"Rezultat `{tool}`: {status}.\n"
+    return ""
 
 
 app = FastAPI(
@@ -329,12 +380,24 @@ async def chat_completions(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     request_id = f"chatcmpl-mf-{time.time_ns()}"
     selected_model_id = virtual_model_id(role_id)
-    operation = lambda: route_message(message, run_id, role_id, selected_model)
     if bool(body.get("stream")):
+        loop = asyncio.get_running_loop()
+        progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        def publish_progress(event: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(progress_queue.put_nowait, event)
+
+        operation = lambda: route_message(
+            message, run_id, role_id, selected_model,
+            progress_callback=publish_progress,
+        )
         return StreamingResponse(
-            _stream_response(request_id, selected_model_id, operation),
+            _stream_response(
+                request_id, selected_model_id, operation, progress_queue,
+            ),
             media_type="text/event-stream",
         )
+    operation = lambda: route_message(message, run_id, role_id, selected_model)
     try:
         content = await asyncio.to_thread(operation)
     except (ValueError, OwnerCommandError) as exc:

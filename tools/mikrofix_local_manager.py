@@ -540,15 +540,85 @@ def gpt_validation_prompt(
 def run_bridge_monitor(
     bridge: list[str], bridge_env: dict[str, str], bridge_home: Path,
     job_id: str, *, timeout_seconds: int = 1800,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Run the planner worker directly; the owner UI reads its durable log."""
-    del bridge_home, job_id
-    command(
-        bridge + ["monitor", "--once"],
-        cwd=PROJECT_ROOT,
-        env=bridge_env,
-        timeout=timeout_seconds,
-    )
+    if progress_callback is None:
+        command(
+            bridge + ["monitor", "--once"],
+            cwd=PROJECT_ROOT,
+            env=bridge_env,
+            timeout=timeout_seconds,
+        )
+        return
+
+    trace_path = bridge_home / "jobs" / job_id / "trace.jsonl"
+    output_path = bridge_home / "monitor-progress.log"
+    offset = 0
+    deadline = time.monotonic() + timeout_seconds
+    with output_path.open("w+", encoding="utf-8") as output:
+        process = subprocess.Popen(
+            bridge + ["monitor", "--once"], cwd=PROJECT_ROOT,
+            env=bridge_env, stdin=subprocess.DEVNULL,
+            stdout=output, stderr=subprocess.STDOUT, text=True,
+        )
+        try:
+            while process.poll() is None:
+                offset = forward_trace_events(
+                    trace_path, offset, progress_callback,
+                )
+                if time.monotonic() >= deadline:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                    raise ManagerError("Bridge monitor timed out")
+                time.sleep(0.1)
+            offset = forward_trace_events(trace_path, offset, progress_callback)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        if process.returncode:
+            output.seek(0)
+            raise ManagerError(
+                "Bridge monitor failed: " + output.read()[-4000:]
+            )
+
+
+def forward_trace_events(
+    trace_path: Path, offset: int,
+    progress_callback: Callable[[dict[str, Any]], None],
+) -> int:
+    """Forward only complete append-only JSONL events from one bridge trace."""
+    if not trace_path.is_file():
+        return offset
+    with trace_path.open("r", encoding="utf-8") as handle:
+        handle.seek(offset)
+        while True:
+            line_start = handle.tell()
+            line = handle.readline()
+            if not line:
+                return handle.tell()
+            if not line.endswith("\n"):
+                return line_start
+            offset = handle.tell()
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                try:
+                    progress_callback(event)
+                except Exception:
+                    # A disconnected UI must never stop the supervised job.
+                    continue
 
 
 def run_planner(
@@ -845,6 +915,7 @@ def run_lead_conversation(
     turns: list[dict[str, str]], lead_profile: str = "conversation_lead",
     lead_snapshot: dict[str, Any] | None = None,
     planning_requested: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Ask only the selected persistent lead through a read-only executor."""
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
@@ -935,7 +1006,7 @@ def run_lead_conversation(
         ).splitlines()[-1]
         run_bridge_monitor(
             bridge, bridge_env, bridge_home, bridge_job_id,
-            timeout_seconds=900,
+            timeout_seconds=900, progress_callback=progress_callback,
         )
         raw_response = command(
             bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
@@ -988,6 +1059,7 @@ def talk(
     lead_profile: str = "conversation_lead",
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     planning_requested: bool = False,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Append one direct owner/lead turn without creating a new manager job."""
     workspace = workspace.expanduser().resolve()
@@ -1027,11 +1099,14 @@ def talk(
         turns = conversation.get("turns")
         if not isinstance(turns, list):
             turns = []
-        decision, evidence = responder(
-            clean_message, job_dir=job_dir, repository=repository, turns=turns,
-            lead_profile=lead_profile, lead_snapshot=snapshot,
-            planning_requested=planning_requested,
-        )
+        responder_kwargs = {
+            "job_dir": job_dir, "repository": repository, "turns": turns,
+            "lead_profile": lead_profile, "lead_snapshot": snapshot,
+            "planning_requested": planning_requested,
+        }
+        if progress_callback is not None:
+            responder_kwargs["progress_callback"] = progress_callback
+        decision, evidence = responder(clean_message, **responder_kwargs)
         reported_routing = str(decision.get("routing", "NEEDS_INFO"))
         routing = reported_routing if planning_requested else "NEEDS_INFO"
         reply = str(decision["reply"]).strip()
@@ -1154,6 +1229,7 @@ def start_conversation(
     lead_profile: str = "conversation_lead", model_tag: str | None = None,
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Create one owner-visible conversation root, then ask only its chosen lead."""
     workspace = workspace.expanduser().resolve()
@@ -1205,6 +1281,7 @@ def start_conversation(
         return talk(
             clean_message, parent_run_id=run_id, workspace=workspace,
             lead_profile=lead_profile, responder=responder,
+            progress_callback=progress_callback,
         )
     except BaseException as exc:
         try:

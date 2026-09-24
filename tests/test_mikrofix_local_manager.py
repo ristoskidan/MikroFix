@@ -103,6 +103,25 @@ class LocalManagerTests(unittest.TestCase):
             timeout=1800,
         )
 
+    def test_trace_forwarder_waits_for_complete_jsonl_records(self):
+        trace = self.root / "trace.jsonl"
+        trace.write_text(
+            '{"type":"model","thinking":"first"}\n'
+            '{"type":"tool_call","tool":"project_status"}\n'
+            '{"type":"model","thinking":"part',
+            encoding="utf-8",
+        )
+        received = []
+        offset = manager.forward_trace_events(trace, 0, received.append)
+        self.assertEqual(["model", "tool_call"], [item["type"] for item in received])
+
+        with trace.open("a", encoding="utf-8") as handle:
+            handle.write('ial"}\n')
+        offset = manager.forward_trace_events(trace, offset, received.append)
+        self.assertEqual("partial", received[-1]["thinking"])
+        self.assertEqual(trace.stat().st_size, offset)
+        self.assertEqual(3, len(received))
+
     def test_unknown_fields_and_missing_context_fail_closed(self):
         with self.assertRaisesRegex(manager.ManagerError, "unknown"):
             manager.normalize_plan(
