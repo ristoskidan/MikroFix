@@ -25,6 +25,9 @@ ALIASES = {
     "/codexrejected": "/codex-rejected",
     "/codexapproved": "/codex-approved",
     "/approveplan": "/approve-plan",
+    "/rejectplan": "/reject-plan",
+    "/revise-plan": "/reject-plan",
+    "/reviseplan": "/reject-plan",
     "/codexopinion": "/codex-opinion",
 }
 
@@ -41,7 +44,7 @@ REQUIRED_ARGUMENT = frozenset({
     "/codex-approved",
     "/replace-goal",
 })
-OPTIONAL_ARGUMENT = frozenset({"/codex-opinion"})
+OPTIONAL_ARGUMENT = frozenset({"/codex-opinion", "/reject-plan"})
 COMMAND_NAMES = NO_ARGUMENT | REQUIRED_ARGUMENT | OPTIONAL_ARGUMENT
 
 
@@ -77,6 +80,7 @@ def help_text() -> str:
         "/plan-dispatch — pošlje naprej zadnjo prikazano revizijo načrta",
         "/replace-goal <nov cilj> — izrecno zamenja glavni cilj pogovora",
         "/approve-plan — dovoli in zažene potrjeni načrt",
+        "/reject-plan [razlog] — zavrne kandidata in vrne isti pogovor v dopolnitev",
         "/prepare-review — pripravi nespremenljiv paket za Codex",
         "/codex-rejected <razlog> — zabeleži zavrnitev",
         "/codex-approved <commit SHA> — zabeleži odobritev in uporabo commita",

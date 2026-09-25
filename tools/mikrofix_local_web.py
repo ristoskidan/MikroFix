@@ -34,7 +34,7 @@ try:
     )
     from tools.mikrofix_local_manager import (
         dispatch_plan, enabled_role_profiles, execute_run, installed_ollama_models,
-        replace_conversation_goal,
+        reject_plan, replace_conversation_goal,
     )
     from tools.mikrofix_owner_commands import (
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -55,7 +55,7 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     )
     from mikrofix_local_manager import (  # type: ignore[no-redef]
         dispatch_plan, enabled_role_profiles, execute_run, installed_ollama_models,
-        replace_conversation_goal,
+        reject_plan, replace_conversation_goal,
     )
     from mikrofix_owner_commands import (  # type: ignore[no-redef]
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -119,7 +119,8 @@ def jobs_payload(workspace: Path) -> dict[str, Any]:
         action_job = by_id.get(action_id)
         if action_job:
             routed_ids.add(action_id)
-        roots.append((job, action_job))
+        if not job.get("parent_run_id"):
+            roots.append((job, action_job))
     return {
         "jobs": [
             serialize_job(job, action_job)
@@ -151,7 +152,7 @@ def allowed_owner_commands(job: dict[str, Any]) -> list[str]:
     if state == "CONVERSATION" and not job.get("action_run_id"):
         allowed.extend(("/prepare-plan", "/plan-dispatch", "/replace-goal"))
     if state == "READY_FOR_OWNER_LEASE":
-        allowed.append("/approve-plan")
+        allowed.extend(("/approve-plan", "/reject-plan"))
     if state == "READY_FOR_CODEX_REVIEW":
         allowed.append("/prepare-review")
     if (job.get("review") or {}).get("status") == "PREPARED":
@@ -225,6 +226,16 @@ def dispatch_owner_command(
         return {
             "command": command.name, "accepted": True,
             "message": "Glavni cilj pogovora je bil izrecno zamenjan.",
+        }
+    if command.name == "/reject-plan":
+        reject_plan(job["run_id"], command.argument, workspace=workspace)
+        return {
+            "command": command.name, "accepted": True,
+            "state": "CONVERSATION",
+            "message": (
+                "Načrt je zavrnjen in ohranjen v revizijski sledi. "
+                "Pogovor je ponovno odprt; po dopolnitvah uporabi /prepare-plan."
+            ),
         }
     if command.name == "/approve-plan":
         if wait:

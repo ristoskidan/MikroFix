@@ -18,6 +18,8 @@ class OwnerCommandParserTests(unittest.TestCase):
             (" /plandispatch ", "/plan-dispatch"),
             (" /dispatch-plan ", "/plan-dispatch"),
             (" /dispatchplan ", "/plan-dispatch"),
+            (" /rejectplan popravi kriterije ", "/reject-plan"),
+            (" /revise-plan ", "/reject-plan"),
             ("/preparereview", "/prepare-review"),
             ("/codexrejected konkretna ugotovitev", "/codex-rejected"),
             ("/codexapproved abc1234", "/codex-approved"),
@@ -46,6 +48,7 @@ class OwnerCommandParserTests(unittest.TestCase):
         self.assertIn("/codex-opinion", text)
         self.assertIn("/replace-goal", text)
         self.assertIn("/plan-dispatch", text)
+        self.assertIn("/reject-plan", text)
         self.assertIn("odobritev in uporabo commita", text)
         self.assertNotIn("/applied", text)
 

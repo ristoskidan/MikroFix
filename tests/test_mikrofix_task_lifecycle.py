@@ -181,6 +181,29 @@ class TaskLifecycleTests(unittest.TestCase):
         for previous, current in zip(events, events[1:]):
             self.assertEqual(previous["event_id"], current["parent_event_id"])
 
+    def test_owner_can_reject_unapproved_plan_back_to_draft(self):
+        snapshot = self.initialize()
+        transition_task(
+            self.job, TaskState.READY_FOR_PROCESSING, snapshot=snapshot,
+            actor_type="owner", actor_id="owner",
+        )
+        transition_task(
+            self.job, TaskState.AWAITING_OWNER_APPROVAL, snapshot=snapshot,
+            actor_type="manager", actor_id="manager",
+        )
+        with self.assertRaisesRegex(LifecycleError, "OWNER_REJECTED_PLAN"):
+            transition_task(
+                self.job, TaskState.DRAFT, snapshot=snapshot,
+                actor_type="owner", actor_id="owner",
+            )
+        transition_task(
+            self.job, TaskState.DRAFT, snapshot=snapshot,
+            actor_type="owner", actor_id="owner",
+            event_type="OWNER_REJECTED_PLAN",
+        )
+        self.assertEqual(TaskState.DRAFT.value, read_task_state(self.job)["state"])
+        self.assertEqual("OWNER_REJECTED_PLAN", self.events()[-1]["event_type"])
+
     def test_tampered_snapshot_fails_closed(self):
         snapshot = self.initialize()
         snapshot["model"] = "other:model"

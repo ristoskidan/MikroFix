@@ -68,6 +68,7 @@ DRAFT -> READY_FOR_PROCESSING -> AWAITING_OWNER_APPROVAL -> APPROVED
       -> EXECUTING -> LEAD_REVIEW -> CANDIDATE_READY -> AWAITING_CODEX
       -> CODEX_APPROVED -> APPLIED
       -> CODEX_REJECTED -> LEAD_REVIEW
+AWAITING_OWNER_APPROVAL --OWNER_REJECTED_PLAN--> DRAFT
 ```
 
 Varnostna napaka lahko aktivno stanje premakne v terminalni `BLOCKED`.
@@ -120,6 +121,12 @@ predloga. Lastnik jo lahko dopolni z navadnim pogovorom in znova pripravi.
 Šele `/plan-dispatch` pošlje nespremenjeno zadnjo prikazano revizijo
 validatorju; če je bil pogovor po pripravi spremenjen, ukaz fail-closed zahteva
 nov `/prepare-plan`.
+
+Če neodvisno preverjeni kandidat ni pravilen, ga lastnik pred izvedbo zavrne z
+`/reject-plan [razlog]` (enakovredno `/revise-plan`). Kandidat in razlog ostaneta
+nespremenljiva revizijska dokaza, isti pogovor pa se vrne v `DRAFT`. Zavrnjenega
+kandidata ni mogoče odobriti ali ponovno poslati; po dopolnitvah je obvezen nov
+`/prepare-plan` in nato nov `/plan-dispatch` z novim immutable kandidatom.
 
 Vsaka naloga ima append-only imenik `audit/events`. Posamezni dogodki so
 read-only datoteke z zaporedjem in `parent_event_id`; vsebujejo model, tag,

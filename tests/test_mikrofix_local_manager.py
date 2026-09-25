@@ -732,6 +732,90 @@ class LocalManagerTests(unittest.TestCase):
                 manager.dispatch_plan(run_id, workspace=self.workspace)
         submit.assert_not_called()
 
+    def test_reject_plan_preserves_candidate_and_reopens_same_conversation(self):
+        def responder(_message, **kwargs):
+            if not kwargs.get("planning_requested"):
+                return ({"reply": "Preverjeno."}, {
+                    "session_id": "lead-session", "memory_sha256": "b" * 64,
+                    "bridge_job_id": "MF-CHAT", "lead_profile": "conversation_lead",
+                    "prompt_hash": "c" * 64,
+                })
+            return ({
+                "reply": "Plan candidate ready.",
+                "routing": "READY_FOR_PROCESSING",
+                "ready_task": "untrusted wording",
+                "objective": "Fix decimal_value",
+                "allowed_files": ["app.py", "tests/test_app.py"],
+                "atoms": [{
+                    "id": "A1", "task": "Fix and test",
+                    "expected_files": ["app.py", "tests/test_app.py"],
+                }],
+                "constraints": ["Preserve valid inputs"],
+                "acceptance_criteria": ["Regression test passes"],
+                "objective_source_turns": ["turn-0001-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": ["turn-0002-lead"],
+            }, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-PLAN", "lead_profile": "conversation_lead",
+                "prompt_hash": "d" * 64,
+            })
+
+        conversation = manager.start_conversation(
+            "Fix decimal_value", workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=responder, snapshot_factory=self.profile_snapshot,
+        )
+        root_id = conversation["parent_run_id"]
+        manager.prepare_plan(root_id, workspace=self.workspace, responder=responder)
+
+        def submit_stub(_task, **kwargs):
+            child_id = "MF-CHILD"
+            child_dir = self.workspace / "jobs" / child_id
+            child_dir.mkdir()
+            manager.atomic_write_immutable_json(child_dir / "request.json", {
+                "schema_version": 1, "run_id": child_id, "task": "plan",
+                "parent_run_id": root_id, "created_at": "now",
+                "profile_snapshot_hash": kwargs["lead_snapshot"]["profile_snapshot_hash"],
+            })
+            manager.atomic_write_immutable_json(
+                child_dir / "plan.json", {"objective": "preserved"},
+            )
+            manager.atomic_write_json(child_dir / "manager.json", {
+                "schema_version": 1, "run_id": child_id,
+                "state": "READY_FOR_OWNER_LEASE",
+                "plan": str(child_dir / "plan.json"),
+            })
+            return {"run_id": child_id}
+
+        with mock.patch.object(manager, "submit", side_effect=submit_stub):
+            manager.dispatch_plan(root_id, workspace=self.workspace)
+        child_dir = self.workspace / "jobs" / "MF-CHILD"
+        plan_before = (child_dir / "plan.json").read_bytes()
+        result = manager.reject_plan(
+            root_id, "Kriteriji si nasprotujejo.", workspace=self.workspace,
+        )
+        self.assertEqual("", result["active_run_id"])
+        self.assertIsNone(result["latest_plan_candidate"])
+        self.assertEqual(["MF-CHILD"], result["rejected_run_ids"])
+        self.assertEqual("plan_rejection", result["turns"][-1]["kind"])
+        self.assertEqual(plan_before, (child_dir / "plan.json").read_bytes())
+        child_state = json.loads((child_dir / "manager.json").read_text())
+        self.assertEqual("OWNER_REJECTED_PLAN", child_state["state"])
+        rejection = json.loads(
+            (child_dir / "owner-plan-rejection.json").read_text()
+        )
+        self.assertEqual("Kriteriji si nasprotujejo.", rejection["reason"])
+        root_dir = self.workspace / "jobs" / root_id
+        self.assertEqual("DRAFT", manager.read_task_state(root_dir)["state"])
+        events = [
+            json.loads(path.read_text())
+            for path in sorted((root_dir / "audit" / "events").glob("*.json"))
+        ]
+        self.assertEqual("OWNER_REJECTED_PLAN", events[-1]["event_type"])
+        with self.assertRaisesRegex(manager.ManagerError, "Najprej pripravi"):
+            manager.dispatch_plan(root_id, workspace=self.workspace)
+
     def test_plan_source_bookkeeping_is_repaired_conservatively(self):
         intent = manager.build_plan_intent({"turns": [
             {"role": "owner", "content": "Fix decimal_value"},

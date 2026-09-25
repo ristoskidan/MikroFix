@@ -45,6 +45,7 @@ class LocalWebPayloadTests(unittest.TestCase):
         for label in (
             "Nova naloga", "Pošlji lokalnemu vodji", "Pripravi izvedbeni načrt",
             "Pošlji načrt naprej",
+            "Zavrni načrt",
             "Dovoli in izvedi",
             "Pripravi Codex pregled", "Codex zavrnil", "Codex odobril",
             "Vprašaj Codex za mnenje", "Živi potek", "Vloga je stalna",
@@ -113,6 +114,33 @@ class LocalWebPayloadTests(unittest.TestCase):
         self.assertIn("/plan-dispatch", result["allowed_commands"])
         self.assertIn("/replace-goal", result["allowed_commands"])
         self.assertNotIn("/approve-plan", result["allowed_commands"])
+
+    def test_reject_plan_is_available_only_before_owner_approval(self):
+        ready = {
+            "run_id": "MF-ROOT", "action_run_id": "MF-CHILD",
+            "state": "READY_FOR_OWNER_LEASE", "state_label": "Čaka dovoljenje",
+            "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [ready]}),
+            mock.patch.object(web, "reject_plan") as reject,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/reject-plan Popravi kriterije",
+            )
+        reject.assert_called_once_with(
+            "MF-ROOT", "Popravi kriterije", workspace=self.workspace,
+        )
+        self.assertEqual("CONVERSATION", result["state"])
+
+        conversation = dict(ready, state="CONVERSATION", action_run_id="")
+        with mock.patch.object(
+            web, "jobs_payload", return_value={"jobs": [conversation]},
+        ):
+            with self.assertRaisesRegex(ValueError, "ni dovoljen"):
+                web.dispatch_owner_command(
+                    self.workspace, "MF-ROOT", "/reject-plan",
+                )
 
     def test_plan_dispatch_starts_exact_manager_command(self):
         job = {
@@ -241,6 +269,32 @@ class LocalWebPayloadTests(unittest.TestCase):
         self.assertEqual("MF-CHILD", jobs[0]["action_run_id"])
         self.assertEqual("READY_FOR_OWNER_LEASE", jobs[0]["state"])
         self.assertEqual("qwen_thinking", jobs[0]["lead_profile"])
+
+    def test_rejected_child_is_not_shown_as_a_separate_conversation(self):
+        root = self.workspace / "jobs" / "MF-ROOT"
+        child = self.workspace / "jobs" / "MF-CHILD"
+        root.mkdir()
+        child.mkdir()
+        (root / "request.json").write_text(json.dumps({
+            "run_id": "MF-ROOT", "task": "Discuss first", "created_at": "1",
+            "parent_run_id": None,
+        }), encoding="utf-8")
+        (root / "manager.json").write_text(json.dumps({
+            "run_id": "MF-ROOT", "state": "CONVERSATION",
+        }), encoding="utf-8")
+        (root / "conversation.json").write_text(json.dumps({
+            "turns": [], "active_run_id": "",
+            "rejected_run_ids": ["MF-CHILD"],
+        }), encoding="utf-8")
+        (child / "request.json").write_text(json.dumps({
+            "run_id": "MF-CHILD", "task": "Rejected", "created_at": "2",
+            "parent_run_id": "MF-ROOT",
+        }), encoding="utf-8")
+        (child / "manager.json").write_text(json.dumps({
+            "run_id": "MF-CHILD", "state": "OWNER_REJECTED_PLAN",
+        }), encoding="utf-8")
+        jobs = web.jobs_payload(self.workspace)["jobs"]
+        self.assertEqual(["MF-ROOT"], [job["run_id"] for job in jobs])
 
     def test_existing_browser_window_is_raised_instead_of_duplicated(self):
         search = mock.Mock(returncode=0, stdout="101\n202\n")

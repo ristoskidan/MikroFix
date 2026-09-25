@@ -197,6 +197,11 @@ without a substantive conversation change returns the same revision; a later
 owner correction requires a new revision. `/plan-dispatch` fails closed if the
 conversation changed after the displayed revision.
 
+Before execution, `/reject-plan [reason]` (alias `/revise-plan`) preserves the
+validated child and rejection record, clears it as an approvable candidate, and
+reopens the same conversation. A fresh `/prepare-plan` is required before the
+next dispatch.
+
 `/replace-goal <nov cilj>` is the explicit escape hatch for the uncommon case
 where the owner really wants to replace, rather than discuss, the original
 goal. It is handled by trusted code without an LLM, appended to the audit trail

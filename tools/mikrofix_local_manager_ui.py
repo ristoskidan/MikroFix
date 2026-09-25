@@ -30,6 +30,7 @@ STATE_LABELS = {
     "CONVERSATION": "Pogovor z izbranim lokalnim vodjo",
     "PLANNING": "Izbrani model pripravlja predlog, GPT-OSS pa preverja načrt",
     "READY_FOR_OWNER_LEASE": "Načrt je pripravljen — čaka tvojo odobritev izvedbe",
+    "OWNER_REJECTED_PLAN": "Lastnik je načrt zavrnil — ohranjen je kot dokaz",
     "WAITING_FOR_OWNER_LEASE": "Čaka na tvojo potrditev dovoljenja za pisanje",
     "RUNNING_LOCAL": "GPT-OSS izvaja nalogo in ločeni pregledovalec jo preverja",
     "READY_FOR_CODEX_REVIEW": "Kandidat je pripravljen za Codexov pregled",

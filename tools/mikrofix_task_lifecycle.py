@@ -48,7 +48,9 @@ class TaskState(str, Enum):
 ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.DRAFT: frozenset({TaskState.READY_FOR_PROCESSING, TaskState.BLOCKED}),
     TaskState.READY_FOR_PROCESSING: frozenset({TaskState.AWAITING_OWNER_APPROVAL, TaskState.BLOCKED}),
-    TaskState.AWAITING_OWNER_APPROVAL: frozenset({TaskState.APPROVED, TaskState.BLOCKED}),
+    TaskState.AWAITING_OWNER_APPROVAL: frozenset({
+        TaskState.DRAFT, TaskState.APPROVED, TaskState.BLOCKED,
+    }),
     TaskState.APPROVED: frozenset({TaskState.EXECUTING, TaskState.BLOCKED}),
     TaskState.EXECUTING: frozenset({TaskState.LEAD_REVIEW, TaskState.BLOCKED}),
     TaskState.LEAD_REVIEW: frozenset({TaskState.CANDIDATE_READY, TaskState.BLOCKED}),
@@ -65,7 +67,7 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
 
 EVENT_TYPES = frozenset({
     "TASK_CREATED", "LEAD_SELECTED", "LEAD_MESSAGE", "LEAD_PROPOSED_PLAN",
-    "OWNER_REPLACED_GOAL",
+    "OWNER_REPLACED_GOAL", "OWNER_REJECTED_PLAN",
     "CONTEXT_REQUESTED", "CONTEXT_PACK_CREATED", "OWNER_APPROVED_PLAN",
     "ATOM_STARTED", "ATOM_COMPLETED", "LEAD_REQUESTED_REPAIR",
     "LEAD_ACCEPTED_CANDIDATE", "CODEX_REJECTED", "CODEX_FEEDBACK_ATTACHED",
@@ -570,6 +572,14 @@ def transition_task(
         if target not in ALLOWED_TRANSITIONS[current]:
             raise LifecycleError(
                 f"Forbidden task transition: {current.value} -> {target.value}"
+            )
+        if (
+            current is TaskState.AWAITING_OWNER_APPROVAL
+            and target is TaskState.DRAFT
+            and event_type != "OWNER_REJECTED_PLAN"
+        ):
+            raise LifecycleError(
+                "AWAITING_OWNER_APPROVAL -> DRAFT requires OWNER_REJECTED_PLAN"
             )
         event_details = {"from_state": current.value, "to_state": target.value}
         if details:

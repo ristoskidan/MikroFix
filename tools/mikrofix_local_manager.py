@@ -1664,9 +1664,11 @@ def talk(
             "session_id": evidence.get("session_id", ""),
             "memory_sha256": evidence.get("memory_sha256", ""),
             "lead_profile": lead_profile,
+            "model_tag": conversation.get("model_tag", snapshot["model_tag"]),
             "turns": turns,
             "active_run_id": routed_run_id or conversation.get("active_run_id", ""),
             "latest_plan_candidate": latest_plan_candidate,
+            "rejected_run_ids": conversation.get("rejected_run_ids", []),
             "updated_at": stamp,
         }
         atomic_write_json(conversation_file, conversation)
@@ -1895,6 +1897,105 @@ def dispatch_plan(
         conversation["updated_at"] = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
         )
+        atomic_write_json(conversation_file, conversation)
+        return conversation
+
+
+def reject_plan(
+    parent_run_id: str, reason: str = "", *, workspace: Path = DEFAULT_WORKSPACE,
+) -> dict[str, Any]:
+    """Reject an unapproved dispatched plan and reopen its parent conversation."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    parent_dir = workspace / "jobs" / parent_run_id
+    conversation_file = parent_dir / "conversation.json"
+    lock_path = parent_dir / "conversation.lock"
+    clean_reason = reason.strip() or (
+        "Načrt ni odobren. Pred novo revizijo upoštevaj nadaljnja navodila lastnika."
+    )
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        conversation = json.loads(conversation_file.read_text(encoding="utf-8"))
+        child_run_id = str(conversation.get("active_run_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", child_run_id):
+            raise ManagerError("Conversation has no dispatched plan to reject")
+        child_dir = workspace / "jobs" / child_run_id
+        child_request = json.loads(
+            (child_dir / "request.json").read_text(encoding="utf-8")
+        )
+        child_manager_file = child_dir / "manager.json"
+        child_manager = json.loads(child_manager_file.read_text(encoding="utf-8"))
+        if child_request.get("parent_run_id") != parent_run_id:
+            raise ManagerError("Dispatched plan does not belong to this conversation")
+        if child_manager.get("state") != "READY_FOR_OWNER_LEASE":
+            raise ManagerError(
+                "Plan can only be rejected before execution, not "
+                f"{child_manager.get('state')}"
+            )
+        lifecycle = read_task_state(parent_dir)
+        if lifecycle["state"] != TaskState.AWAITING_OWNER_APPROVAL.value:
+            raise ManagerError(
+                "Plan rejection requires AWAITING_OWNER_APPROVAL, not "
+                f"{lifecycle['state']}"
+            )
+        turns = conversation.get("turns")
+        if not isinstance(turns, list):
+            raise ManagerError("Conversation turns are invalid")
+        pointer = conversation.get("latest_plan_candidate")
+        candidate_hash = (
+            str(pointer.get("candidate_sha256") or "")
+            if isinstance(pointer, dict) else ""
+        )
+        if not re.fullmatch(r"[0-9a-f]{64}", candidate_hash):
+            raise ManagerError("Dispatched plan has no valid candidate hash")
+        snapshot = read_profile_snapshot(parent_dir)
+        if lifecycle["profile_snapshot_hash"] != snapshot["profile_snapshot_hash"]:
+            raise ManagerError("Task state and profile snapshot differ")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        rejection = {
+            "schema_version": 1,
+            "parent_run_id": parent_run_id,
+            "rejected_run_id": child_run_id,
+            "candidate_sha256": candidate_hash,
+            "reason": clean_reason,
+            "rejected_at": stamp,
+        }
+        rejection_path = child_dir / "owner-plan-rejection.json"
+        atomic_write_immutable_json(rejection_path, rejection)
+        transition_task(
+            parent_dir, TaskState.DRAFT, snapshot=snapshot,
+            actor_type="owner", actor_id="owner",
+            event_type="OWNER_REJECTED_PLAN",
+            input_hash=sha256_text(clean_reason),
+            output_hash=candidate_hash,
+            details={
+                "rejected_run_id": child_run_id,
+                "candidate_sha256": candidate_hash,
+                "rejection_artifact": str(rejection_path.relative_to(child_dir)),
+            },
+        )
+        child_manager.update({
+            "state": "OWNER_REJECTED_PLAN",
+            "owner_rejection": str(rejection_path),
+            "exact_reason": clean_reason,
+        })
+        atomic_write_json(child_manager_file, child_manager)
+        turns.append({
+            "role": "owner", "kind": "plan_rejection",
+            "content": clean_reason, "at": stamp,
+            "rejected_run_id": child_run_id,
+        })
+        rejected_runs = conversation.get("rejected_run_ids")
+        if not isinstance(rejected_runs, list):
+            rejected_runs = []
+        if child_run_id not in rejected_runs:
+            rejected_runs.append(child_run_id)
+        conversation["turns"] = turns
+        conversation["active_run_id"] = ""
+        conversation["latest_plan_candidate"] = None
+        conversation["rejected_run_ids"] = rejected_runs
+        conversation["updated_at"] = stamp
         atomic_write_json(conversation_file, conversation)
         return conversation
 
@@ -2200,6 +2301,9 @@ def parse_args() -> argparse.Namespace:
     plan_parser.add_argument("run_id")
     dispatch_parser = sub.add_parser("plan-dispatch")
     dispatch_parser.add_argument("run_id")
+    reject_plan_parser = sub.add_parser("reject-plan")
+    reject_plan_parser.add_argument("run_id")
+    reject_plan_parser.add_argument("--reason", default="")
     execute_parser = sub.add_parser("execute")
     execute_parser.add_argument("run_id")
     execute_parser.add_argument("--lease-minutes", type=int, default=30)
@@ -2236,6 +2340,10 @@ def main() -> int:
             result = prepare_plan(args.run_id, workspace=args.workspace)
         elif args.command_name == "plan-dispatch":
             result = dispatch_plan(args.run_id, workspace=args.workspace)
+        elif args.command_name == "reject-plan":
+            result = reject_plan(
+                args.run_id, args.reason, workspace=args.workspace,
+            )
         elif args.command_name == "execute":
             result = execute_run(
                 args.run_id, workspace=args.workspace,
