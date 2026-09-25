@@ -15,6 +15,7 @@ class OwnerCommandParserTests(unittest.TestCase):
         for source, expected in (
             ("/prepare-plan", "/prepare-plan"),
             (" /prepareplan ", "/prepare-plan"),
+            (" /plandispatch ", "/plan-dispatch"),
             ("/preparereview", "/prepare-review"),
             ("/codexrejected konkretna ugotovitev", "/codex-rejected"),
             ("/codexapproved abc1234", "/codex-approved"),
@@ -42,6 +43,7 @@ class OwnerCommandParserTests(unittest.TestCase):
         self.assertIn("/status", text)
         self.assertIn("/codex-opinion", text)
         self.assertIn("/replace-goal", text)
+        self.assertIn("/plan-dispatch", text)
         self.assertIn("odobritev in uporabo commita", text)
         self.assertNotIn("/applied", text)
 

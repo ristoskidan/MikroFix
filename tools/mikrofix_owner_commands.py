@@ -18,6 +18,7 @@ class OwnerCommand:
 
 ALIASES = {
     "/prepareplan": "/prepare-plan",
+    "/plandispatch": "/plan-dispatch",
     "/preparereview": "/prepare-review",
     "/codexrejected": "/codex-rejected",
     "/codexapproved": "/codex-approved",
@@ -27,6 +28,7 @@ ALIASES = {
 
 NO_ARGUMENT = frozenset({
     "/prepare-plan",
+    "/plan-dispatch",
     "/approve-plan",
     "/prepare-review",
     "/status",
@@ -70,6 +72,7 @@ def help_text() -> str:
     return "\n".join((
         "Razpoložljivi ukazi:",
         "/prepare-plan — pripravi izvedbeni načrt iz pogovora",
+        "/plan-dispatch — pošlje naprej zadnjo prikazano revizijo načrta",
         "/replace-goal <nov cilj> — izrecno zamenja glavni cilj pogovora",
         "/approve-plan — dovoli in zažene potrjeni načrt",
         "/prepare-review — pripravi nespremenljiv paket za Codex",

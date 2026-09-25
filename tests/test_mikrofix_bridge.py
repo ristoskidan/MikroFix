@@ -415,6 +415,19 @@ class BridgeCompletionTests(unittest.TestCase):
             "POST", "/v1/project/list", {"path": ".", "max_entries": 500}
         )
 
+    def test_session_tool_allowlist_hides_and_rejects_mutating_functions(self):
+        allowed = frozenset({"project_status", "project_read"})
+        with (
+            mock.patch.object(self.bridge, "ALLOWED_TOOL_NAMES", allowed),
+            mock.patch.object(self.bridge, "executor_request") as request,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ni dovoljeno"):
+                self.bridge.execute_tool(
+                    "project_apply_patch",
+                    {"patch": "x", "summary": "must not run"},
+                )
+        request.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

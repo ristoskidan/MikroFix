@@ -44,6 +44,7 @@ class LocalWebPayloadTests(unittest.TestCase):
         html = web.HTML_FILE.read_text(encoding="utf-8")
         for label in (
             "Nova naloga", "Pošlji lokalnemu vodji", "Pripravi izvedbeni načrt",
+            "Pošlji načrt naprej",
             "Dovoli in izvedi",
             "Pripravi Codex pregled", "Codex zavrnil", "Codex odobril",
             "Vprašaj Codex za mnenje", "Živi potek", "Vloga je stalna",
@@ -109,8 +110,26 @@ class LocalWebPayloadTests(unittest.TestCase):
                 self.workspace, "MF-ROOT", "/status",
             )
         self.assertIn("/prepare-plan", result["allowed_commands"])
+        self.assertIn("/plan-dispatch", result["allowed_commands"])
         self.assertIn("/replace-goal", result["allowed_commands"])
         self.assertNotIn("/approve-plan", result["allowed_commands"])
+
+    def test_plan_dispatch_starts_exact_manager_command(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "",
+            "state": "CONVERSATION", "state_label": "Pogovor", "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/plan-dispatch",
+            )
+        spawn.assert_called_once_with(
+            self.workspace, ["plan-dispatch", "MF-ROOT"],
+        )
+        self.assertTrue(result["accepted"])
 
     def test_replace_goal_is_dispatched_without_a_model(self):
         job = {

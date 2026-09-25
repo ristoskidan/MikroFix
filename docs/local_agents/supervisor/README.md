@@ -166,10 +166,12 @@ The assistant
 response contains the immutable `MF-LOCAL-...` id, which the gateway reads from
 subsequent chat history. A silent role or model change in the same conversation
 fails closed. Owner slash commands are parsed by trusted Python code before
-routing and never reach a language model. `/prepare-plan` asks the selected
-conversation model for the structured first proposal, then invokes the fixed
-validator and deterministic manager. Roles after `/approve-plan` remain
-preconfigured in the supervisor flow.
+routing. `/prepare-plan` asks the selected conversation model for a structured
+proposal, stores an immutable revision and renders that exact revision in the
+same conversation. It does not invoke the validator. The owner may discuss
+changes and repeat `/prepare-plan`; `/plan-dispatch` alone sends the latest
+displayed revision to the fixed validator and deterministic manager. Roles
+after `/approve-plan` remain preconfigured in the supervisor flow.
 
 At `/prepare-plan`, the manager freezes an immutable, hashed `PlanIntent` with
 stable turn ids, the root owner request and the Git checkpoint. The selected
@@ -178,9 +180,10 @@ explanatory questions are marked discussion-only. The manager derives the
 validator task from those cited owner turns instead of trusting model-authored
 `ready_task` prose. Empty plan sections, unknown sources, missing root
 provenance, unclassified owner turns and source overlap fail closed. A
-successful candidate is cached by the intent hash, and repeating
-`/prepare-plan` after success returns the same active candidate without another
-lead call.
+successful candidate is cached by the intent hash. Repeating `/prepare-plan`
+without a substantive conversation change returns the same revision; a later
+owner correction requires a new revision. `/plan-dispatch` fails closed if the
+conversation changed after the displayed revision.
 
 `/replace-goal <nov cilj>` is the explicit escape hatch for the uncommon case
 where the owner really wants to replace, rather than discuss, the original

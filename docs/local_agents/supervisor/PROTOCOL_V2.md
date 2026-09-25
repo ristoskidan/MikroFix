@@ -115,6 +115,12 @@ prikaže kot zložljiv `reasoning_content`, skupaj z omejenimi oznakami orodnih
 klicev. Ta prikaz je samo sprotna diagnostika po zaključenih modelskih korakih;
 append-only `trace.jsonl` in audit dogodki ostanejo trajni vir dokazov.
 
+`/prepare-plan` samo shrani in v istem pogovoru izpiše natančno revizijo
+predloga. Lastnik jo lahko dopolni z navadnim pogovorom in znova pripravi.
+Šele `/plan-dispatch` pošlje nespremenjeno zadnjo prikazano revizijo
+validatorju; če je bil pogovor po pripravi spremenjen, ukaz fail-closed zahteva
+nov `/prepare-plan`.
+
 Vsaka naloga ima append-only imenik `audit/events`. Posamezni dogodki so
 read-only datoteke z zaporedjem in `parent_event_id`; vsebujejo model, tag,
 digest, hash profila, prompta, konteksta, checkpointa ter vhodnega in izhodnega

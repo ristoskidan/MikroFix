@@ -285,6 +285,10 @@ class LocalManagerUI:
             actions, text="Pripravi izvedbeni načrt", command=self.prepare_plan,
         )
         self.plan_button.pack(side="left", padx=(8, 0))
+        self.dispatch_button = ttk.Button(
+            actions, text="Pošlji načrt naprej", command=self.dispatch_plan,
+        )
+        self.dispatch_button.pack(side="left", padx=(8, 0))
         self.execute_button = ttk.Button(actions, text="Dovoli in izvedi",
                                          command=self.execute_selected)
         self.execute_button.pack(side="left", padx=8)
@@ -360,6 +364,9 @@ class LocalManagerUI:
         self.plan_button.configure(
             state="normal" if state == "CONVERSATION" else "disabled"
         )
+        self.dispatch_button.configure(
+            state="normal" if state == "CONVERSATION" else "disabled"
+        )
         self.codex_button.configure(
             state="normal" if state == "READY_FOR_CODEX_REVIEW" else "disabled"
         )
@@ -424,6 +431,13 @@ class LocalManagerUI:
             return
         self.spawn_manager(["prepare-plan", job["run_id"]])
         self.global_status.configure(text="Lokalni vodja pripravlja izvedbeni načrt")
+
+    def dispatch_plan(self) -> None:
+        job = self.selected_job()
+        if not job:
+            return
+        self.spawn_manager(["plan-dispatch", job["run_id"]])
+        self.global_status.configure(text="Prikazana revizija gre v preverjanje")
 
     def run_manager_now(self, arguments: list[str]) -> dict[str, Any] | None:
         result = subprocess.run(

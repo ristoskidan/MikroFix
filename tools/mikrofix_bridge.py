@@ -377,6 +377,33 @@ TOOLS = [
     }
 ]
 
+_configured_allowed_tools = CFG.get("allowed_tools")
+if _configured_allowed_tools is None:
+    ALLOWED_TOOL_NAMES = frozenset(
+        tool["function"]["name"] for tool in TOOLS
+    )
+else:
+    if (
+        not isinstance(_configured_allowed_tools, list)
+        or not _configured_allowed_tools
+        or any(not isinstance(name, str) for name in _configured_allowed_tools)
+        or len(set(_configured_allowed_tools)) != len(_configured_allowed_tools)
+    ):
+        raise RuntimeError("allowed_tools must be a non-empty unique string list")
+    known_tool_names = {
+        tool["function"]["name"] for tool in TOOLS
+    }
+    unknown_tool_names = sorted(set(_configured_allowed_tools) - known_tool_names)
+    if unknown_tool_names:
+        raise RuntimeError(
+            "allowed_tools contains unknown tools: " + ", ".join(unknown_tool_names)
+        )
+    ALLOWED_TOOL_NAMES = frozenset(_configured_allowed_tools)
+    TOOLS = [
+        tool for tool in TOOLS
+        if tool["function"]["name"] in ALLOWED_TOOL_NAMES
+    ]
+
 
 TOOL_ENDPOINTS = {
     "project_status": ("GET", "/v1/project/status"),
@@ -502,6 +529,8 @@ def normalize_tool_arguments(name, arguments):
 
 
 def execute_tool(name, arguments):
+    if name not in ALLOWED_TOOL_NAMES:
+        raise RuntimeError(f"Orodje ni dovoljeno v tej seji: {name}")
     if name not in TOOL_ENDPOINTS:
         raise RuntimeError(f"Neznano orodje: {name}")
 
@@ -822,12 +851,19 @@ def process_job(job_id):
 
                     messages.append(message)
 
+                    evidence_instruction = (
+                        "Pred zaključkom uporabi ustrezno strukturirano projektno "
+                        "orodje in preveri dejansko stanje."
+                        if MINIMUM_SUCCESSFUL_TOOL_CALLS == 1 else
+                        f"Pred zaključkom zberi najmanj "
+                        f"{MINIMUM_SUCCESSFUL_TOOL_CALLS} uspešne strukturirane "
+                        "projektne dokaze."
+                    )
                     messages.append({
                         "role": "user",
                         "content": (
                             "Ne zaključuj še. Naloga zahteva dejanski pregled projekta. "
-                            f"Vsaj {MINIMUM_SUCCESSFUL_TOOL_CALLS} dejanska "
-                            "strukturirana orodna klica morata biti uspešna. Uporabi "
+                            + evidence_instruction + " Uporabi "
                             "razpoložljiva projektna orodja "
                             "(project_status, project_list, project_search, project_read "
                             "in po potrebi project_diff). Imena orodja ne napiši v "

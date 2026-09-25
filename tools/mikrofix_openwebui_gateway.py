@@ -24,7 +24,7 @@ try:
     from tools.mikrofix_local_manager import (
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
         model_runtime_settings, normalize_runtime_selection,
-        resolve_runtime_selection, start_conversation, talk,
+        prepare_plan, resolve_runtime_selection, start_conversation, talk,
     )
     from tools.mikrofix_local_manager_ui import DEFAULT_WORKSPACE
     from tools.mikrofix_local_web import dispatch_owner_command
@@ -34,7 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from mikrofix_local_manager import (  # type: ignore
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
         model_runtime_settings, normalize_runtime_selection,
-        resolve_runtime_selection, start_conversation, talk,
+        prepare_plan, resolve_runtime_selection, start_conversation, talk,
     )
     from mikrofix_local_manager_ui import DEFAULT_WORKSPACE  # type: ignore
     from mikrofix_local_web import dispatch_owner_command  # type: ignore
@@ -365,6 +365,17 @@ def route_message(
             model_tag = _locked_model(run_id, role_id)
         else:
             model_tag = selected_model
+        if command.name == "/prepare-plan":
+            conversation = prepare_plan(
+                run_id, workspace=WORKSPACE,
+                progress_callback=progress_callback,
+            )
+            reply, actual_run_id = _latest_reply(conversation)
+            return (
+                f"{reply}\n\nMikroFIX pogovor: {actual_run_id}"
+                f"\nVloga: {role_id}\nModel: {model_tag}"
+                f"\nMikroFIX izbrani model: {model_tag}"
+            )
         result = dispatch_owner_command(WORKSPACE, run_id, message)
         response = str(result.get("message") or "Ukaz je bil sprejet.").strip()
         if command.name == "/help":
@@ -492,7 +503,8 @@ app = FastAPI(
     title="MikroFIX Open WebUI Gateway",
     description=(
         "OpenAI-compatible front door. Slash commands are parsed by trusted "
-        "manager code and are never sent to a language model."
+        "manager code; only /prepare-plan invokes the locked conversation "
+        "lead through its fixed read-only planning contract."
     ),
     version="1.0.0",
 )

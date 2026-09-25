@@ -149,7 +149,7 @@ def allowed_owner_commands(job: dict[str, Any]) -> list[str]:
     allowed = ["/status", "/help", "/codex-opinion"]
     state = job["state"]
     if state == "CONVERSATION" and not job.get("action_run_id"):
-        allowed.extend(("/prepare-plan", "/replace-goal"))
+        allowed.extend(("/prepare-plan", "/plan-dispatch", "/replace-goal"))
     if state == "READY_FOR_OWNER_LEASE":
         allowed.append("/approve-plan")
     if state == "READY_FOR_CODEX_REVIEW":
@@ -195,6 +195,12 @@ def dispatch_owner_command(
         return {
             "command": command.name, "accepted": True,
             "message": "Lokalni vodja pripravlja izvedbeni načrt.",
+        }
+    if command.name == "/plan-dispatch":
+        spawn_manager(workspace, ["plan-dispatch", job["run_id"]])
+        return {
+            "command": command.name, "accepted": True,
+            "message": "Zadnja prikazana revizija načrta se preverja in pošilja naprej.",
         }
     if command.name == "/replace-goal":
         replace_conversation_goal(

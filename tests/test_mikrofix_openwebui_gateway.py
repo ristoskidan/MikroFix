@@ -56,12 +56,16 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             start.call_args.kwargs["runtime_overrides"],
         )
 
-    def test_prepare_plan_is_dispatched_without_reaching_a_model(self):
+    def test_prepare_plan_returns_reviewable_revision_in_same_conversation(self):
+        conversation = {
+            "parent_run_id": "MF-LOCAL-3",
+            "turns": [{"role": "lead", "content": "IZVEDBENI NAČRT · revizija `abc`"}],
+        }
         with (
             mock.patch.object(
-                gateway, "dispatch_owner_command",
-                return_value={"message": "Načrt se pripravlja."},
-            ) as dispatch,
+                gateway, "prepare_plan", return_value=conversation,
+            ) as prepare,
+            mock.patch.object(gateway, "dispatch_owner_command") as dispatch,
             mock.patch.object(gateway, "talk") as talk,
         ):
             with mock.patch.object(
@@ -71,13 +75,36 @@ class OpenWebUIGatewayTests(unittest.TestCase):
                     "/prepare-plan", "MF-LOCAL-3", "conversation_lead",
                     "qwen3:14b-q4_K_M",
                 )
-        dispatch.assert_called_once_with(
-            gateway.WORKSPACE, "MF-LOCAL-3", "/prepare-plan",
+        prepare.assert_called_once_with(
+            "MF-LOCAL-3", workspace=gateway.WORKSPACE,
+            progress_callback=None,
         )
+        dispatch.assert_not_called()
         talk.assert_not_called()
         locked.assert_called_once_with("MF-LOCAL-3", "conversation_lead")
-        self.assertIn("Načrt se pripravlja.", result)
+        self.assertIn("IZVEDBENI NAČRT", result)
         self.assertIn("MF-LOCAL-3", result)
+
+    def test_plan_dispatch_uses_trusted_command_path_without_model(self):
+        with (
+            mock.patch.object(
+                gateway, "dispatch_owner_command",
+                return_value={"message": "Revizija se preverja."},
+            ) as dispatch,
+            mock.patch.object(gateway, "prepare_plan") as prepare,
+            mock.patch.object(
+                gateway, "_locked_model", return_value="qwen3:14b-q4_K_M",
+            ),
+        ):
+            result = gateway.route_message(
+                "/plan-dispatch", "MF-LOCAL-3", "conversation_lead",
+                "qwen3:14b-q4_K_M",
+            )
+        dispatch.assert_called_once_with(
+            gateway.WORKSPACE, "MF-LOCAL-3", "/plan-dispatch",
+        )
+        prepare.assert_not_called()
+        self.assertIn("Revizija se preverja.", result)
 
     def test_command_without_conversation_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "obstoječi MikroFIX pogovor"):

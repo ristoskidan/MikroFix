@@ -8,8 +8,9 @@ celotno lokalno izvedbo, ne le za posamezno nalogo.
 - **Codex — vodja projekta in končni pregled**
 - **Pogovorni lokalni vodja — vloga s fiksnim promptom in dovoljenji; lastnik
   pred začetkom nove naloge neodvisno izbere nameščeni lokalni model**
-- **Načrtovalni svetovalec — pred `/approve-plan` pripravi prvi strukturirani
-  predlog; uporablja model, zaklenjen v pogovornem snapshotu**
+- **Načrtovalni svetovalec — ob `/prepare-plan` v istem pogovoru pripravi
+  sledljivo revizijo predloga; šele `/plan-dispatch` jo pošlje validatorju;
+  uporablja model, zaklenjen v pogovornem snapshotu**
 - **GPT-OSS — privzeti validator načrta ter po `/approve-plan` vnaprej določeni
   izvajalec in pregledovalec v ločenih sejah**
 - **Bridge — nadzorni most**
@@ -21,9 +22,10 @@ imeti jasen obseg, pričakovane datoteke in preverjanja.
 
 Izbrani pogovorni model in GPT-OSS validator uporabljata isti potrjeni projektni
 spomin in morata navesti isti SHA-256 konteksta. Skritega pogovornega stanja si
-ne delita. Izbrani model pripravi samo strukturiran svetovalni predlog; GPT-OSS
-ga mora neodvisno preveriti, popraviti ali zavrniti, preden deterministični
-manager izdela nespremenljiv načrt. Vloga in model sta ločeni identiteti:
+ne delita. Izbrani model pripravi strukturiran svetovalni predlog, ki ga lastnik
+vidi in lahko v istem pogovoru popravlja. GPT-OSS ga prejme šele po izrecnem
+`/plan-dispatch` ter ga mora neodvisno preveriti, popraviti ali zavrniti, preden
+deterministični manager izdela nespremenljiv načrt. Vloga in model sta ločeni identiteti:
 sprememba modela ne spremeni prompta, dovoljenj ali izhodne pogodbe vloge.
 
 ## Obvezni način dela

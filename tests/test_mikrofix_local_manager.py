@@ -234,7 +234,9 @@ class LocalManagerTests(unittest.TestCase):
             (16384, "5m"), manager.conversation_runtime_settings(legacy),
         )
         self.assertIn('"request_timeout_seconds": 360', source)
-        self.assertIn('"minimum_successful_tool_calls": 4', source)
+        self.assertIn('"minimum_successful_tool_calls": 1', source)
+        self.assertIn('"project_run_check"', source)
+        self.assertNotIn('"project_apply_patch"', source)
         self.assertIn("MIKROFIX_EXECUTOR_READ_ONLY_CHECKS", source)
         self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
         self.assertIn("timeout_seconds=900", source)
@@ -359,6 +361,11 @@ class LocalManagerTests(unittest.TestCase):
             result = manager.prepare_plan(
                 run_id, workspace=self.workspace, responder=planning_responder,
             )
+        self.assertNotIn("task", captured)
+        self.assertEqual("", result["active_run_id"])
+        self.assertIn("IZVEDBENI NAČRT", result["turns"][-1]["content"])
+        with mock.patch.object(manager, "submit", side_effect=submit_stub):
+            result = manager.dispatch_plan(run_id, workspace=self.workspace)
         self.assertIn("Fix decimal_value", captured["task"])
         self.assertNotIn("Show me the snippet", captured["task"])
         self.assertEqual("MF-CHILD", result["active_run_id"])
@@ -375,7 +382,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=resolver,
         )
         self.assertEqual(first["profile_id"], second["profile_id"])
-        self.assertEqual(2, first["profile_version"])
+        self.assertEqual(3, first["profile_version"])
         self.assertEqual(first["role"], second["role"])
         self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
         self.assertNotEqual(first["model_tag"], second["model_tag"])
@@ -533,6 +540,12 @@ class LocalManagerTests(unittest.TestCase):
                 conversation["parent_run_id"], workspace=self.workspace,
                 responder=responder,
             )
+            self.assertEqual("", conversation["active_run_id"])
+            self.assertIn("IZVEDBENI NAČRT", conversation["turns"][-1]["content"])
+            run_planner.assert_not_called()
+            conversation = manager.dispatch_plan(
+                conversation["parent_run_id"], workspace=self.workspace,
+            )
         planner_kwargs = run_planner.call_args.kwargs
         self.assertEqual(
             "Implement one bounded behavior",
@@ -562,7 +575,7 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual(
             ["TASK_CREATED", "LEAD_SELECTED", "LEAD_MESSAGE",
              "LEAD_PROPOSED_PLAN",
-             "TASK_STATE_TRANSITION"],
+             "TASK_STATE_TRANSITION", "TASK_STATE_TRANSITION"],
             [event["event_type"] for event in events],
         )
         self.assertEqual("MF-CHILD", conversation["active_run_id"])
@@ -638,27 +651,81 @@ class LocalManagerTests(unittest.TestCase):
                 "prompt_hash": "d" * 64,
             })
 
+        manager.prepare_plan(
+            conversation["parent_run_id"], workspace=self.workspace,
+            responder=planning_responder,
+        )
         with mock.patch.object(
             manager, "submit", side_effect=manager.ManagerError("validator failed"),
         ):
             with self.assertRaisesRegex(manager.ManagerError, "validator failed"):
-                manager.prepare_plan(
+                manager.dispatch_plan(
                     conversation["parent_run_id"], workspace=self.workspace,
-                    responder=planning_responder,
                 )
         job_dir = self.workspace / "jobs" / conversation["parent_run_id"]
         self.assertEqual(
-            "READY_FOR_PROCESSING", manager.read_task_state(job_dir)["state"],
+            "DRAFT", manager.read_task_state(job_dir)["state"],
         )
         with mock.patch.object(
             manager, "submit", return_value={"run_id": "MF-CHILD"},
         ):
-            result = manager.prepare_plan(
+            result = manager.dispatch_plan(
                 conversation["parent_run_id"], workspace=self.workspace,
-                responder=mock.Mock(side_effect=AssertionError("lead reran")),
             )
         self.assertEqual([True], planning_calls)
         self.assertEqual("MF-CHILD", result["active_run_id"])
+
+    def test_plan_dispatch_rejects_conversation_change_after_visible_revision(self):
+        def conversation_responder(_message, **_kwargs):
+            return ({"reply": "Relevant code is verified."}, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-CHAT", "lead_profile": "conversation_lead",
+                "prompt_hash": "c" * 64,
+            })
+
+        conversation = manager.start_conversation(
+            "Fix decimal_value", workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=conversation_responder,
+            snapshot_factory=self.profile_snapshot,
+        )
+
+        def planning_responder(_message, **_kwargs):
+            return ({
+                "reply": "Plan candidate ready.",
+                "routing": "READY_FOR_PROCESSING",
+                "ready_task": "untrusted wording",
+                "objective": "Fix decimal_value",
+                "allowed_files": ["app.py", "tests/test_app.py"],
+                "atoms": [{
+                    "id": "A1", "task": "Fix and test",
+                    "expected_files": ["app.py", "tests/test_app.py"],
+                }],
+                "constraints": ["Preserve valid inputs"],
+                "acceptance_criteria": ["Regression test passes"],
+                "objective_source_turns": ["turn-0001-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": [],
+            }, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-PLAN", "lead_profile": "conversation_lead",
+                "prompt_hash": "d" * 64,
+            })
+
+        run_id = conversation["parent_run_id"]
+        manager.prepare_plan(
+            run_id, workspace=self.workspace, responder=planning_responder,
+        )
+        manager.talk(
+            "Ohrani tudi prazne vrednosti.", parent_run_id=run_id,
+            workspace=self.workspace, responder=conversation_responder,
+        )
+        with mock.patch.object(manager, "submit") as submit:
+            with self.assertRaisesRegex(
+                manager.ManagerError, "Ponovno uporabi /prepare-plan",
+            ):
+                manager.dispatch_plan(run_id, workspace=self.workspace)
+        submit.assert_not_called()
 
     def test_tool_names_cannot_be_smuggled_in_as_allowed_files(self):
         invalid = model_plan(

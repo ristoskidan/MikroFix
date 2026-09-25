@@ -186,6 +186,8 @@ def build_plan_intent(
     for index, raw in enumerate(raw_turns, start=1):
         if not isinstance(raw, dict) or raw.get("role") not in {"owner", "lead"}:
             raise ManagerError(f"Conversation turn {index} is invalid")
+        if raw.get("kind") in {"plan_command", "plan_candidate"}:
+            continue
         role = str(raw["role"])
         content = str(raw.get("content") or "").strip()
         if not content:
@@ -318,6 +320,31 @@ def trusted_plan_task(
     if additions:
         sections.append("POTRJENE DOPOLNITVE:\n" + "\n".join(additions))
     return "\n\n".join(sections)
+
+
+def render_plan_candidate(decision: dict[str, Any], candidate_sha256: str) -> str:
+    """Render the exact structured candidate the owner may later dispatch."""
+    atoms = "\n".join(
+        f"{index}. [{atom['id']}] {atom['task']}\n"
+        f"   Datoteke: {', '.join(atom['expected_files'])}"
+        for index, atom in enumerate(decision["atoms"], start=1)
+    )
+    allowed = "\n".join(f"- `{path}`" for path in decision["allowed_files"])
+    constraints = "\n".join(f"- {item}" for item in decision["constraints"])
+    criteria = "\n".join(
+        f"- {item}" for item in decision["acceptance_criteria"]
+    )
+    return (
+        f"IZVEDBENI NAČRT · revizija `{candidate_sha256[:12]}`\n\n"
+        f"Cilj:\n{decision['objective']}\n\n"
+        f"Dovoljene datoteke:\n{allowed}\n\n"
+        f"Koraki:\n{atoms}\n\n"
+        f"Omejitve:\n{constraints}\n\n"
+        f"Sprejemna merila:\n{criteria}\n\n"
+        "Ta revizija še ni poslana naprej. Popravke povej v običajnem "
+        "pogovoru, nato ponovno uporabi `/prepare-plan`. Ko je prikazana "
+        "revizija pravilna, jo pošlji z `/plan-dispatch`."
+    )
 
 
 class ManagerError(RuntimeError):
@@ -1275,12 +1302,18 @@ def run_lead_conversation(
         "project_memory": str(lead["memory_file"]),
         "parent_session_id": str(lead["session_id"]),
         "num_ctx": num_ctx,
-        "max_steps": 20 if planning_requested else 8,
+        # One generous loop bound protects the host from a runaway session;
+        # it is not a target or a required number of model/tool attempts.
+        "max_steps": 20,
         "keep_alive": keep_alive,
         "think": think,
         "require_tool_use": True,
         "request_timeout_seconds": 360,
-        "minimum_successful_tool_calls": 4,
+        "minimum_successful_tool_calls": 1,
+        "allowed_tools": [
+            "project_status", "project_read", "project_list",
+            "project_search", "project_diff", "project_run_check",
+        ],
         "max_toolless_responses": 2,
         "deterministic_reply_wrapper": not planning_requested,
         "completion_policy": "supervisor_only",
@@ -1447,6 +1480,7 @@ def talk(
                 "in pripraviti načrt, uporabi /prepare-plan."
             )
         routed_run_id = ""
+        latest_plan_candidate = conversation.get("latest_plan_candidate")
         event_hashes = {
             "prompt_hash": evidence.get("prompt_hash") or None,
             "context_pack_hash": evidence.get("memory_sha256") or None,
@@ -1469,8 +1503,7 @@ def talk(
                 raise ManagerError(
                     "READY_FOR_PROCESSING plan is incomplete: " + "; ".join(errors)
                 )
-            if plan_candidate_path is not None and not plan_candidate_path.exists():
-                atomic_write_immutable_json(plan_candidate_path, {
+            candidate_record = {
                     "schema_version": 1,
                     "intent_sha256": plan_intent["intent_sha256"],
                     "decision": decision,
@@ -1486,34 +1519,33 @@ def talk(
                         "intent_sha256": plan_intent["intent_sha256"],
                         "decision": decision,
                     }),
-                })
-            lifecycle = read_task_state(job_dir)
-            if lifecycle["state"] == TaskState.DRAFT.value:
-                transition_task(
-                    job_dir, TaskState.READY_FOR_PROCESSING,
-                    snapshot=snapshot, actor_type="lead", actor_id=lead_profile,
-                    event_type="LEAD_PROPOSED_PLAN", **event_hashes,
+                }
+            if plan_candidate_path is None:
+                raise ManagerError("Planning candidate path is required")
+            if not plan_candidate_path.exists():
+                atomic_write_immutable_json(plan_candidate_path, candidate_record)
+            else:
+                stored_candidate = json.loads(
+                    plan_candidate_path.read_text(encoding="utf-8")
                 )
-            elif lifecycle["state"] != TaskState.READY_FOR_PROCESSING.value:
-                raise ManagerError(
-                    f"Conversation cannot route from task state {lifecycle['state']}"
-                )
-            routed = submit(
-                ready_task, workspace=workspace,
-                generator=lambda task, **kwargs: run_planner(
-                    task, advisor_proposal=proposal,
-                    advisor_snapshot=snapshot, plan_intent=plan_intent,
-                    source_trace=source_trace, **kwargs,
-                ),
-                initialize=True, parent_run_id=parent_run_id,
-                lead_snapshot=snapshot,
+                if stored_candidate != candidate_record:
+                    raise ManagerError("Stored plan candidate does not match its intent")
+            latest_plan_candidate = {
+                "intent_sha256": plan_intent["intent_sha256"],
+                "candidate_sha256": candidate_record["candidate_sha256"],
+                "path": str(plan_candidate_path.relative_to(job_dir)),
+            }
+            reply = reply + "\n\n" + render_plan_candidate(
+                decision, str(candidate_record["candidate_sha256"]),
             )
-            routed_run_id = str(routed["run_id"])
-            transition_task(
-                job_dir, TaskState.AWAITING_OWNER_APPROVAL,
-                snapshot=snapshot, actor_type="manager", actor_id="manager",
-                output_hash=sha256_text(json.dumps(proposal, sort_keys=True)),
-                details={"routed_run_id": routed_run_id},
+            record_task_event(
+                job_dir, snapshot=snapshot, event_type="LEAD_PROPOSED_PLAN",
+                actor_type="lead", actor_id=lead_profile, **event_hashes,
+                details={
+                    "intent_sha256": plan_intent["intent_sha256"],
+                    "candidate_sha256": candidate_record["candidate_sha256"],
+                    "dispatched": False,
+                },
             )
         else:
             record_task_event(
@@ -1526,12 +1558,17 @@ def talk(
                 },
             )
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        turns.extend([
-            {"role": "owner", "content": clean_message, "at": stamp},
-            {"role": "lead", "content": reply, "at": stamp,
+        owner_turn = {"role": "owner", "content": clean_message, "at": stamp}
+        lead_turn = {"role": "lead", "content": reply, "at": stamp,
              "lead_profile": lead_profile,
              "routing": routing, "routed_run_id": routed_run_id,
-             "bridge_job_id": evidence.get("bridge_job_id", "")},
+             "bridge_job_id": evidence.get("bridge_job_id", "")}
+        if planning_requested:
+            owner_turn["kind"] = "plan_command"
+            lead_turn["kind"] = "plan_candidate"
+        turns.extend([
+            owner_turn,
+            lead_turn,
         ])
         conversation = {
             "schema_version": 1,
@@ -1541,6 +1578,7 @@ def talk(
             "lead_profile": lead_profile,
             "turns": turns,
             "active_run_id": routed_run_id or conversation.get("active_run_id", ""),
+            "latest_plan_candidate": latest_plan_candidate,
             "updated_at": stamp,
         }
         atomic_write_json(conversation_file, conversation)
@@ -1594,8 +1632,9 @@ def replace_conversation_goal(
 def prepare_plan(
     parent_run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Explicitly allow one conversation root to propose, but not execute, a plan."""
+    """Prepare and display one reviewable plan revision without dispatching it."""
     workspace = workspace.expanduser().resolve()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
         raise ManagerError("Unsafe parent run id")
@@ -1607,12 +1646,9 @@ def prepare_plan(
     if conversation.get("active_run_id"):
         return conversation
     lifecycle = read_task_state(job_dir)
-    if lifecycle["state"] not in {
-        TaskState.DRAFT.value, TaskState.READY_FOR_PROCESSING.value,
-    }:
+    if lifecycle["state"] != TaskState.DRAFT.value:
         raise ManagerError(
-            "Plan can only be prepared from DRAFT or a cached "
-            f"READY_FOR_PROCESSING candidate, not {lifecycle['state']}"
+            f"Plan can only be prepared from DRAFT, not {lifecycle['state']}"
         )
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()
@@ -1661,7 +1697,118 @@ def prepare_plan(
         lead_profile=str(snapshot["profile_id"]), responder=selected_responder,
         planning_requested=True, plan_intent=plan_intent,
         plan_candidate_path=candidate_path,
+        progress_callback=progress_callback,
     )
+
+
+def dispatch_plan(
+    parent_run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
+) -> dict[str, Any]:
+    """Dispatch exactly the latest owner-visible plan revision to validation."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    job_dir = workspace / "jobs" / parent_run_id
+    snapshot = read_profile_snapshot(job_dir)
+    conversation_file = job_dir / "conversation.json"
+    lock_path = job_dir / "conversation.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        conversation = json.loads(conversation_file.read_text(encoding="utf-8"))
+        if conversation.get("active_run_id"):
+            raise ManagerError("Conversation already has a dispatched plan")
+        lifecycle = read_task_state(job_dir)
+        if lifecycle["state"] != TaskState.DRAFT.value:
+            raise ManagerError(
+                f"Plan can only be dispatched from DRAFT, not {lifecycle['state']}"
+            )
+        config = json.loads(
+            (workspace / "workspace.json").read_text(encoding="utf-8")
+        )
+        repository = Path(config["repository"]).resolve()
+        plan_intent = build_plan_intent(conversation, repository=repository)
+        pointer = conversation.get("latest_plan_candidate")
+        if not isinstance(pointer, dict) or set(pointer) != {
+            "intent_sha256", "candidate_sha256", "path",
+        }:
+            raise ManagerError("Najprej pripravi načrt z /prepare-plan")
+        intent_hash = str(plan_intent["intent_sha256"])
+        if pointer.get("intent_sha256") != intent_hash:
+            raise ManagerError(
+                "Pogovor se je po zadnjem načrtu spremenil. "
+                "Ponovno uporabi /prepare-plan."
+            )
+        candidate_path = (
+            job_dir / "planning" / f"lead-candidate-{intent_hash}.json"
+        )
+        if pointer.get("path") != str(candidate_path.relative_to(job_dir)):
+            raise ManagerError("Latest plan candidate path is invalid")
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+        if set(candidate) != {
+            "schema_version", "intent_sha256", "decision", "evidence",
+            "candidate_sha256",
+        } or candidate.get("schema_version") != 1:
+            raise ManagerError("Stored plan candidate has unknown or missing fields")
+        expected_hash = canonical_json_sha256({
+            "intent_sha256": intent_hash,
+            "decision": candidate.get("decision"),
+        })
+        if (
+            candidate.get("intent_sha256") != intent_hash
+            or candidate.get("candidate_sha256") != expected_hash
+            or pointer.get("candidate_sha256") != expected_hash
+        ):
+            raise ManagerError("Stored plan candidate hash is invalid")
+        decision = candidate.get("decision")
+        if not isinstance(decision, dict):
+            raise ManagerError("Stored plan decision is invalid")
+        source_trace = validate_plan_sources(decision, plan_intent)
+        proposal = {
+            key: decision[key]
+            for key in (
+                "objective", "allowed_files", "atoms", "constraints",
+                "acceptance_criteria",
+            )
+        }
+        errors = model_plan_errors(proposal, repository)
+        if errors:
+            raise ManagerError(
+                "Stored plan candidate is incomplete: " + "; ".join(errors)
+            )
+        ready_task = trusted_plan_task(plan_intent, source_trace)
+        routed = submit(
+            ready_task, workspace=workspace,
+            generator=lambda task, **kwargs: run_planner(
+                task, advisor_proposal=proposal,
+                advisor_snapshot=snapshot, plan_intent=plan_intent,
+                source_trace=source_trace, **kwargs,
+            ),
+            initialize=True, parent_run_id=parent_run_id,
+            lead_snapshot=snapshot,
+        )
+        routed_run_id = str(routed["run_id"])
+        transition_task(
+            job_dir, TaskState.READY_FOR_PROCESSING,
+            snapshot=snapshot, actor_type="owner", actor_id="owner",
+            output_hash=expected_hash,
+            details={
+                "command": "/plan-dispatch",
+                "candidate_sha256": expected_hash,
+                "routed_run_id": routed_run_id,
+            },
+        )
+        transition_task(
+            job_dir, TaskState.AWAITING_OWNER_APPROVAL,
+            snapshot=snapshot, actor_type="manager", actor_id="manager",
+            output_hash=expected_hash,
+            details={"routed_run_id": routed_run_id},
+        )
+        conversation["active_run_id"] = routed_run_id
+        conversation["updated_at"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        )
+        atomic_write_json(conversation_file, conversation)
+        return conversation
 
 
 def start_conversation(
@@ -1963,6 +2110,8 @@ def parse_args() -> argparse.Namespace:
     )
     plan_parser = sub.add_parser("prepare-plan")
     plan_parser.add_argument("run_id")
+    dispatch_parser = sub.add_parser("plan-dispatch")
+    dispatch_parser.add_argument("run_id")
     execute_parser = sub.add_parser("execute")
     execute_parser.add_argument("run_id")
     execute_parser.add_argument("--lease-minutes", type=int, default=30)
@@ -1997,6 +2146,8 @@ def main() -> int:
             )
         elif args.command_name == "prepare-plan":
             result = prepare_plan(args.run_id, workspace=args.workspace)
+        elif args.command_name == "plan-dispatch":
+            result = dispatch_plan(args.run_id, workspace=args.workspace)
         elif args.command_name == "execute":
             result = execute_run(
                 args.run_id, workspace=args.workspace,
