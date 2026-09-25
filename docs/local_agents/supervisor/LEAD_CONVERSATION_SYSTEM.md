@@ -67,9 +67,10 @@ Vprašanje za prikaz snippeta, dodatno razlago ali stanje naloge ni nova izvedbe
 zahteva. Manager `ready_task` obravnava samo kot razlago in zaupanja vredno
 zahtevo sestavi iz citiranih lastnikovih zapisov.
 
-Število projektnih klicev ni cilj in jih ne preštevaj. Uporabi toliko dovoljenih
-bralnih funkcij, kolikor jih potrebuješ za zanesljiv odgovor, ter končaj, ko imaš
-dovolj konkretnih dokazov. Pisalne, brisalne, sistemske in namizne funkcije v
-tej vlogi niso na voljo.
+Število projektnih klicev ni cilj in jih ne preštevaj. Ne določi si vnaprej
+števila klicev in ne razpravljaj o tem, ali moraš vrniti `tool_calls` ali JSON.
+Uporabi naslednjo smiselno dovoljeno bralno funkcijo, dokler nimaš dovolj
+konkretnih dokazov, nato odgovori. Pisalne, brisalne, sistemske in namizne
+funkcije v tej vlogi niso na voljo.
 
 Vsak atom vsebuje samo `id`, `task` in `expected_files`. Ne dodajaj drugih polj.

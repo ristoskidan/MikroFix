@@ -28,6 +28,11 @@ vidi in lahko v istem pogovoru popravlja. GPT-OSS ga prejme šele po izrecnem
 deterministični manager izdela nespremenljiv načrt. Vloga in model sta ločeni identiteti:
 sprememba modela ne spremeni prompta, dovoljenj ali izhodne pogodbe vloge.
 
+Manager deterministično veže koren načrta na začetni lastnikov zapis. Modelsko
+napačno navedeni zapisi vodje nikoli ne morejo postati izvedbeni vir; premaknejo
+se med pogovorne dokaze. Neuvrščeni lastnikovi zapisi se konzervativno štejejo
+kot pogovor, dokler jih nova prikazana revizija izrecno ne uporabi.
+
 ## Obvezni način dela
 
 1. Pred spremembo preberi kanon, povezano kodo, teste in obstoječi diff. Tujih

@@ -342,7 +342,9 @@ class LocalManagerTests(unittest.TestCase):
                 }],
                 "constraints": ["Preserve valid values"],
                 "acceptance_criteria": ["Regression test passes"],
-                "objective_source_turns": ["turn-0001-owner"],
+                # The small model may confuse an explanatory lead turn with
+                # provenance bookkeeping; the manager repairs this safely.
+                "objective_source_turns": ["turn-0002-lead"],
                 "decision_source_turns": [],
                 "discussion_only_turns": ["turn-0003-owner"],
             }, {
@@ -382,7 +384,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=resolver,
         )
         self.assertEqual(first["profile_id"], second["profile_id"])
-        self.assertEqual(3, first["profile_version"])
+        self.assertEqual(4, first["profile_version"])
         self.assertEqual(first["role"], second["role"])
         self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
         self.assertNotEqual(first["model_tag"], second["model_tag"])
@@ -726,6 +728,36 @@ class LocalManagerTests(unittest.TestCase):
             ):
                 manager.dispatch_plan(run_id, workspace=self.workspace)
         submit.assert_not_called()
+
+    def test_plan_source_bookkeeping_is_repaired_conservatively(self):
+        intent = manager.build_plan_intent({"turns": [
+            {"role": "owner", "content": "Fix decimal_value"},
+            {"role": "lead", "content": "I found the parser"},
+            {"role": "owner", "content": "Show me the snippet"},
+        ]}, repository=self.repository)
+        repaired = manager.normalize_plan_sources({
+            "objective_source_turns": ["turn-0002-lead"],
+            "decision_source_turns": [],
+            "discussion_only_turns": [],
+        }, intent)
+        self.assertEqual(
+            ["turn-0001-owner"], repaired["objective_source_turns"],
+        )
+        self.assertEqual([], repaired["decision_source_turns"])
+        self.assertEqual(
+            ["turn-0002-lead", "turn-0003-owner"],
+            repaired["discussion_only_turns"],
+        )
+        self.assertEqual(
+            {
+                "objective_source_turns": ["turn-0001-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": [
+                    "turn-0002-lead", "turn-0003-owner",
+                ],
+            },
+            manager.validate_plan_sources(repaired, intent),
+        )
 
     def test_tool_names_cannot_be_smuggled_in_as_allowed_files(self):
         invalid = model_plan(

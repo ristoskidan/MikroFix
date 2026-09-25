@@ -178,8 +178,10 @@ stable turn ids, the root owner request and the Git checkpoint. The selected
 lead must cite owner turn ids for the objective and later decisions, while
 explanatory questions are marked discussion-only. The manager derives the
 validator task from those cited owner turns instead of trusting model-authored
-`ready_task` prose. Empty plan sections, unknown sources, missing root
-provenance, unclassified owner turns and source overlap fail closed. A
+`ready_task` prose. Empty plan sections, missing root provenance and source
+overlap fail closed after deterministic normalization: the owner root is always
+restored, lead turns cannot authorize execution, and otherwise unclassified
+owner turns default to discussion-only. A
 successful candidate is cached by the intent hash. Repeating `/prepare-plan`
 without a substantive conversation change returns the same revision; a later
 owner correction requires a new revision. `/plan-dispatch` fails closed if the

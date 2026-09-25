@@ -19,6 +19,8 @@ class OwnerCommand:
 ALIASES = {
     "/prepareplan": "/prepare-plan",
     "/plandispatch": "/plan-dispatch",
+    "/dispatch-plan": "/plan-dispatch",
+    "/dispatchplan": "/plan-dispatch",
     "/preparereview": "/prepare-review",
     "/codexrejected": "/codex-rejected",
     "/codexapproved": "/codex-approved",

@@ -16,6 +16,8 @@ class OwnerCommandParserTests(unittest.TestCase):
             ("/prepare-plan", "/prepare-plan"),
             (" /prepareplan ", "/prepare-plan"),
             (" /plandispatch ", "/plan-dispatch"),
+            (" /dispatch-plan ", "/plan-dispatch"),
+            (" /dispatchplan ", "/plan-dispatch"),
             ("/preparereview", "/prepare-review"),
             ("/codexrejected konkretna ugotovitev", "/codex-rejected"),
             ("/codexapproved abc1234", "/codex-approved"),

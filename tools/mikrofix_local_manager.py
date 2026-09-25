@@ -298,6 +298,74 @@ def validate_plan_sources(
     return sources
 
 
+def normalize_plan_sources(
+    decision: dict[str, Any], plan_intent: dict[str, Any],
+) -> dict[str, Any]:
+    """Conservatively repair bookkeeping without changing plan substance."""
+    normalized = dict(decision)
+    turns = plan_intent.get("turns")
+    if not isinstance(turns, list):
+        raise ManagerError("Frozen plan intent has no turns")
+    known = {
+        str(turn["turn_id"]): str(turn["role"])
+        for turn in turns
+        if isinstance(turn, dict) and "turn_id" in turn and "role" in turn
+    }
+    ordered = list(known)
+    owner_ids = [turn_id for turn_id in ordered if known[turn_id] == "owner"]
+    root = str(plan_intent.get("root_turn_id") or "")
+    if root not in owner_ids:
+        raise ManagerError("Frozen plan intent has no valid owner root")
+    root_index = ordered.index(root)
+    superseded = {
+        turn_id for turn_id in ordered[:root_index]
+        if known[turn_id] == "owner"
+    }
+
+    def listed(field: str) -> list[str]:
+        raw = decision.get(field)
+        if not isinstance(raw, list):
+            return []
+        return list(dict.fromkeys(
+            item for item in raw if isinstance(item, str) and item in known
+        ))
+
+    raw_objective = listed("objective_source_turns")
+    raw_decisions = listed("decision_source_turns")
+    objective = [
+        turn_id for turn_id in raw_objective
+        if known[turn_id] == "owner" and turn_id not in superseded
+    ]
+    if root not in objective:
+        objective.insert(0, root)
+    decisions = [
+        turn_id for turn_id in raw_decisions
+        if known[turn_id] == "owner"
+        and turn_id not in superseded
+        and turn_id not in objective
+    ]
+    discussion = [
+        turn_id for turn_id in listed("discussion_only_turns")
+        if turn_id not in objective and turn_id not in decisions
+    ]
+    # A lead turn can never authorize execution. Preserve such mistaken
+    # references only as discussion evidence instead of rejecting the plan.
+    for turn_id in raw_objective + raw_decisions:
+        if known[turn_id] != "owner" and turn_id not in discussion:
+            discussion.append(turn_id)
+    for turn_id in owner_ids:
+        if (
+            turn_id not in objective
+            and turn_id not in decisions
+            and turn_id not in discussion
+        ):
+            discussion.append(turn_id)
+    normalized["objective_source_turns"] = objective
+    normalized["decision_source_turns"] = decisions
+    normalized["discussion_only_turns"] = discussion
+    return normalized
+
+
 def trusted_plan_task(
     plan_intent: dict[str, Any], sources: dict[str, list[str]],
 ) -> str:
@@ -1212,7 +1280,10 @@ def lead_conversation_prompt(
         "sodeluje, ne vidi zgodovine in ga ne smeš klicati ali prositi za "
         "pregled. Za dejstva o projektu uporabi samo bralna projektna orodja. "
         "Vrni odločitev v točno zahtevani strukturirani obliki; polje reply je "
-        "besedilo, ki ga vidi lastnik."
+        "besedilo, ki ga vidi lastnik. Ne določi si vnaprej števila orodnih "
+        "klicev, ne preštevaj jih kot cilj in ne razpravljaj o izbiri med "
+        "tool_calls ter JSON odgovorom. Dokler manjka konkreten dokaz, uporabi "
+        "naslednje smiselno dovoljeno orodje; ko je dokazov dovolj, odgovori."
     ]
     if repository_snapshot.strip():
         sections.append(
@@ -1471,6 +1542,12 @@ def talk(
         if progress_callback is not None:
             responder_kwargs["progress_callback"] = progress_callback
         decision, evidence = responder(clean_message, **responder_kwargs)
+        if (
+            planning_requested
+            and decision.get("routing") == "READY_FOR_PROCESSING"
+        ):
+            assert plan_intent is not None
+            decision = normalize_plan_sources(decision, plan_intent)
         reported_routing = str(decision.get("routing", "NEEDS_INFO"))
         routing = reported_routing if planning_requested else "NEEDS_INFO"
         reply = str(decision["reply"]).strip()
