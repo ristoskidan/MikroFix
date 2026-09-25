@@ -131,6 +131,49 @@ class LocalWebPayloadTests(unittest.TestCase):
         )
         self.assertTrue(result["accepted"])
 
+    def test_waiting_plan_dispatch_returns_owner_checkpoint(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "",
+            "state": "CONVERSATION", "state_label": "Pogovor", "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "dispatch_plan", return_value={
+                "active_run_id": "MF-CHILD",
+            }) as dispatch,
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/plan-dispatch", wait=True,
+            )
+        dispatch.assert_called_once_with("MF-ROOT", workspace=self.workspace)
+        spawn.assert_not_called()
+        self.assertEqual("READY_FOR_OWNER_LEASE", result["state"])
+        self.assertIn("/approve-plan", result["message"])
+
+    def test_waiting_approval_returns_terminal_owner_checkpoint(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "MF-CHILD",
+            "state": "READY_FOR_OWNER_LEASE", "state_label": "Čaka dovoljenje",
+            "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "execute_run", return_value={
+                "state": "READY_FOR_CODEX_REVIEW",
+            }) as execute,
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT", "/approve-plan", wait=True,
+            )
+        execute.assert_called_once_with(
+            "MF-CHILD", workspace=self.workspace, lease_minutes=30,
+        )
+        spawn.assert_not_called()
+        self.assertEqual("READY_FOR_CODEX_REVIEW", result["state"])
+        self.assertIn("/prepare-review", result["message"])
+
     def test_replace_goal_is_dispatched_without_a_model(self):
         job = {
             "run_id": "MF-ROOT", "action_run_id": "",

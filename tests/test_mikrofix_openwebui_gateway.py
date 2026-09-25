@@ -101,7 +101,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
                 "qwen3:14b-q4_K_M",
             )
         dispatch.assert_called_once_with(
-            gateway.WORKSPACE, "MF-LOCAL-3", "/plan-dispatch",
+            gateway.WORKSPACE, "MF-LOCAL-3", "/plan-dispatch", wait=True,
         )
         prepare.assert_not_called()
         self.assertIn("Revizija se preverja.", result)

@@ -33,7 +33,7 @@ try:
         render_job,
     )
     from tools.mikrofix_local_manager import (
-        enabled_role_profiles, installed_ollama_models,
+        dispatch_plan, enabled_role_profiles, execute_run, installed_ollama_models,
         replace_conversation_goal,
     )
     from tools.mikrofix_owner_commands import (
@@ -54,7 +54,7 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
         render_job,
     )
     from mikrofix_local_manager import (  # type: ignore[no-redef]
-        enabled_role_profiles, installed_ollama_models,
+        dispatch_plan, enabled_role_profiles, execute_run, installed_ollama_models,
         replace_conversation_goal,
     )
     from mikrofix_owner_commands import (  # type: ignore[no-redef]
@@ -168,7 +168,7 @@ def _require_allowed(command: OwnerCommand, job: dict[str, Any]) -> None:
 
 
 def dispatch_owner_command(
-    workspace: Path, run_id: str, message: str,
+    workspace: Path, run_id: str, message: str, *, wait: bool = False,
 ) -> dict[str, Any]:
     """Execute one allow-listed owner command without involving an LLM or shell."""
     command = parse_owner_command(message)
@@ -197,6 +197,22 @@ def dispatch_owner_command(
             "message": "Lokalni vodja pripravlja izvedbeni načrt.",
         }
     if command.name == "/plan-dispatch":
+        if wait:
+            conversation = dispatch_plan(job["run_id"], workspace=workspace)
+            action_run_id = str(conversation.get("active_run_id") or "")
+            if not action_run_id:
+                raise ValueError("Predani načrt nima izvedbenega ID-ja")
+            return {
+                "command": command.name,
+                "accepted": True,
+                "state": "READY_FOR_OWNER_LEASE",
+                "action_run_id": action_run_id,
+                "message": (
+                    "Načrt je neodvisno preverjen in pripravljen za izvedbo.\n"
+                    f"Izvedbeni kandidat: {action_run_id}\n"
+                    "Naslednji korak: /approve-plan"
+                ),
+            }
         spawn_manager(workspace, ["plan-dispatch", job["run_id"]])
         return {
             "command": command.name, "accepted": True,
@@ -211,6 +227,31 @@ def dispatch_owner_command(
             "message": "Glavni cilj pogovora je bil izrecno zamenjan.",
         }
     if command.name == "/approve-plan":
+        if wait:
+            result = execute_run(
+                action_run_id, workspace=workspace, lease_minutes=30,
+            )
+            state = str(result.get("state") or "BLOCKED")
+            if state == "READY_FOR_CODEX_REVIEW":
+                message_text = (
+                    "Lokalna izvedba in neodvisni pregled sta končana.\n"
+                    f"Izvedbeni kandidat: {action_run_id}\n"
+                    "Naslednji korak: /prepare-review"
+                )
+            else:
+                reason = str(result.get("exact_reason") or "Neznan razlog")
+                message_text = (
+                    "Lokalna izvedba potrebuje pozornost.\n"
+                    f"Izvedbeni kandidat: {action_run_id}\n"
+                    f"Stanje: {state}\nRazlog: {reason}"
+                )
+            return {
+                "command": command.name,
+                "accepted": True,
+                "state": state,
+                "action_run_id": action_run_id,
+                "message": message_text,
+            }
         spawn_manager(
             workspace, ["execute", action_run_id, "--lease-minutes", "30"],
         )

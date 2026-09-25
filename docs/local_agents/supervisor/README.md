@@ -203,6 +203,17 @@ goal. It is handled by trusted code without an LLM, appended to the audit trail
 and becomes the new PlanIntent root. Earlier owner turns are then superseded and
 cannot be cited as objective or decision sources.
 
+Open WebUI keeps the streamed request open for the two asynchronous owner
+checkpoints. `/plan-dispatch` returns in the originating conversation only
+after the validator has produced `READY_FOR_OWNER_LEASE`, together with the
+exact candidate id and `/approve-plan`. `/approve-plan` returns only after the
+supervised executor and local reviewer reach `READY_FOR_CODEX_REVIEW` or
+`BLOCKED`, together with the next owner action. Ten-second empty stream deltas
+keep the HTTP connection alive without inventing progress. The standalone
+local manager UI remains asynchronous because it polls the same durable state.
+If an Open WebUI tab disconnects, the durable job and desktop terminal
+notification remain authoritative and `/status` retrieves the checkpoint.
+
 During a streamed conversation, the gateway forwards the `thinking` text that
 Ollama actually returned as OpenAI-compatible `reasoning_content`. Open WebUI
 can therefore render it in its separate collapsible reasoning block. Progress

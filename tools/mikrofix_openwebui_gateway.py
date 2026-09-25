@@ -376,7 +376,10 @@ def route_message(
                 f"\nVloga: {role_id}\nModel: {model_tag}"
                 f"\nMikroFIX izbrani model: {model_tag}"
             )
-        result = dispatch_owner_command(WORKSPACE, run_id, message)
+        result = dispatch_owner_command(
+            WORKSPACE, run_id, message,
+            wait=command.name in {"/plan-dispatch", "/approve-plan"},
+        )
         response = str(result.get("message") or "Ukaz je bil sprejet.").strip()
         if command.name == "/help":
             response += (
