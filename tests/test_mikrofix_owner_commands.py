@@ -18,6 +18,7 @@ class OwnerCommandParserTests(unittest.TestCase):
             ("/preparereview", "/prepare-review"),
             ("/codexrejected konkretna ugotovitev", "/codex-rejected"),
             ("/codexapproved abc1234", "/codex-approved"),
+            ("/replace-goal Popravi samo parser", "/replace-goal"),
         ):
             with self.subTest(source=source):
                 self.assertEqual(expected, parse_owner_command(source).name)
@@ -33,11 +34,14 @@ class OwnerCommandParserTests(unittest.TestCase):
             parse_owner_command("/codex-rejected")
         with self.assertRaisesRegex(OwnerCommandError, "commit SHA"):
             parse_owner_command("/codex-approved")
+        with self.assertRaisesRegex(OwnerCommandError, "nov potrjeni cilj"):
+            parse_owner_command("/replace-goal")
 
     def test_help_describes_only_implemented_semantics(self):
         text = help_text()
         self.assertIn("/status", text)
         self.assertIn("/codex-opinion", text)
+        self.assertIn("/replace-goal", text)
         self.assertIn("odobritev in uporabo commita", text)
         self.assertNotIn("/applied", text)
 

@@ -34,6 +34,7 @@ try:
     )
     from tools.mikrofix_local_manager import (
         enabled_role_profiles, installed_ollama_models,
+        replace_conversation_goal,
     )
     from tools.mikrofix_owner_commands import (
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -54,6 +55,7 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     )
     from mikrofix_local_manager import (  # type: ignore[no-redef]
         enabled_role_profiles, installed_ollama_models,
+        replace_conversation_goal,
     )
     from mikrofix_owner_commands import (  # type: ignore[no-redef]
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -147,7 +149,7 @@ def allowed_owner_commands(job: dict[str, Any]) -> list[str]:
     allowed = ["/status", "/help", "/codex-opinion"]
     state = job["state"]
     if state == "CONVERSATION" and not job.get("action_run_id"):
-        allowed.append("/prepare-plan")
+        allowed.extend(("/prepare-plan", "/replace-goal"))
     if state == "READY_FOR_OWNER_LEASE":
         allowed.append("/approve-plan")
     if state == "READY_FOR_CODEX_REVIEW":
@@ -193,6 +195,14 @@ def dispatch_owner_command(
         return {
             "command": command.name, "accepted": True,
             "message": "Lokalni vodja pripravlja izvedbeni načrt.",
+        }
+    if command.name == "/replace-goal":
+        replace_conversation_goal(
+            job["run_id"], command.argument, workspace=workspace,
+        )
+        return {
+            "command": command.name, "accepted": True,
+            "message": "Glavni cilj pogovora je bil izrecno zamenjan.",
         }
     if command.name == "/approve-plan":
         spawn_manager(

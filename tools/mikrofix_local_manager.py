@@ -70,6 +70,9 @@ MODEL_PLAN_FIELDS = {
     "context_links",
 }
 REQUIRED_MODEL_PLAN_FIELDS = MODEL_PLAN_FIELDS - {"context_links"}
+PLAN_SOURCE_FIELDS = {
+    "objective_source_turns", "decision_source_turns", "discussion_only_turns",
+}
 MAX_PLANNER_ATTEMPTS = 3
 BRIDGE_TOOL_NAMES = {
     "project_status", "project_read", "project_list", "project_search",
@@ -101,6 +104,8 @@ def conversation_response_schema(*, planning_requested: bool = True) -> dict[str
         "required": [
             "reply", "routing", "ready_task", "objective", "allowed_files",
             "atoms", "constraints", "acceptance_criteria",
+            "objective_source_turns", "decision_source_turns",
+            "discussion_only_turns",
         ],
         "properties": {
             "reply": {"type": "string", "minLength": 1},
@@ -135,6 +140,18 @@ def conversation_response_schema(*, planning_requested: bool = True) -> dict[str
             "acceptance_criteria": {
                 "type": "array", "items": {"type": "string", "minLength": 1},
             },
+            "objective_source_turns": {
+                "type": "array", "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "decision_source_turns": {
+                "type": "array", "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "discussion_only_turns": {
+                "type": "array", "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
         },
     }
 
@@ -149,6 +166,158 @@ def binding_owner_criterion(owner_request: str) -> str:
         "any item is omitted, weakened, contradicted, or unsupported. Original "
         f"owner request: {request}"
     )
+
+
+def canonical_json_sha256(value: object) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return sha256_text(payload)
+
+
+def build_plan_intent(
+    conversation: dict[str, Any], *, repository: Path,
+) -> dict[str, Any]:
+    """Freeze the exact conversation evidence used by one planning request."""
+    raw_turns = conversation.get("turns")
+    if not isinstance(raw_turns, list) or not raw_turns:
+        raise ManagerError("Planning requires an existing owner conversation")
+    turns: list[dict[str, str]] = []
+    for index, raw in enumerate(raw_turns, start=1):
+        if not isinstance(raw, dict) or raw.get("role") not in {"owner", "lead"}:
+            raise ManagerError(f"Conversation turn {index} is invalid")
+        role = str(raw["role"])
+        content = str(raw.get("content") or "").strip()
+        if not content:
+            raise ManagerError(f"Conversation turn {index} is empty")
+        turn_id = f"turn-{index:04d}-{role}"
+        kind = (
+            "goal_replacement" if raw.get("kind") == "goal_replacement"
+            else "conversation"
+        )
+        turns.append({
+            "turn_id": turn_id,
+            "role": role,
+            "kind": kind,
+            "content": content,
+            "content_sha256": sha256_text(content),
+        })
+    owner_turns = [turn for turn in turns if turn["role"] == "owner"]
+    if not owner_turns:
+        raise ManagerError("Planning requires an owner root request")
+    checkpoint = command(
+        ["git", "rev-parse", "HEAD"], cwd=repository, timeout=30,
+    ).strip()
+    replacements = [
+        turn for turn in owner_turns if turn["kind"] == "goal_replacement"
+    ]
+    root_turn = replacements[-1] if replacements else owner_turns[0]
+    core = {
+        "schema_version": 1,
+        "root_turn_id": root_turn["turn_id"],
+        "root_request": root_turn["content"],
+        "checkpoint": checkpoint,
+        "turns": turns,
+    }
+    return {**core, "intent_sha256": canonical_json_sha256(core)}
+
+
+def validate_plan_sources(
+    decision: dict[str, Any], plan_intent: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Fail closed when a plan cannot be traced to frozen owner turns."""
+    turns = plan_intent.get("turns")
+    if not isinstance(turns, list):
+        raise ManagerError("Frozen plan intent has no turns")
+    known = {
+        str(turn["turn_id"]): str(turn["role"])
+        for turn in turns
+        if isinstance(turn, dict) and "turn_id" in turn and "role" in turn
+    }
+    root_turn_id = str(plan_intent.get("root_turn_id") or "")
+    sources: dict[str, list[str]] = {}
+    errors: list[str] = []
+    for field in sorted(PLAN_SOURCE_FIELDS):
+        raw = decision.get(field)
+        if not isinstance(raw, list) or any(not isinstance(item, str) for item in raw):
+            errors.append(f"{field} must be a list of turn ids")
+            sources[field] = []
+            continue
+        values = list(dict.fromkeys(raw))
+        if len(values) != len(raw):
+            errors.append(f"{field} contains duplicate turn ids")
+        unknown = sorted(set(values) - set(known))
+        if unknown:
+            errors.append(f"{field} contains unknown turn ids: {', '.join(unknown)}")
+        sources[field] = values
+    objective = sources.get("objective_source_turns", [])
+    decisions = sources.get("decision_source_turns", [])
+    discussion = sources.get("discussion_only_turns", [])
+    if root_turn_id not in objective:
+        errors.append("objective_source_turns must include the root owner request")
+    ordered_ids = list(known)
+    if root_turn_id in ordered_ids:
+        root_index = ordered_ids.index(root_turn_id)
+        superseded = {
+            turn_id for turn_id in ordered_ids[:root_index]
+            if known[turn_id] == "owner"
+        }
+        reused = sorted(superseded & (set(objective) | set(decisions)))
+        if reused:
+            errors.append(
+                "owner turns before an explicit replacement goal are superseded: "
+                + ", ".join(reused)
+            )
+    for field, values in (
+        ("objective_source_turns", objective),
+        ("decision_source_turns", decisions),
+    ):
+        non_owner = sorted(turn_id for turn_id in values if known.get(turn_id) != "owner")
+        if non_owner:
+            errors.append(f"{field} may reference only owner turns: {', '.join(non_owner)}")
+    overlaps = sorted(
+        (set(objective) | set(decisions)) & set(discussion)
+    )
+    if overlaps:
+        errors.append(
+            "planning and discussion-only sources overlap: " + ", ".join(overlaps)
+        )
+    owner_turn_ids = {turn_id for turn_id, role in known.items() if role == "owner"}
+    missing_owner_turns = sorted(
+        owner_turn_ids - set(objective) - set(decisions) - set(discussion)
+    )
+    if missing_owner_turns:
+        errors.append(
+            "every owner turn must be classified; missing: "
+            + ", ".join(missing_owner_turns)
+        )
+    if errors:
+        raise ManagerError("Plan source trace is invalid: " + "; ".join(errors))
+    return sources
+
+
+def trusted_plan_task(
+    plan_intent: dict[str, Any], sources: dict[str, list[str]],
+) -> str:
+    """Build the validator request from cited owner turns, never model prose."""
+    by_id = {
+        str(turn["turn_id"]): str(turn["content"])
+        for turn in plan_intent["turns"]
+    }
+    selected = list(dict.fromkeys(
+        sources["objective_source_turns"] + sources["decision_source_turns"]
+    ))
+    sections = [
+        "POTRJENA IZVIRNA ZAHTEVA:\n" + by_id[str(plan_intent["root_turn_id"])]
+    ]
+    additions = [
+        f"[{turn_id}] {by_id[turn_id]}"
+        for turn_id in selected
+        if turn_id != plan_intent["root_turn_id"]
+    ]
+    if additions:
+        sections.append("POTRJENE DOPOLNITVE:\n" + "\n".join(additions))
+    return "\n\n".join(sections)
 
 
 class ManagerError(RuntimeError):
@@ -611,12 +780,25 @@ def qwen_planner_prompt(task: str, previous_error: str = "") -> str:
 
 
 def gpt_validation_prompt(
-    task: str, qwen_proposal: str, memory_hash: str, previous_error: str = ""
+    task: str, qwen_proposal: str, memory_hash: str, previous_error: str = "",
+    *, plan_intent: dict[str, Any] | None = None,
+    source_trace: dict[str, list[str]] | None = None,
 ) -> str:
     correction = (
         "\nPREJŠNJA POTRDITEV JE BILA ZAVRNJENA: " + previous_error
         if previous_error else ""
     )
+    provenance = ""
+    if plan_intent is not None and source_trace is not None:
+        provenance = (
+            "\n\nZAMRZNJENI POGOVORNI VIR:\n"
+            + json.dumps(plan_intent, ensure_ascii=False, indent=2)
+            + "\n\nSLED VIROV SVETOVALCA:\n"
+            + json.dumps(source_trace, ensure_ascii=False, indent=2)
+            + "\nPreveri, da cilj izhaja iz root_turn_id, poznejše odločitve "
+            "izhajajo samo iz citiranih lastnikovih turnov in da "
+            "discussion_only_turns niso postali izvedbene zahteve."
+        )
     return (
         "Kot konfigurirani neodvisni validator preveri predlog pogovornega "
         "svetovalca proti lastnikovi zahtevi in projektnemu spominu. "
@@ -624,7 +806,7 @@ def gpt_validation_prompt(
         "Odpravi vse napake in vrni samo končni JSON načrt.\n\n"
         f"SKUPNI MEMORY SHA-256: {memory_hash}\n\n"
         f"ZAHTEVA LASTNIKA:\n{task}\n\nPREDLOG SVETOVALCA:\n{qwen_proposal}"
-        + correction
+        + provenance + correction
     )
 
 
@@ -716,6 +898,8 @@ def run_planner(
     task: str, *, job_dir: Path, repository: Path,
     advisor_proposal: dict[str, Any] | None = None,
     advisor_snapshot: dict[str, Any] | None = None,
+    plan_intent: dict[str, Any] | None = None,
+    source_trace: dict[str, list[str]] | None = None,
 ) -> str:
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
     lead_home = Path.home() / ".local/share/mikrofix-bridge"
@@ -857,6 +1041,20 @@ def run_planner(
 
     try:
         wait_for_executor(executor_url, token_file, process)
+        if plan_intent is not None:
+            atomic_write_immutable_json(
+                job_dir / "planning-intent.json", plan_intent,
+            )
+        if source_trace is not None:
+            atomic_write_immutable_json(
+                job_dir / "planning-source-trace.json", {
+                    "schema_version": 1,
+                    "intent_sha256": (
+                        plan_intent.get("intent_sha256") if plan_intent else None
+                    ),
+                    **source_trace,
+                },
+            )
         if advisor_proposal is None:
             assert advisor_config is not None
             advisor_raw = ask_stage(
@@ -876,6 +1074,7 @@ def run_planner(
             prompt_factory=lambda error: gpt_validation_prompt(
                 task, json.dumps(normalized_advisor, ensure_ascii=False, indent=2),
                 str(gpt_planner_lead["memory_sha256"]), error,
+                plan_intent=plan_intent, source_trace=source_trace,
             ),
         )
         final_proposal = parse_model_json(final_raw)
@@ -885,6 +1084,9 @@ def run_planner(
         atomic_write_immutable_json(job_dir / "planning-handoff.json", {
             "schema_version": 1,
             "shared_memory_sha256": gpt_planner_lead["memory_sha256"],
+            "plan_intent_sha256": (
+                plan_intent.get("intent_sha256") if plan_intent else None
+            ),
             "advisor": {
                 "role": "planning_advisor",
                 "profile_id": (
@@ -943,6 +1145,7 @@ def repository_orientation(repository: Path) -> str:
 def lead_conversation_prompt(
     message: str, *, turns: list[dict[str, str]],
     planning_requested: bool = False, repository_snapshot: str = "",
+    plan_intent: dict[str, Any] | None = None,
 ) -> str:
     """Build one bounded continuation turn for one isolated persistent lead."""
     history = turns[-MAX_CONVERSATION_TURNS:]
@@ -952,12 +1155,19 @@ def lead_conversation_prompt(
         for turn in history
         if str(turn.get("content") or "").strip()
     )
+    if planning_requested and plan_intent is None:
+        raise ManagerError("Planning requires a frozen plan intent")
     mode_instruction = (
         "Lastnik je izrecno sprožil /prepare-plan. Formalni izvedbeni načrt "
         "pripravi samo, če so vzrok oziroma relevantne ugotovitve preverjene, "
         "možnosti obravnavane in lastnikova izbira dovolj jasna. Če odločitev "
         "ali dokaz manjka, vrni NEEDS_INFO in zahtevaj najmanjši manjkajoči "
-        "podatek. To še ni dovoljenje za izvedbo. "
+        "podatek. Za objective_source_turns navedi začetno lastnikovo zahtevo "
+        "in druge lastnikove zapise, ki dejansko določajo cilj. V "
+        "decision_source_turns navedi samo poznejše lastnikove odločitve ali "
+        "omejitve. Pojasnjevalna vprašanja, kot je zahteva za snippet, uvrsti "
+        "v discussion_only_turns in jih ne spremeni v cilj. To še ni dovoljenje "
+        "za izvedbo. "
         if planning_requested else
         "To je raziskovalni in svetovalni pogovor. Ostani strogo osredotočen "
         "na prijavljeni simptom. Z bralnimi orodji preveri samo neposredno "
@@ -981,7 +1191,24 @@ def lead_conversation_prompt(
         sections.append(
             "TRENUTNO STANJE REPOZITORIJA:\n" + repository_snapshot.strip()
         )
-    if rendered_history:
+    if planning_requested and plan_intent is not None:
+        frozen_turns = "\n\n".join(
+            f"[{turn['turn_id']}] "
+            + ("LASTNIK" if turn["role"] == "owner" else "VODJA")
+            + (
+                " (NOV POTRJENI CILJ)"
+                if turn.get("kind") == "goal_replacement" else ""
+            )
+            + ":\n" + str(turn["content"])
+            for turn in plan_intent["turns"]
+        )
+        sections.append(
+            "ZAMRZNJENI PLAN INTENT:\n"
+            f"intent_sha256: {plan_intent['intent_sha256']}\n"
+            f"root_turn_id: {plan_intent['root_turn_id']}\n\n"
+            + frozen_turns
+        )
+    elif rendered_history:
         sections.append("DOSEDANJI POGOVOR:\n" + rendered_history)
     sections.append(
         "UKAZ LASTNIKA:\n/prepare-plan"
@@ -1006,6 +1233,7 @@ def run_lead_conversation(
     turns: list[dict[str, str]], lead_profile: str = "conversation_lead",
     lead_snapshot: dict[str, Any] | None = None,
     planning_requested: bool = False,
+    plan_intent: dict[str, Any] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Ask only the selected persistent lead through a read-only executor."""
@@ -1094,6 +1322,7 @@ def run_lead_conversation(
             message, turns=turns,
             planning_requested=planning_requested,
             repository_snapshot=repository_orientation(repository),
+            plan_intent=plan_intent,
         )
         bridge_job_id = command(
             bridge + ["dispatch", "--name", f"Neposredni pogovor: {role}",
@@ -1155,6 +1384,8 @@ def talk(
     lead_profile: str = "conversation_lead",
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     planning_requested: bool = False,
+    plan_intent: dict[str, Any] | None = None,
+    plan_candidate_path: Path | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Append one direct owner/lead turn without creating a new manager job."""
@@ -1200,6 +1431,10 @@ def talk(
             "lead_profile": lead_profile, "lead_snapshot": snapshot,
             "planning_requested": planning_requested,
         }
+        if planning_requested:
+            if plan_intent is None:
+                raise ManagerError("Planning requires a frozen plan intent")
+            responder_kwargs["plan_intent"] = plan_intent
         if progress_callback is not None:
             responder_kwargs["progress_callback"] = progress_callback
         decision, evidence = responder(clean_message, **responder_kwargs)
@@ -1219,7 +1454,9 @@ def talk(
             "output_hash": sha256_text(reply),
         }
         if routing == "READY_FOR_PROCESSING":
-            ready_task = str(decision.get("ready_task") or "").strip()
+            assert plan_intent is not None
+            source_trace = validate_plan_sources(decision, plan_intent)
+            ready_task = trusted_plan_task(plan_intent, source_trace)
             proposal = {
                 key: decision[key]
                 for key in (
@@ -1227,13 +1464,29 @@ def talk(
                     "acceptance_criteria",
                 )
             }
-            if not ready_task:
-                raise ManagerError("READY_FOR_PROCESSING requires ready_task")
             errors = model_plan_errors(proposal, repository)
             if errors:
                 raise ManagerError(
                     "READY_FOR_PROCESSING plan is incomplete: " + "; ".join(errors)
                 )
+            if plan_candidate_path is not None and not plan_candidate_path.exists():
+                atomic_write_immutable_json(plan_candidate_path, {
+                    "schema_version": 1,
+                    "intent_sha256": plan_intent["intent_sha256"],
+                    "decision": decision,
+                    "evidence": {
+                        key: evidence.get(key, "")
+                        for key in (
+                            "bridge_job_id", "session_id", "memory_sha256",
+                            "lead_profile", "model", "model_digest",
+                            "profile_snapshot_hash", "prompt_hash",
+                        )
+                    },
+                    "candidate_sha256": canonical_json_sha256({
+                        "intent_sha256": plan_intent["intent_sha256"],
+                        "decision": decision,
+                    }),
+                })
             lifecycle = read_task_state(job_dir)
             if lifecycle["state"] == TaskState.DRAFT.value:
                 transition_task(
@@ -1249,7 +1502,8 @@ def talk(
                 ready_task, workspace=workspace,
                 generator=lambda task, **kwargs: run_planner(
                     task, advisor_proposal=proposal,
-                    advisor_snapshot=snapshot, **kwargs,
+                    advisor_snapshot=snapshot, plan_intent=plan_intent,
+                    source_trace=source_trace, **kwargs,
                 ),
                 initialize=True, parent_run_id=parent_run_id,
                 lead_snapshot=snapshot,
@@ -1293,6 +1547,50 @@ def talk(
         return conversation
 
 
+def replace_conversation_goal(
+    parent_run_id: str, new_goal: str, *, workspace: Path = DEFAULT_WORKSPACE,
+) -> dict[str, Any]:
+    """Record an explicit owner-authorized goal replacement without an LLM."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    clean_goal = new_goal.strip()
+    if not clean_goal:
+        raise ManagerError("Replacement goal must not be empty")
+    job_dir = workspace / "jobs" / parent_run_id
+    snapshot = read_profile_snapshot(job_dir)
+    lifecycle = read_task_state(job_dir)
+    if lifecycle["state"] != TaskState.DRAFT.value:
+        raise ManagerError(
+            f"Goal can only be replaced in DRAFT, not {lifecycle['state']}"
+        )
+    conversation_file = job_dir / "conversation.json"
+    lock_path = job_dir / "conversation.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        conversation = json.loads(conversation_file.read_text(encoding="utf-8"))
+        if conversation.get("active_run_id"):
+            raise ManagerError("Conversation already has an active execution plan")
+        turns = conversation.get("turns")
+        if not isinstance(turns, list):
+            raise ManagerError("Conversation turns are invalid")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        turns.append({
+            "role": "owner", "kind": "goal_replacement",
+            "content": clean_goal, "at": stamp,
+        })
+        conversation["turns"] = turns
+        conversation["updated_at"] = stamp
+        atomic_write_json(conversation_file, conversation)
+    record_task_event(
+        job_dir, snapshot=snapshot, event_type="OWNER_REPLACED_GOAL",
+        actor_type="owner", actor_id="owner",
+        input_hash=sha256_text(clean_goal),
+        details={"replaced_by_turn_index": len(turns)},
+    )
+    return conversation
+
+
 def prepare_plan(
     parent_run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
@@ -1303,20 +1601,66 @@ def prepare_plan(
         raise ManagerError("Unsafe parent run id")
     job_dir = workspace / "jobs" / parent_run_id
     snapshot = read_profile_snapshot(job_dir)
-    lifecycle = read_task_state(job_dir)
-    if lifecycle["state"] != TaskState.DRAFT.value:
-        raise ManagerError(
-            f"Plan can only be prepared from DRAFT, not {lifecycle['state']}"
-        )
     conversation = json.loads(
         (job_dir / "conversation.json").read_text(encoding="utf-8")
     )
     if conversation.get("active_run_id"):
-        raise ManagerError("Conversation already has an active execution plan")
+        return conversation
+    lifecycle = read_task_state(job_dir)
+    if lifecycle["state"] not in {
+        TaskState.DRAFT.value, TaskState.READY_FOR_PROCESSING.value,
+    }:
+        raise ManagerError(
+            "Plan can only be prepared from DRAFT or a cached "
+            f"READY_FOR_PROCESSING candidate, not {lifecycle['state']}"
+        )
+    config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    repository = Path(config["repository"]).resolve()
+    plan_intent = build_plan_intent(conversation, repository=repository)
+    planning_dir = job_dir / "planning"
+    intent_hash = str(plan_intent["intent_sha256"])
+    intent_path = planning_dir / f"intent-{intent_hash}.json"
+    if intent_path.exists():
+        existing_intent = json.loads(intent_path.read_text(encoding="utf-8"))
+        if existing_intent != plan_intent:
+            raise ManagerError("Stored plan intent does not match the conversation")
+    else:
+        atomic_write_immutable_json(intent_path, plan_intent)
+    candidate_path = planning_dir / f"lead-candidate-{intent_hash}.json"
+    selected_responder = responder
+    if candidate_path.is_file():
+        cached = json.loads(candidate_path.read_text(encoding="utf-8"))
+        if set(cached) != {
+            "schema_version", "intent_sha256", "decision", "evidence",
+            "candidate_sha256",
+        } or cached.get("schema_version") != 1:
+            raise ManagerError("Cached lead candidate has unknown or missing fields")
+        if cached.get("intent_sha256") != intent_hash:
+            raise ManagerError("Cached lead candidate belongs to another plan intent")
+        cached_decision = cached.get("decision")
+        cached_evidence = cached.get("evidence")
+        if not isinstance(cached_decision, dict) or not isinstance(cached_evidence, dict):
+            raise ManagerError("Cached lead candidate is invalid")
+        expected_candidate_hash = canonical_json_sha256({
+            "intent_sha256": intent_hash,
+            "decision": cached_decision,
+        })
+        if cached.get("candidate_sha256") != expected_candidate_hash:
+            raise ManagerError("Cached lead candidate hash is invalid")
+
+        def cached_responder(
+            _message: str, **_kwargs: Any,
+        ) -> tuple[dict[str, Any], dict[str, str]]:
+            return dict(cached_decision), {
+                str(key): str(value) for key, value in cached_evidence.items()
+            }
+
+        selected_responder = cached_responder
     return talk(
         "/prepare-plan", parent_run_id=parent_run_id, workspace=workspace,
-        lead_profile=str(snapshot["profile_id"]), responder=responder,
-        planning_requested=True,
+        lead_profile=str(snapshot["profile_id"]), responder=selected_responder,
+        planning_requested=True, plan_intent=plan_intent,
+        plan_candidate_path=candidate_path,
     )
 
 

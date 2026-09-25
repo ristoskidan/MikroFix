@@ -171,6 +171,23 @@ conversation model for the structured first proposal, then invokes the fixed
 validator and deterministic manager. Roles after `/approve-plan` remain
 preconfigured in the supervisor flow.
 
+At `/prepare-plan`, the manager freezes an immutable, hashed `PlanIntent` with
+stable turn ids, the root owner request and the Git checkpoint. The selected
+lead must cite owner turn ids for the objective and later decisions, while
+explanatory questions are marked discussion-only. The manager derives the
+validator task from those cited owner turns instead of trusting model-authored
+`ready_task` prose. Empty plan sections, unknown sources, missing root
+provenance, unclassified owner turns and source overlap fail closed. A
+successful candidate is cached by the intent hash, and repeating
+`/prepare-plan` after success returns the same active candidate without another
+lead call.
+
+`/replace-goal <nov cilj>` is the explicit escape hatch for the uncommon case
+where the owner really wants to replace, rather than discuss, the original
+goal. It is handled by trusted code without an LLM, appended to the audit trail
+and becomes the new PlanIntent root. Earlier owner turns are then superseded and
+cannot be cited as objective or decision sources.
+
 During a streamed conversation, the gateway forwards the `thinking` text that
 Ollama actually returned as OpenAI-compatible `reasoning_content`. Open WebUI
 can therefore render it in its separate collapsible reasoning block. Progress

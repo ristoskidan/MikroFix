@@ -48,5 +48,20 @@ Vrni natanko en JSON objekt s polji:
 - `objective`, `allowed_files`, `atoms`, `constraints`,
   `acceptance_criteria`: popoln izvedbeni predlog pri `READY_FOR_PROCESSING`,
   sicer prazne varne vrednosti.
+- `objective_source_turns`: ID-ji lastnikovih zapisov, iz katerih neposredno
+  izhaja cilj; pri načrtu mora vedno vsebovati začetni `root_turn_id`;
+- `decision_source_turns`: ID-ji poznejših lastnikovih odločitev ali omejitev,
+  ki dejansko spreminjajo izvedbeni predlog;
+- `discussion_only_turns`: ID-ji pojasnjevalnih vprašanj in drugih zapisov, ki
+  so del pogovora, vendar ne smejo postati cilj načrta.
+
+Pri `NEEDS_INFO` naj bodo tudi vsa tri polja s turn ID-ji prazni seznami.
+Pri `READY_FOR_PROCESSING` mora biti vsak lastnikov turn uvrščen v vsaj eno od
+treh skupin; nobenega lastnikovega zapisa ne smeš tiho prezreti.
+
+Pri `/prepare-plan` je pogovor zamrznjen in vsak zapis ima stabilen ID. Vprašanje
+za prikaz snippeta, dodatno razlago ali stanje naloge ni nova izvedbena zahteva.
+Manager `ready_task` obravnava samo kot razlago in zaupanja vredno zahtevo
+sestavi iz citiranih lastnikovih zapisov.
 
 Vsak atom vsebuje samo `id`, `task` in `expected_files`. Ne dodajaj drugih polj.

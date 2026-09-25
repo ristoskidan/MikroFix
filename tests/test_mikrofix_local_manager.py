@@ -196,9 +196,19 @@ class LocalManagerTests(unittest.TestCase):
         self.assertNotIn("DOSEDANJI POGOVOR", first)
         planning = manager.lead_conversation_prompt(
             "/prepare-plan", turns=[], planning_requested=True,
+            plan_intent={
+                "intent_sha256": "a" * 64,
+                "root_turn_id": "turn-0001-owner",
+                "turns": [{
+                    "turn_id": "turn-0001-owner", "role": "owner",
+                    "content": "Implement the bounded behavior",
+                }],
+            },
         )
         self.assertIn("izrecno sprožil /prepare-plan", planning)
         self.assertIn("lastnikova izbira", planning)
+        self.assertIn("turn-0001-owner", planning)
+        self.assertIn("discussion_only_turns", planning)
         self.assertEqual(
             ["reply"],
             manager.conversation_response_schema(
@@ -229,6 +239,129 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
         self.assertIn("timeout_seconds=900", source)
 
+    def test_plan_intent_keeps_root_request_and_excludes_discussion_from_task(self):
+        conversation = {"turns": [
+            {"role": "owner", "content": "Fix decimal_value", "at": "first"},
+            {"role": "lead", "content": "I found the parser", "at": "second"},
+            {"role": "owner", "content": "Show me the snippet", "at": "third"},
+        ]}
+        intent = manager.build_plan_intent(
+            conversation, repository=self.repository,
+        )
+        self.assertEqual("turn-0001-owner", intent["root_turn_id"])
+        self.assertEqual("Fix decimal_value", intent["root_request"])
+        sources = manager.validate_plan_sources({
+            "objective_source_turns": ["turn-0001-owner"],
+            "decision_source_turns": [],
+            "discussion_only_turns": ["turn-0003-owner"],
+        }, intent)
+        task = manager.trusted_plan_task(intent, sources)
+        self.assertIn("Fix decimal_value", task)
+        self.assertNotIn("Show me the snippet", task)
+        with self.assertRaisesRegex(manager.ManagerError, "root owner request"):
+            manager.validate_plan_sources({
+                "objective_source_turns": ["turn-0003-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": ["turn-0001-owner"],
+            }, intent)
+
+    def test_explicit_replace_goal_becomes_new_root_and_is_audited(self):
+        def responder(_message, **_kwargs):
+            return ({"reply": "Initial investigation complete."}, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-BRIDGE", "lead_profile": "conversation_lead",
+                "prompt_hash": "c" * 64,
+            })
+
+        conversation = manager.start_conversation(
+            "Inspect the old goal", workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=responder, snapshot_factory=self.profile_snapshot,
+        )
+        run_id = conversation["parent_run_id"]
+        replaced = manager.replace_conversation_goal(
+            run_id, "Fix only decimal_value", workspace=self.workspace,
+        )
+        intent = manager.build_plan_intent(
+            replaced, repository=self.repository,
+        )
+        self.assertEqual("turn-0003-owner", intent["root_turn_id"])
+        self.assertEqual("Fix only decimal_value", intent["root_request"])
+        self.assertEqual("goal_replacement", intent["turns"][-1]["kind"])
+        events = [
+            json.loads(path.read_text())
+            for path in sorted(
+                (self.workspace / "jobs" / run_id / "audit" / "events").glob("*.json")
+            )
+        ]
+        self.assertEqual("OWNER_REPLACED_GOAL", events[-1]["event_type"])
+        with self.assertRaisesRegex(manager.ManagerError, "superseded"):
+            manager.validate_plan_sources({
+                "objective_source_turns": [
+                    "turn-0001-owner", "turn-0003-owner",
+                ],
+                "decision_source_turns": [],
+                "discussion_only_turns": [],
+            }, intent)
+
+    def test_prepare_plan_does_not_promote_latest_explanatory_question(self):
+        def discussion_responder(_message, **_kwargs):
+            return ({"reply": "Verified explanation."}, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-DISCUSS", "lead_profile": "conversation_lead",
+                "prompt_hash": "c" * 64,
+            })
+
+        conversation = manager.start_conversation(
+            "Fix decimal_value finite-number validation", workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=discussion_responder, snapshot_factory=self.profile_snapshot,
+        )
+        run_id = conversation["parent_run_id"]
+        manager.talk(
+            "Show me the snippet", parent_run_id=run_id,
+            workspace=self.workspace, responder=discussion_responder,
+        )
+
+        def planning_responder(_message, **kwargs):
+            self.assertEqual(
+                "Fix decimal_value finite-number validation",
+                kwargs["plan_intent"]["root_request"],
+            )
+            return ({
+                "reply": "Bounded plan ready.",
+                "routing": "READY_FOR_PROCESSING",
+                "ready_task": "Show me the snippet",
+                "objective": "Fix decimal_value finite-number validation",
+                "allowed_files": ["app.py", "tests/test_app.py"],
+                "atoms": [{
+                    "id": "A1", "task": "Fix and test",
+                    "expected_files": ["app.py", "tests/test_app.py"],
+                }],
+                "constraints": ["Preserve valid values"],
+                "acceptance_criteria": ["Regression test passes"],
+                "objective_source_turns": ["turn-0001-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": ["turn-0003-owner"],
+            }, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-PLAN", "lead_profile": "conversation_lead",
+                "prompt_hash": "d" * 64,
+            })
+
+        captured = {}
+
+        def submit_stub(task, **_kwargs):
+            captured["task"] = task
+            return {"run_id": "MF-CHILD"}
+
+        with mock.patch.object(manager, "submit", side_effect=submit_stub):
+            result = manager.prepare_plan(
+                run_id, workspace=self.workspace, responder=planning_responder,
+            )
+        self.assertIn("Fix decimal_value", captured["task"])
+        self.assertNotIn("Show me the snippet", captured["task"])
+        self.assertEqual("MF-CHILD", result["active_run_id"])
     def test_role_identity_is_stable_while_model_selection_changes(self):
         resolver = lambda _url, model: (
             "a" * 64 if model == "gpt-oss:20b" else "b" * 64
@@ -242,6 +375,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=resolver,
         )
         self.assertEqual(first["profile_id"], second["profile_id"])
+        self.assertEqual(2, first["profile_version"])
         self.assertEqual(first["role"], second["role"])
         self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
         self.assertNotEqual(first["model_tag"], second["model_tag"])
@@ -357,6 +491,9 @@ class LocalManagerTests(unittest.TestCase):
                 }],
                 "constraints": ["No unrelated changes"],
                 "acceptance_criteria": ["Regression test passes"],
+                "objective_source_turns": ["turn-0001-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": ["turn-0002-lead"],
             }, {
                 "session_id": "lead-session", "memory_sha256": "b" * 64,
                 "bridge_job_id": "MF-BRIDGE", "lead_profile": "conversation_lead",
@@ -404,6 +541,18 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual(
             "conversation_lead", planner_kwargs["advisor_snapshot"]["profile_id"],
         )
+        self.assertEqual(
+            "turn-0001-owner", planner_kwargs["plan_intent"]["root_turn_id"],
+        )
+        self.assertEqual(
+            ["turn-0001-owner"],
+            planner_kwargs["source_trace"]["objective_source_turns"],
+        )
+        self.assertIn("POTRJENA IZVIRNA ZAHTEVA", run_planner.call_args.args[0])
+        self.assertIn("Implement it", run_planner.call_args.args[0])
+        self.assertNotIn(
+            "Implement the bounded behavior", run_planner.call_args.args[0],
+        )
         lifecycle = json.loads((job_dir / "task-state.json").read_text())
         self.assertEqual("AWAITING_OWNER_APPROVAL", lifecycle["state"])
         events = [
@@ -417,6 +566,11 @@ class LocalManagerTests(unittest.TestCase):
             [event["event_type"] for event in events],
         )
         self.assertEqual("MF-CHILD", conversation["active_run_id"])
+        cached = manager.prepare_plan(
+            conversation["parent_run_id"], workspace=self.workspace,
+            responder=mock.Mock(side_effect=AssertionError("must not rerun lead")),
+        )
+        self.assertEqual("MF-CHILD", cached["active_run_id"])
 
     def test_semantic_feedback_reports_all_shape_and_context_errors(self):
         invalid = model_plan(
@@ -444,6 +598,67 @@ class LocalManagerTests(unittest.TestCase):
         )
         self.assertEqual(["AGENTS.md"], trusted["context_links"]["canon"])
         self.assertEqual(["tests/test_app.py"], trusted["context_links"]["tests"])
+
+    def test_prepare_plan_reuses_cached_lead_candidate_after_validator_failure(self):
+        def conversation_responder(_message, **_kwargs):
+            return ({"reply": "Relevant code is verified."}, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-CHAT", "lead_profile": "conversation_lead",
+                "prompt_hash": "c" * 64,
+            })
+
+        conversation = manager.start_conversation(
+            "Fix decimal_value", workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=conversation_responder,
+            snapshot_factory=self.profile_snapshot,
+        )
+        planning_calls = []
+
+        def planning_responder(_message, **_kwargs):
+            planning_calls.append(True)
+            return ({
+                "reply": "Plan candidate ready.",
+                "routing": "READY_FOR_PROCESSING",
+                "ready_task": "untrusted model wording",
+                "objective": "Fix decimal_value",
+                "allowed_files": ["app.py", "tests/test_app.py"],
+                "atoms": [{
+                    "id": "A1", "task": "Fix and test",
+                    "expected_files": ["app.py", "tests/test_app.py"],
+                }],
+                "constraints": ["Preserve valid inputs"],
+                "acceptance_criteria": ["Regression test passes"],
+                "objective_source_turns": ["turn-0001-owner"],
+                "decision_source_turns": [],
+                "discussion_only_turns": ["turn-0002-lead"],
+            }, {
+                "session_id": "lead-session", "memory_sha256": "b" * 64,
+                "bridge_job_id": "MF-PLAN", "lead_profile": "conversation_lead",
+                "prompt_hash": "d" * 64,
+            })
+
+        with mock.patch.object(
+            manager, "submit", side_effect=manager.ManagerError("validator failed"),
+        ):
+            with self.assertRaisesRegex(manager.ManagerError, "validator failed"):
+                manager.prepare_plan(
+                    conversation["parent_run_id"], workspace=self.workspace,
+                    responder=planning_responder,
+                )
+        job_dir = self.workspace / "jobs" / conversation["parent_run_id"]
+        self.assertEqual(
+            "READY_FOR_PROCESSING", manager.read_task_state(job_dir)["state"],
+        )
+        with mock.patch.object(
+            manager, "submit", return_value={"run_id": "MF-CHILD"},
+        ):
+            result = manager.prepare_plan(
+                conversation["parent_run_id"], workspace=self.workspace,
+                responder=mock.Mock(side_effect=AssertionError("lead reran")),
+            )
+        self.assertEqual([True], planning_calls)
+        self.assertEqual("MF-CHILD", result["active_run_id"])
 
     def test_tool_names_cannot_be_smuggled_in_as_allowed_files(self):
         invalid = model_plan(

@@ -109,7 +109,28 @@ class LocalWebPayloadTests(unittest.TestCase):
                 self.workspace, "MF-ROOT", "/status",
             )
         self.assertIn("/prepare-plan", result["allowed_commands"])
+        self.assertIn("/replace-goal", result["allowed_commands"])
         self.assertNotIn("/approve-plan", result["allowed_commands"])
+
+    def test_replace_goal_is_dispatched_without_a_model(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "",
+            "state": "CONVERSATION", "state_label": "Pogovor", "review": {},
+        }
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "replace_conversation_goal") as replace,
+            mock.patch.object(web, "spawn_manager") as spawn,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT",
+                "/replace-goal Popravi samo decimal_value",
+            )
+        replace.assert_called_once_with(
+            "MF-ROOT", "Popravi samo decimal_value", workspace=self.workspace,
+        )
+        self.assertTrue(result["accepted"])
+        spawn.assert_not_called()
 
     def test_codex_opinion_only_prepares_clipboard_text(self):
         job = {

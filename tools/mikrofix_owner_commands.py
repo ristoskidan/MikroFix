@@ -35,6 +35,7 @@ NO_ARGUMENT = frozenset({
 REQUIRED_ARGUMENT = frozenset({
     "/codex-rejected",
     "/codex-approved",
+    "/replace-goal",
 })
 OPTIONAL_ARGUMENT = frozenset({"/codex-opinion"})
 COMMAND_NAMES = NO_ARGUMENT | REQUIRED_ARGUMENT | OPTIONAL_ARGUMENT
@@ -56,9 +57,11 @@ def parse_owner_command(message: str) -> OwnerCommand | None:
     if name in NO_ARGUMENT and argument:
         raise OwnerCommandError(f"Ukaz {name} ne sprejme dodatnega besedila.")
     if name in REQUIRED_ARGUMENT and not argument:
-        description = (
-            "razlog zavrnitve" if name == "/codex-rejected" else "commit SHA"
-        )
+        description = {
+            "/codex-rejected": "razlog zavrnitve",
+            "/codex-approved": "commit SHA",
+            "/replace-goal": "nov potrjeni cilj",
+        }[name]
         raise OwnerCommandError(f"Po ukazu {name} napiši {description}.")
     return OwnerCommand(name=name, argument=argument)
 
@@ -67,6 +70,7 @@ def help_text() -> str:
     return "\n".join((
         "Razpoložljivi ukazi:",
         "/prepare-plan — pripravi izvedbeni načrt iz pogovora",
+        "/replace-goal <nov cilj> — izrecno zamenja glavni cilj pogovora",
         "/approve-plan — dovoli in zažene potrjeni načrt",
         "/prepare-review — pripravi nespremenljiv paket za Codex",
         "/codex-rejected <razlog> — zabeleži zavrnitev",

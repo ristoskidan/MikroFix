@@ -99,6 +99,17 @@ odstraniti samo še nezaklenjeno predizbiro. Dovoljeni generacijski parametri se
 ob prvem navadnem sporočilu vključijo v schema-v3 profilni snapshot in njegov
 hash. Sprememba po nastanku naloge zahteva nov pogovor.
 
+Ob `/prepare-plan` manager zamrzne `PlanIntent`: začetno lastnikovo zahtevo,
+oštevilčene in zgoščene pogovorne zapise ter Git checkpoint. Predlog vodje mora
+cilj in poznejše odločitve povezati z ID-ji lastnikovih zapisov; pojasnjevalna
+vprašanja so `discussion_only`. Manager ne zaupa polju `ready_task`, ampak vhod
+validatorja sestavi samo iz preverjenih citatov. GPT-OSS validator prejme isti
+zamrznjeni intent in sled virov. Neznani ID-ji, manjkajoči začetni vir, prazni
+deli načrta ali prekrivanje izvedbenih in pogovornih virov se zavrnejo.
+Izrecni `/replace-goal <nov cilj>` brez modelskega klica zapiše nov lastnikov
+koren cilja; starejši lastnikovi zapisi ostanejo v auditu, vendar jih načrt ne
+sme več uporabiti kot cilj ali odločitev.
+
 Modelov dejansko vrnjeni `thinking` se lahko med pretočnim Open WebUI odgovorom
 prikaže kot zložljiv `reasoning_content`, skupaj z omejenimi oznakami orodnih
 klicev. Ta prikaz je samo sprotna diagnostika po zaključenih modelskih korakih;
