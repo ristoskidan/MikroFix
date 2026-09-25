@@ -526,7 +526,12 @@ class RunEnvironmentTests(unittest.TestCase):
                     "model": "fake-model",
                     "worker_model": "fake-worker-model",
                     "num_ctx": 65536,
-                    "worker_num_ctx": 32768,
+                    "worker_num_ctx": 65536,
+                    "worker_num_predict": 8192,
+                    "worker_think": "medium",
+                    "reviewer_num_ctx": 32768,
+                    "reviewer_num_predict": 3072,
+                    "reviewer_think": "medium",
                     "worker_keep_alive": "2m",
                     "max_steps": 12,
                 },
@@ -548,6 +553,11 @@ class RunEnvironmentTests(unittest.TestCase):
             self.assertEqual(str(environment.worktree), bridge["project"])
             self.assertEqual("fake-worker-model", bridge["model"])
             self.assertEqual(32768, bridge["num_ctx"])
+            self.assertEqual({"num_predict": 8192}, bridge["runtime_options"])
+            self.assertEqual("medium", bridge["think"])
+            self.assertEqual(32768, bridge["reviewer_num_ctx"])
+            self.assertEqual(3072, bridge["reviewer_num_predict"])
+            self.assertEqual("medium", bridge["reviewer_think"])
             self.assertEqual("2m", bridge["keep_alive"])
             self.assertEqual(
                 "GPT-OSS — lokalni izvajalec (ločena izvedbena seja)",
@@ -810,6 +820,14 @@ class LocalAdapterTests(unittest.TestCase):
             self.assertIn(str(memory), calls[0])
             self.assertIn("--parent-session-id", calls[0])
             self.assertIn("LEAD-TEST", calls[0])
+            self.assertIn("--num-ctx", calls[0])
+            self.assertEqual("32768", calls[0][calls[0].index("--num-ctx") + 1])
+            self.assertIn("--max-tokens", calls[0])
+            self.assertEqual(
+                "3072", calls[0][calls[0].index("--max-tokens") + 1]
+            )
+            self.assertIn("--thinking", calls[0])
+            self.assertEqual("medium", calls[0][calls[0].index("--thinking") + 1])
 
     def test_syntax_check_includes_unstaged_staged_and_untracked_python(self):
         adapter = LocalAdapter(Path("/worktree"), Path("/state"),

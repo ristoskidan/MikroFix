@@ -999,7 +999,14 @@ def run_planner(
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
     lead_home = Path.home() / ".local/share/mikrofix-bridge"
     gpt_model = str(template.get("model", "gpt-oss:20b"))
-    gpt_num_ctx = int(template.get("num_ctx", 131072))
+    gpt_num_ctx = min(
+        int(template.get("validator_num_ctx", template.get("num_ctx", 32768))),
+        32768,
+    )
+    gpt_num_predict = int(template.get("validator_num_predict", 4096))
+    gpt_think = str(template.get("validator_think", "low"))
+    if gpt_think not in {"low", "medium", "high"}:
+        raise ManagerError("validator_think must be low, medium or high")
     gpt_keep_alive = str(template.get("lead_keep_alive", "30m"))
     lead = ensure_context_ready(
         PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
@@ -1007,6 +1014,7 @@ def run_planner(
     )
     qwen_model = str(template.get("planning_advisor_model", QWEN_PLANNER_MODEL))
     qwen_num_ctx = int(template.get("planning_advisor_num_ctx", 32768))
+    qwen_num_predict = int(template.get("planning_advisor_num_predict", 6144))
     qwen_keep_alive = str(template.get("planning_advisor_keep_alive", "15m"))
     planning_home = lead_home / "planning-team"
     gpt_planner_lead = ensure_context_ready(
@@ -1043,6 +1051,7 @@ def run_planner(
         home: Path, *, model: str, num_ctx: int, keep_alive: str,
         system_prompt: Path, memory: dict[str, object], role: str,
         think: bool | str,
+        num_predict: int,
         require_tool_use: bool,
     ) -> Path:
         config_path = home / "config.json"
@@ -1056,6 +1065,7 @@ def run_planner(
             "project_memory": str(memory["memory_file"]),
             "parent_session_id": str(memory["session_id"]),
             "num_ctx": num_ctx,
+            "runtime_options": {"num_predict": num_predict},
             "max_steps": 60,
             "keep_alive": keep_alive,
             "think": think,
@@ -1072,14 +1082,15 @@ def run_planner(
             qwen_bridge_home, model=qwen_model, num_ctx=qwen_num_ctx,
             keep_alive=qwen_keep_alive, system_prompt=QWEN_PLANNER_SYSTEM,
             memory=advisor_memory, role="Svetovalec za razčlenjevanje", think=True,
+            num_predict=qwen_num_predict,
             require_tool_use=False,
         )
     bridge_config = write_stage_config(
         bridge_home, model=gpt_model, num_ctx=gpt_num_ctx,
         keep_alive=gpt_keep_alive, system_prompt=GPT_VALIDATOR_SYSTEM,
         memory=gpt_planner_lead,
-        role="Konfigurirani neodvisni potrjevalec načrta",
-        think="low",
+        role="Konfigurirani neodvisni potrjevalec načrta", think=gpt_think,
+        num_predict=gpt_num_predict,
         require_tool_use=True,
     )
     executor_env = {

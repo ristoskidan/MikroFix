@@ -56,11 +56,12 @@ class LocalAgentBridgeTests(unittest.TestCase):
         )
         self.assertEqual(payload["messages"][1]["content"], "naloga")
 
-    def test_gpt_oss_uses_low_reasoning_instead_of_unsupported_disable(self):
+    def test_gpt_oss_uses_selected_reasoning_instead_of_unsupported_disable(self):
         payload = bridge.build_payload(
-            "gpt-oss:20b", "kontekst", "naloga", 32768, 1200, "lekcija"
+            "gpt-oss:20b", "kontekst", "naloga", 32768, 1200, "lekcija",
+            "medium",
         )
-        self.assertEqual(payload["think"], "low")
+        self.assertEqual(payload["think"], "medium")
 
     def test_task_id_has_timestamp_and_random_suffix(self):
         now = dt.datetime(2026, 9, 19, 12, 34, 56)

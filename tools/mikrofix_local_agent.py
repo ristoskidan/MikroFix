@@ -114,6 +114,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Najvecje stevilo tokenov odgovora (privzeto 1600).",
     )
     parser.add_argument(
+        "--thinking",
+        choices=("low", "medium", "high"),
+        default="medium",
+        help="Stopnja sklepanja za GPT-OSS (privzeto medium).",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Zapiši zahtevek brez klica modela.",
@@ -214,8 +220,9 @@ def build_payload(
     num_ctx: int,
     max_tokens: int = 1600,
     lessons: str = "",
+    thinking: str = "medium",
 ) -> dict[str, object]:
-    thinking: bool | str = "low" if model.startswith("gpt-oss:") else False
+    reasoning: bool | str = thinking if model.startswith("gpt-oss:") else False
     return {
         "model": model,
         "messages": [
@@ -223,7 +230,7 @@ def build_payload(
             {"role": "user", "content": prompt},
         ],
         "stream": True,
-        "think": thinking,
+        "think": reasoning,
         "keep_alive": "15m",
         "options": {"num_ctx": num_ctx, "num_predict": max_tokens},
     }
@@ -465,7 +472,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     payload = build_payload(
-        agent["model"], context, prompt, args.num_ctx, args.max_tokens, lessons
+        agent["model"], context, prompt, args.num_ctx, args.max_tokens, lessons,
+        args.thinking,
     )
 
     print("\n--- odgovor lokalnega modela ---\n", flush=True)

@@ -173,6 +173,16 @@ changes and repeat `/prepare-plan`; `/plan-dispatch` alone sends the latest
 displayed revision to the fixed validator and deterministic manager. Roles
 after `/approve-plan` remain preconfigured in the supervisor flow.
 
+Autonomous GPT-OSS roles use separate hardware-bounded defaults on the local
+12 GiB GPU. The plan validator uses `num_ctx=32768`, `num_predict=4096` and
+`think=low`; the executor uses `num_ctx=32768`, `num_predict=8192` and
+`think=medium`; the independent local reviewer uses `num_ctx=32768`,
+`num_predict=3072` and `think=medium`. Sampling remains at the model's native
+defaults (`temperature=1`) because gpt-oss is a reasoning model; role prompts,
+reasoning effort and strict output contracts provide focus. These values are
+copied into each new run's immutable bridge configuration, so changing the
+template never mutates an already dispatched run.
+
 At `/prepare-plan`, the manager freezes an immutable, hashed `PlanIntent` with
 stable turn ids, the root owner request and the Git checkpoint. The selected
 lead must cite owner turn ids for the objective and later decisions, while

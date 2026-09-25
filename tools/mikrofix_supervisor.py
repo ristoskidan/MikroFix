@@ -246,6 +246,12 @@ class RunEnvironment:
             bridge_template.get("lead_home", state_dir / "lead-session")
         ).expanduser().resolve()
         lead = ensure_lead_session(source_root, lead_home)
+        worker_think = str(bridge_template.get("worker_think", "medium"))
+        reviewer_think = str(bridge_template.get("reviewer_think", "medium"))
+        if worker_think not in {"low", "medium", "high"}:
+            raise ValueError("worker_think must be low, medium or high")
+        if reviewer_think not in {"low", "medium", "high"}:
+            raise ValueError("reviewer_think must be low, medium or high")
         config = {
             "ollama_url": bridge_template.get("ollama_url", "http://172.17.0.1:11434/api/chat"),
             "model": bridge_template.get(
@@ -259,11 +265,22 @@ class RunEnvironment:
             ),
             "project_memory": str(lead["memory_file"]),
             "parent_session_id": str(lead["session_id"]),
-            "num_ctx": int(bridge_template.get("worker_num_ctx", 65536)),
+            "num_ctx": min(int(bridge_template.get("worker_num_ctx", 32768)), 32768),
+            "runtime_options": {
+                "num_predict": int(bridge_template.get("worker_num_predict", 8192)),
+            },
+            "think": worker_think,
             "max_steps": int(bridge_template.get("max_steps", 30)),
             "keep_alive": str(bridge_template.get("worker_keep_alive", "5m")),
             "agent_role": "GPT-OSS — lokalni izvajalec (ločena izvedbena seja)",
             "completion_policy": "supervisor_only",
+            "reviewer_num_ctx": min(
+                int(bridge_template.get("reviewer_num_ctx", 32768)), 32768
+            ),
+            "reviewer_num_predict": int(
+                bridge_template.get("reviewer_num_predict", 3072)
+            ),
+            "reviewer_think": reviewer_think,
         }
         atomic_write_immutable_json(bridge_config, config)
         metadata = {
@@ -1585,11 +1602,16 @@ class LocalAdapter:
                         "--project-memory", str(config["project_memory"]),
                         "--parent-session-id", str(config["parent_session_id"]),
                     ]
+            else:
+                config = {}
             result = self._run([
                 str(self.source_root / ".venv-server" / "bin" / "python"),
                 str(self.source_root / "tools" / "mikrofix_local_agent.py"),
                 "--agent", "reviewer",
-                "--task", prompt, "--material-file", str(path), "--max-tokens", "2200",
+                "--task", prompt, "--material-file", str(path),
+                "--num-ctx", str(config.get("reviewer_num_ctx", 32768)),
+                "--max-tokens", str(config.get("reviewer_num_predict", 3072)),
+                "--thinking", str(config.get("reviewer_think", "medium")),
                 "--output", "Specific findings followed by exactly one final verdict line.",
                 "--log-dir", str(self.state_dir / "reviews"),
                 "--console-log", str(self.state_dir / "agent-console.log"),
