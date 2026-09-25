@@ -9,7 +9,7 @@
   },
   "overrides": {
     "gpt-oss:20b": {
-      "num_ctx": 91843,
+      "num_ctx": 32768,
       "conversation_num_ctx": 16384,
       "think": "high",
       "keep_alive": "30m",

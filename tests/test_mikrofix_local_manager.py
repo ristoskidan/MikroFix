@@ -394,6 +394,9 @@ class LocalManagerTests(unittest.TestCase):
         )
 
     def test_runtime_preset_and_overrides_are_validated_and_snapshotted(self):
+        gpt_runtime = manager.model_runtime_settings("gpt-oss:20b")
+        self.assertEqual(32768, gpt_runtime["num_ctx"])
+
         selected = manager.resolve_runtime_selection(
             "qwen3:4b-thinking-2507-q8_0", preset="deep",
             overrides={"temperature": 0.5},
