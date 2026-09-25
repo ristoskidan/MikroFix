@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MikroFIX supervisor plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "objective",
+    "base_checkpoint",
+    "allowed_files",
+    "atoms",
+    "max_retries_per_atom",
+    "final_gate",
+    "constraints",
+    "context_links",
+    "acceptance_criteria"
+  ],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_-]+$"},
+    "objective": {"type": "string", "minLength": 1},
+    "owner_request": {"type": "string", "minLength": 1},
+    "base_checkpoint": {"type": "string", "minLength": 1},
+    "allowed_files": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "atoms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "task"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "task": {"type": "string", "minLength": 1},
+          "checks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "enum": [
+                "syntax_changed_python",
+                "local_agent_tests",
+                "desktop_unit_tests",
+                "central_api_tests"
+              ]
+            }
+          },
+          "expected_files": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "max_retries_per_atom": {"type": "integer", "minimum": 1, "maximum": 3},
+    "job_timeout_seconds": {
+      "type": "integer",
+      "minimum": 30,
+      "maximum": 7200,
+      "default": 1800
+    },
+    "final_gate": {"const": "AWAIT_CODEX_REVIEW"},
+    "constraints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "context_links": {
+      "type": "object",
+      "required": ["canon", "code", "tests"],
+      "additionalProperties": false,
+      "properties": {
+        "canon": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "code": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "tests": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

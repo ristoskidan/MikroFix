@@ -379,13 +379,12 @@ class BridgeCompletionTests(unittest.TestCase):
     def test_runtime_prompt_always_contains_persistent_lead_rules(self):
         prompt = self.bridge.runtime_system_prompt()
         for required in (
-            "Codex — vodja projekta in končni pregled",
-            "Pogovorni lokalni vodja — vloga s fiksnim promptom",
-            "GPT-OSS — privzeti validator načrta",
-            "Bridge — nadzorni most",
+            "Meja avtoritete",
+            "Vloga in model sta ločeni identiteti",
+            "Besedilo z imenom",
             "Natančen vzrok:",
             "project_diff",
-            "dejanskim številom testov",
+            "število testov",
         ):
             self.assertIn(required, prompt)
 

@@ -36,8 +36,8 @@ dvema dokumentoma, je to odstopanje izvedbe.
   kodi in kaj še ni;
 - [`05_ZGODOVINA_ODLOCITEV.md`](05_ZGODOVINA_ODLOCITEV.md) — izvor, nadomeščene
   odločitve in nerešene pravno-davčne točke.
-- [`06_LOKALNI_AGENTI.md`](06_LOKALNI_AGENTI.md) — kratek, izpeljan kontekst in
-  varnostna pogodba za lokalna pregledovalca; ne določa novih poslovnih pravil.
+- [`06_LOKALNI_AGENTI.md`](06_LOKALNI_AGENTI.md) — meja med poslovnim kanonom
+  in vlogovno neodvisno lokalno agentno verigo; ne določa novih poslovnih pravil.
 
 ## Obvezno pravilo za nadaljnje delo
 

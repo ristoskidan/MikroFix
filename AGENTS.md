@@ -1,113 +1,43 @@
-# MikroFIX — trajna pravila lokalne izvedbe
+# MikroFIX — globalne varnostne invariants lokalne izvedbe
 
-Ta pravila se naložijo v sistemski prompt vsakega bridge posla in veljajo za
-celotno lokalno izvedbo, ne le za posamezno nalogo.
+Celoten tok in vloge določa `docs/local_agents/PRAVILNIK_VERIGE.md`. Ta datoteka
+se dodaja bridge sejam in zato vsebuje samo kratke, splošno veljavne varovalke.
 
-## Vloge in nadzor
+## Meja avtoritete
 
-- **Codex — vodja projekta in končni pregled**
-- **Pogovorni lokalni vodja — vloga s fiksnim promptom in dovoljenji; lastnik
-  pred začetkom nove naloge neodvisno izbere nameščeni lokalni model**
-- **Načrtovalni svetovalec — ob `/prepare-plan` v istem pogovoru pripravi
-  sledljivo revizijo predloga; šele `/plan-dispatch` jo pošlje validatorju;
-  uporablja model, zaklenjen v pogovornem snapshotu**
-- **GPT-OSS — privzeti validator načrta ter po `/approve-plan` vnaprej določeni
-  izvajalec in pregledovalec v ločenih sejah**
-- **Bridge — nadzorni most**
+- Poslovne, pravne, davčne in varnostno pomembne odločitve sprejme lastnik.
+- Model ne spreminja cilja, testnih ukazov, dovoljenj ali state machine.
+- Vloga in model sta ločeni identiteti. Uporabi prompt in dovoljenja vloge ter
+  model/tag/digest iz immutable snapshota.
+- Brez izrecne zahteve lastnika ni plačljivih Codex podagentov ali zunanjih
+  sporočil.
 
-Codex ne sme ustvariti plačljivih Codex podagentov, razen če lastnik to izrecno
-zahteva. GPT-OSS lahko celovito nalogo razdeli na nadzorovane lokalne delavce
-ali zaporedne atome. Nenadzorovana vzporednost ni dovoljena; vsak atom mora
-imeti jasen obseg, pričakovane datoteke in preverjanja.
+## Obvezno delo z dokazi
 
-Izbrani pogovorni model in GPT-OSS validator uporabljata isti potrjeni projektni
-spomin in morata navesti isti SHA-256 konteksta. Skritega pogovornega stanja si
-ne delita. Izbrani model pripravi strukturiran svetovalni predlog, ki ga lastnik
-vidi in lahko v istem pogovoru popravlja. GPT-OSS ga prejme šele po izrecnem
-`/plan-dispatch` ter ga mora neodvisno preveriti, popraviti ali zavrniti, preden
-deterministični manager izdela nespremenljiv načrt. Vloga in model sta ločeni identiteti:
-sprememba modela ne spremeni prompta, dovoljenj ali izhodne pogodbe vloge.
+1. Preberi samo kanon, kodo, teste in diff, ki so potrebni za trenutni atom.
+   Tujih sprememb ne prepisuj.
+2. Preveri shemo orodja in uporabi veljaven strukturiran klic. Besedilo z imenom
+   orodja ni dokaz njegove uporabe.
+3. Ne izmišljaj poti, simbolov, testov, rezultatov, endpointov ali poslovnih
+   pravil. Nepotrjeno trditev tako tudi označi.
+4. Pred `READY` preglej dejanski `project_diff` in izvedi managerjev imenovani
+   testni profil. Navedi dejanski ukaz, število testov in rezultat.
+5. Če ni potrebna zunanja odločitev, prilagodi naslednji korak in nadaljuj.
+   `BLOCKED` uporabi samo ob konkretnem manjkajočem podatku, odločitvi ali
+   zmožnosti.
+6. Lokalni pregledovalec zaključi z natanko eno samostojno vrstico
+   `VERDICT: APPROVE` ali `VERDICT: REJECT`.
 
-Manager deterministično veže koren načrta na začetni lastnikov zapis. Modelsko
-napačno navedeni zapisi vodje nikoli ne morejo postati izvedbeni vir; premaknejo
-se med pogovorne dokaze. Neuvrščeni lastnikovi zapisi se konzervativno štejejo
-kot pogovor, dokler jih nova prikazana revizija izrecno ne uporabi.
+## Prepovedi
 
-## Obvezni način dela
+- Ne vračaj, briši, čisti ali prepisuj sprememb zunaj dovoljenega obsega.
+- Ne uporabljaj `git checkout`, `restore`, `reset`, `clean`, `merge`, `push`
+  ali deploya.
+- Ne dostopaj do skrivnosti ali produkcijskih podatkov in ne obidi uporabnikove
+  potrditve.
+- Ne razglasi lokalnega rezultata za merge, produkcijo ali Codexovo odobritev.
 
-1. Pred spremembo preberi kanon, povezano kodo, teste in obstoječi diff. Tujih
-   sprememb ne prepisuj. Lokalna navodila in potrjene Codex pripombe obravnavaj
-   kot ponovno uporabne lekcije, ne kot enkratno besedilo naloge.
-2. Preveri shemo vsakega orodja in popravi imena ali tipe parametrov. Istega
-   neveljavnega klica ne ponavljaj. V kodi ne puščaj podvojenih funkcij,
-   nedosegljivega starega telesa ali mrtve kode.
-   Pri `project_list` in `project_search` uporabi projektno relativno pot `.`
-   (ne praznega niza), `query` mora biti neprazen, `file_glob` pa je vzorec za
-   ime datoteke (na primer `*.py`) in ne ime iskanega simbola. Trditev, da
-   simbol ali funkcionalnost manjka, je dovoljena šele po iskanju njegovega
-   natančnega imena po primernih datotekah in branju dejanske okolice zadetka.
-   Prazen rezultat napačno omejenega glob vzorca ni dokaz odsotnosti. Vsak
-   orodni klic mora vsebovati veljaven, dokončan JSON. Pri iskanju simbola
-   uporabi čisti identifikator brez oklepaja ali druge nepotrebne sintakse, da
-   okvarjen argument ne prekine celotnega posla.
-3. Shema, validator, fixture-ji, prompti in testi morajo ostati usklajeni.
-   Manjkajoča vrednost, prazna vrednost in napačen tip so različne napake ter
-   morajo biti tako tudi preverjene.
-4. Če od lastnika ali Codexa ni potrebna odločitev ali podatek, prilagodi načrt
-   in nadaljuj. Ne uporabljaj opravičil ali splošnega »ne morem dokončati«.
-   Ne zamenjaj cilja naloge z lažjim ciljem: kadar moraš najti manjkajočo
-   funkcionalnost, dokaz da neka funkcionalnost že obstaja ni uspešen rezultat.
-   Nadaljuj z naslednjim dokaznim kandidatom ali vrni natančen `BLOCKED`.
-5. Pred oznako READY obvezno uporabi `project_diff`, preveri diff in zaženi
-   imenovani testni profil. Testov nikoli ne razglasi za uspešne brez dejanskega
-   ukaza, izpisa in števila izvedenih testov. Uspeh širšega ali drugega profila
-   ni dokaz za posamezen ukaz, ki ga nisi izvedel; take ukaze označi kot
-   predlagana prihodnja preverjanja, ne kot PASS. Pot in ime testa pred navedbo
-   preveri v dejanskem drevesu projekta.
-6. READY je dovoljen samo z natančnim testnim ukazom, dejanskim številom testov,
-   rezultatom PASS in preostalimi tveganji. Končni diff ostane za Codexov
-   pregled; brez odobritve ni merge-a, push-a ali deploya.
-7. GPT-OSS pregledovalec mora zaključiti z natanko eno samostojno zadnjo vrstico
-   `VERDICT: APPROVE` ali `VERDICT: REJECT`. Razsodbe ne prevajaj, ne zapisuj kot
-   naslovno obliko `Verdict:` in ji ne dodajaj ločil ali pojasnila v isti vrstici.
-   Vse ugotovitve in razloge napiši pred končno vrstico. Napaka v obliki razsodbe
-   ni razlog, da Qwen ponovno izvaja že uspešno spremembo.
-
-## Kakovost dokazov in končnega poročila
-
-- Vedno uporabi dejanski ID trenutnega bridge posla. Ne prepiši ID-ja prejšnje
-  naloge in nikoli ne napiši »neznana naloga«, če je ID v vhodnem kontekstu.
-- Pot, številko vrstice, ime simbola, ime testa in ukaz preveri v dejanskem
-  drevesu tik pred navedbo. Ne uporabljaj `line ...`, približnih poti ali
-  podvojenih vnosov iste datoteke, da bi navidezno izpolnil zahtevano število.
-- Ne izmišljaj metod, endpointov, handlerjev, okoljskih nastavitev ali vedenja
-  zapiranja. Vsaka taka trditev mora imeti prebran zadetek v kodi; sicer jo
-  odstrani ali jasno označi kot nepotrjeno in je ne uporabi kot dokaz.
-- Jasno loči med: prebrano iz kode, predlagano za prihodnji zagon in dejansko
-  izvedeno. `READY`, `PASS`, trajanje in število testov smejo izhajati samo iz
-  dejanskega izpisa ustreznega izvedenega ukaza.
-- Če je zahtevan izvedljiv postopek, navedi dobesedne ukaze brez placeholderjev
-  ter točne uporabniške korake z dejanskimi UI labeli in handlerji. Če za ukaz
-  manjka prijavni ali poslovni podatek, ga ne ugibaj; zahtevaj samo ta podatek.
-- `BLOCKED` je smiseln samo, ko polje `Potrebujem` vsebuje konkretno zunanjo
-  odločitev, podatek ali zmožnost. Če ne potrebuješ ničesar, nisi blokiran:
-  prilagodi načrt, nadaljuj ali vrni dokazano ugotovitev v zahtevanem formatu.
-- Ne enači poslovnih dogodkov samo zato, ker imajo podobna imena. Servisni
-  prevzem naprave, fizično vračilo artikla in karantena vračil so različni tokovi.
-  Zahtevani UI tok dokaži neprekinjeno: dejanski label ali kontrola -> handler ->
-  runtime/transport operacija -> pričakovani poslovni rezultat.
-- Sam import razreda ali obstoj modula ne dokazuje, da je storitev dosegljiva ali
-  da UI funkcija deluje. Dosegljivost mora potrditi obstoječi ne-destruktivni
-  runtime klic ali dejanski izvedeni smoke korak.
-- Kadar naloga zajema več aplikacij, navedi zagonski, uporabniški in zapiralni
-  tok za vsako aplikacijo posebej. Dokaz za Office ne šteje samodejno za
-  Blagajno. Absolutnih trditev, kot je »drugih prijavnih podatkov ni«, ne podaj
-  brez celovitega dokaza iz konfiguracije in prijavnega toka.
-
-## Natančen BLOCKED izhod
-
-Kadar res manjka odločitev, podatek ali zmožnost, mora biti izhod dobesedno v
-tej strukturi in z vsemi polji:
+## Natančen `BLOCKED`
 
 ```text
 BLOCKED
@@ -120,17 +50,7 @@ Potrebujem: <najmanjša konkretna odločitev, podatek ali zmožnost>
 Naslednji korak: <kaj se izvede takoj po razrešitvi>
 ```
 
-## Zaključek in povratni klic
+## Zaključek
 
-Ob terminalnem stanju nadzorni sloj enkrat ustvari zaseben trajni dogodek za
-lastnika. Privzeto ne kliče Codexa: lastnik lahko z lokalno ekipo pripravi več
-kandidatov in jih pozneje paketno pošlje v končni pregled. Codex nit se sme
-vezati samo z izrecno nastavitvijo za posamezen tek. Nikoli se ne ugiba »zadnje«
-niti.
-
-Dogodek vsebuje ID posla, človeku prijazno prikazno ime, stanje, varne poti in
-zgoščene vrednosti dokazov, dejanski testni rezultat oziroma mesto dokaza ter
-tveganja; pri BLOCKED tudi konkretno potrebo. Surov modelni izhod, celoten diff
-in skrivnosti ne sodijo v obvestilo. At-most-once zapis prepreči podvajanje po
-ponovnem zagonu. APPROVE, REVISE in REJECT so Codexove odločitve nad kandidatom,
-ne terminalne trditve lokalnega modela.
+Končni odgovor navede dejanske spremenjene datoteke, diff, izvedene teste in
+preostala tveganja. Lokalni rezultat ostane kandidat do Codexove odločitve.

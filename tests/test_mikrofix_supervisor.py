@@ -355,8 +355,8 @@ class PlanValidationTests(unittest.TestCase):
             "tools/mikrofix_bridge.py",
             "tools/local_executor/server.py",
             "tools/mikrofix_local_agent.py",
-            "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md",
-            "docs/local_agents/pravila/00_JEDRO.md",
+            "docs/local_agents/roles/EXECUTOR_SYSTEM.md",
+            "docs/local_agents/pravila/00_AVTORITETA.md",
             "docs/local_agents/LEKCIJE.md",
         ):
             with self.subTest(protected=protected), self.assertRaises(ValueError):
@@ -459,7 +459,7 @@ class PlanValidationTests(unittest.TestCase):
         self.assertIn("canon", prompt)
         self.assertIn("code", prompt)
         self.assertIn("tests", prompt)
-        self.assertIn("Codex — vodja projekta in končni pregled", prompt)
+        self.assertIn("Codex — končni tehnični pregled", prompt)
 
     def test_supervised_run_requires_gui_prompt_no_yes(self):
         lease_request = {"command": "grant-lease", "minutes": 15}
@@ -490,10 +490,8 @@ class RunEnvironmentTests(unittest.TestCase):
         reviewer.write_text("# trusted reviewer\n", encoding="utf-8")
         control.write_text("# trusted lease controller\n", encoding="utf-8")
         for relative in (
-            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
-            "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md",
-            "docs/local_agents/LEKCIJE.md",
-            "docs/local_agents/supervisor/PROTOCOL_V2.md",
+            "docs/local_agents/PRAVILNIK_VERIGE.md",
+            "docs/local_agents/roles/EXECUTOR_SYSTEM.md",
         ):
             context = source / relative
             context.parent.mkdir(parents=True, exist_ok=True)
@@ -560,16 +558,22 @@ class RunEnvironmentTests(unittest.TestCase):
             self.assertEqual("medium", bridge["reviewer_think"])
             self.assertEqual("2m", bridge["keep_alive"])
             self.assertEqual(
-                "GPT-OSS — lokalni izvajalec (ločena izvedbena seja)",
+                "Lokalni izvajalec (ločena izvedbena seja)",
                 bridge["agent_role"],
             )
             self.assertEqual(
-                str(source / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"),
+                str(source / "docs/local_agents/roles/EXECUTOR_SYSTEM.md"),
                 bridge["system_prompt"],
             )
             self.assertEqual("supervisor_only", bridge["completion_policy"])
             self.assertTrue(bridge["parent_session_id"].startswith("LEAD-"))
             self.assertTrue(Path(bridge["project_memory"]).is_file())
+            executor_context = Path(bridge["project_memory"]).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("PRAVILNIK_VERIGE.md", executor_context)
+            self.assertNotIn("LEKCIJE.md", executor_context)
+            self.assertNotIn("MASTER_SPECIFIKACIJA", executor_context)
             self.assertEqual(str(environment.executor_config_dir / "token"),
                              bridge["token_file"])
             allowed = json.loads(
@@ -790,7 +794,7 @@ class LocalAdapterTests(unittest.TestCase):
                 calls[1][:2],
             )
 
-    def test_reviewer_inherits_parent_session_context(self):
+    def test_reviewer_does_not_inherit_executor_session_context(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             worktree = base / "worktree"
@@ -816,10 +820,8 @@ class LocalAdapterTests(unittest.TestCase):
 
             adapter._run = fake_run
             self.assertTrue(adapter.review("review it", "diff").ok)
-            self.assertIn("--project-memory", calls[0])
-            self.assertIn(str(memory), calls[0])
-            self.assertIn("--parent-session-id", calls[0])
-            self.assertIn("LEAD-TEST", calls[0])
+            self.assertNotIn("--project-memory", calls[0])
+            self.assertNotIn("--parent-session-id", calls[0])
             self.assertIn("--num-ctx", calls[0])
             self.assertEqual("32768", calls[0][calls[0].index("--num-ctx") + 1])
             self.assertIn("--max-tokens", calls[0])
@@ -1055,10 +1057,8 @@ class WorkerManagerTests(unittest.TestCase):
         (tools / "mikrofix_local_agent.py").write_text("# reviewer\n", encoding="utf-8")
         (tools / "local_executor/control.py").write_text("# control\n", encoding="utf-8")
         for relative in (
-            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
-            "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md",
-            "docs/local_agents/LEKCIJE.md",
-            "docs/local_agents/supervisor/PROTOCOL_V2.md",
+            "docs/local_agents/PRAVILNIK_VERIGE.md",
+            "docs/local_agents/roles/EXECUTOR_SYSTEM.md",
         ):
             context = self.source / relative
             context.parent.mkdir(parents=True, exist_ok=True)

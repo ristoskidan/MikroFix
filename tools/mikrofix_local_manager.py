@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Owner-facing intake and GPT-OSS planning for supervised local work."""
+"""Owner-facing intake and role-based planning for supervised local work."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ try:
         prepare_review, record_codex_approved, record_codex_rejected,
     )
     from tools.mikrofix_lead_session import (
-        PLANNING_SOURCES, ensure_context_ready, ensure_conversation_session,
+        ensure_context_ready, ensure_conversation_session, select_planning_sources,
     )
     from tools.mikrofix_supervisor import (
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
@@ -41,7 +41,7 @@ except ModuleNotFoundError:
         prepare_review, record_codex_approved, record_codex_rejected,
     )
     from mikrofix_lead_session import (  # type: ignore[no-redef]
-        PLANNING_SOURCES, ensure_context_ready, ensure_conversation_session,
+        ensure_context_ready, ensure_conversation_session, select_planning_sources,
     )
     from mikrofix_supervisor import (  # type: ignore[no-redef]
         PROJECT_ROOT, atomic_write_immutable_json, atomic_write_json,
@@ -79,15 +79,15 @@ BRIDGE_TOOL_NAMES = {
     "project_diff", "project_apply_patch", "project_create", "project_replace",
     "project_run_check", "system_command", "desktop_inspect", "desktop_action",
 }
-QWEN_PLANNER_MODEL = "qwen3:4b-thinking-2507-q8_0"
-QWEN_PLANNER_SYSTEM = (
-    PROJECT_ROOT / "docs/local_agents/supervisor/QWEN_PLANNER_SYSTEM.md"
+PLANNING_DRAFTER_MODEL = "qwen3:4b-thinking-2507-q8_0"
+PLAN_DRAFTER_SYSTEM = (
+    PROJECT_ROOT / "docs/local_agents/roles/PLAN_DRAFTER_SYSTEM.md"
 )
 GPT_VALIDATOR_SYSTEM = (
-    PROJECT_ROOT / "docs/local_agents/supervisor/PLANNER_SYSTEM.md"
+    PROJECT_ROOT / "docs/local_agents/roles/PLAN_VALIDATOR_SYSTEM.md"
 )
 LEAD_CONVERSATION_SYSTEM = (
-    PROJECT_ROOT / "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md"
+    PROJECT_ROOT / "docs/local_agents/roles/CONVERSATION_LEAD_SYSTEM.md"
 )
 MAX_CONVERSATION_TURNS = 40
 
@@ -1008,20 +1008,17 @@ def run_planner(
     if gpt_think not in {"low", "medium", "high"}:
         raise ManagerError("validator_think must be low, medium or high")
     gpt_keep_alive = str(template.get("lead_keep_alive", "30m"))
-    lead = ensure_context_ready(
-        PROJECT_ROOT, lead_home, ollama_url=str(template["ollama_url"]),
-        model=gpt_model, num_ctx=gpt_num_ctx, keep_alive=gpt_keep_alive,
-    )
-    qwen_model = str(template.get("planning_advisor_model", QWEN_PLANNER_MODEL))
+    qwen_model = str(template.get("planning_advisor_model", PLANNING_DRAFTER_MODEL))
     qwen_num_ctx = int(template.get("planning_advisor_num_ctx", 32768))
     qwen_num_predict = int(template.get("planning_advisor_num_predict", 6144))
     qwen_keep_alive = str(template.get("planning_advisor_keep_alive", "15m"))
     planning_home = lead_home / "planning-team"
+    planning_sources = select_planning_sources(PROJECT_ROOT, task)
     gpt_planner_lead = ensure_context_ready(
         PROJECT_ROOT, planning_home / "gpt-oss",
         ollama_url=str(template["ollama_url"]), model=gpt_model,
         num_ctx=min(gpt_num_ctx, 32768), keep_alive=gpt_keep_alive,
-        sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
+        sources=planning_sources, memory_name="PLAN_VALIDATOR_CONTEXT.md",
     )
     advisor_memory: dict[str, object] | None = None
     if advisor_proposal is None:
@@ -1029,7 +1026,7 @@ def run_planner(
             PROJECT_ROOT, planning_home / "advisor",
             ollama_url=str(template["ollama_url"]), model=qwen_model,
             num_ctx=qwen_num_ctx, keep_alive=qwen_keep_alive,
-            sources=PLANNING_SOURCES, memory_name="SHARED_PLANNING_MEMORY.md",
+            sources=planning_sources, memory_name="PLAN_DRAFTER_CONTEXT.md",
         )
         if advisor_memory["memory_sha256"] != gpt_planner_lead["memory_sha256"]:
             raise ManagerError(
@@ -1080,8 +1077,8 @@ def run_planner(
     if advisor_memory is not None:
         advisor_config = write_stage_config(
             qwen_bridge_home, model=qwen_model, num_ctx=qwen_num_ctx,
-            keep_alive=qwen_keep_alive, system_prompt=QWEN_PLANNER_SYSTEM,
-            memory=advisor_memory, role="Svetovalec za razčlenjevanje", think=True,
+            keep_alive=qwen_keep_alive, system_prompt=PLAN_DRAFTER_SYSTEM,
+            memory=advisor_memory, role="Rezervni pripravljalec načrta", think=True,
             num_predict=qwen_num_predict,
             require_tool_use=False,
         )

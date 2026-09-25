@@ -1,0 +1,57 @@
+{
+  "schema_version": 2,
+  "profiles": {
+    "gpt_oss": {
+      "version": 5,
+      "model": "gpt-oss:20b",
+      "role": "lead",
+      "display_name": "GPT-OSS 20B vodja",
+      "num_ctx": 131072,
+      "conversation_num_ctx": 16384,
+      "think": "high",
+      "system_prompt": "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md",
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m",
+      "enabled": true
+    },
+    "qwen_14b": {
+      "version": 6,
+      "model": "qwen3:14b-q4_K_M",
+      "role": "planning_advisor",
+      "display_name": "Qwen3 14B načrtovalni svetovalec",
+      "num_ctx": 40960,
+      "conversation_num_ctx": 16384,
+      "think": true,
+      "system_prompt": "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md",
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m",
+      "enabled": false
+    },
+    "deepseek_r1_14b": {
+      "version": 6,
+      "model": "deepseek-r1:14b",
+      "role": "unassigned_candidate",
+      "display_name": "DeepSeek R1 14B kandidat brez aktivne vloge",
+      "num_ctx": 131072,
+      "conversation_num_ctx": 16384,
+      "think": true,
+      "system_prompt": "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md",
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m",
+      "enabled": false
+    },
+    "qwen_thinking": {
+      "version": 6,
+      "model": "qwen3:4b-thinking-2507-q8_0",
+      "role": "legacy_planning_advisor",
+      "display_name": "Qwen3 4B Thinking starejši svetovalec",
+      "num_ctx": 131072,
+      "conversation_num_ctx": 16384,
+      "think": true,
+      "system_prompt": "docs/local_agents/supervisor/LEAD_CONVERSATION_SYSTEM.md",
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m",
+      "enabled": false
+    }
+  }
+}

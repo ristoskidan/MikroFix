@@ -28,11 +28,16 @@ WORKSPACE_DIRS = (
 )
 KNOWLEDGE_PATHS = (
     "AGENTS.md",
-    "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
+    "docs/kanon/00_KAZALO.md",
+    "docs/kanon/01_POSLOVNA_PRAVILA.md",
+    "docs/kanon/02_CILJNA_ARHITEKTURA.md",
+    "docs/kanon/03_SPREJEMNI_TESTI.md",
+    "docs/kanon/04_STANJE_IZVEDBE.md",
+    "docs/kanon/05_ZGODOVINA_ODLOCITEV.md",
     "docs/local_agents/README.md",
-    "docs/local_agents/STANJE.md",
-    "docs/local_agents/LEKCIJE.md",
+    "docs/local_agents/PRAVILNIK_VERIGE.md",
     "docs/local_agents/pravila",
+    "docs/local_agents/roles",
 )
 
 

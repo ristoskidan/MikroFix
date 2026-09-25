@@ -12,18 +12,55 @@ import uuid
 
 
 SOURCES = (
-    "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
-    "MIKROFIX_v30_MASTER_SPECIFIKACIJA.md",
-    "docs/local_agents/LEKCIJE.md",
-    "docs/local_agents/supervisor/PROTOCOL_V2.md",
+    "docs/local_agents/PRAVILNIK_VERIGE.md",
+    "docs/kanon/00_KAZALO.md",
+    "docs/kanon/01_POSLOVNA_PRAVILA.md",
+    "docs/kanon/02_CILJNA_ARHITEKTURA.md",
+    "docs/kanon/03_SPREJEMNI_TESTI.md",
 )
 
 PLANNING_SOURCES = (
-    "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
-    "docs/local_agents/LEKCIJE.md",
-    "docs/local_agents/supervisor/PROTOCOL_V2.md",
-    "AGENTS.md",
+    "docs/local_agents/PRAVILNIK_VERIGE.md",
+    "docs/kanon/00_KAZALO.md",
+    "docs/kanon/01_POSLOVNA_PRAVILA.md",
+    "docs/kanon/02_CILJNA_ARHITEKTURA.md",
+    "docs/kanon/03_SPREJEMNI_TESTI.md",
 )
+
+EXECUTION_SOURCES = (
+    "docs/local_agents/PRAVILNIK_VERIGE.md",
+)
+
+
+def select_planning_sources(project_root: Path, text: str) -> tuple[str, ...]:
+    """Select current canonical sources without exposing history by default."""
+    index_path = project_root / "docs/local_agents/pravila/INDEX.json"
+    try:
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Cannot read canonical module index: {index_path}") from exc
+    scopes = index.get("scopes")
+    if index.get("version") != 2 or not isinstance(scopes, dict):
+        raise RuntimeError("Canonical module index must be version 2")
+    haystack = text.casefold()
+    selected = [
+        str(definition["source"])
+        for definition in scopes.values()
+        if isinstance(definition, dict)
+        and isinstance(definition.get("keywords"), list)
+        and any(str(keyword).casefold() in haystack for keyword in definition["keywords"])
+    ]
+    if not selected:
+        selected = [
+            "docs/kanon/01_POSLOVNA_PRAVILA.md",
+            "docs/kanon/02_CILJNA_ARHITEKTURA.md",
+            "docs/kanon/03_SPREJEMNI_TESTI.md",
+        ]
+    return tuple(dict.fromkeys((
+        "docs/local_agents/PRAVILNIK_VERIGE.md",
+        "docs/kanon/00_KAZALO.md",
+        *selected,
+    )))
 
 CONVERSATION_MEMORY = """# MikroFIX — lahki pogovorni kontekst
 
@@ -42,7 +79,7 @@ def _atomic_text(path: Path, content: str) -> None:
 
 def ensure_lead_session(
     project_root: Path, home: Path, *, sources: tuple[str, ...] = SOURCES,
-    memory_name: str = "GPT_OSS_LEAD_MEMORY.md",
+    memory_name: str = "ROLE_CONTEXT.md",
     profile_snapshot_hash: str = "", model: str = "", model_digest: str = "",
 ) -> dict[str, object]:
     """Create or refresh the one parent context without model-side file reads."""
@@ -50,10 +87,10 @@ def ensure_lead_session(
     home = home.expanduser().resolve()
     manifest: dict[str, str] = {}
     sections = [
-        "# MikroFIX — trajni kontekst glavnega lokalnega vodje\n",
-        "Ta kontekst je že naložen in velja tudi za vse podizvajalce z istim "
-        "parent_session_id. Jedrnih virov pri vsaki nalogi ne odpiraj znova. "
-        "Preveri samo konkretno kodo in teste trenutne naloge.\n",
+        "# MikroFIX — nespremenljiv kontekst vloge\n",
+        "Ta omejeni kontekst pripada eni vlogi in enemu parent_session_id. "
+        "Ne pomeni, da podrejena vloga podeduje celotni spomin nadrejene. "
+        "Za trenutno nalogo preveri samo konkretno kodo in teste.\n",
     ]
     for relative in sources:
         content = (project_root / relative).read_text(encoding="utf-8")
@@ -191,7 +228,7 @@ def ensure_context_ready(
     project_root: Path, home: Path, *, ollama_url: str, model: str,
     num_ctx: int = 131072, keep_alive: str = "30m",
     sources: tuple[str, ...] = SOURCES,
-    memory_name: str = "GPT_OSS_LEAD_MEMORY.md",
+    memory_name: str = "ROLE_CONTEXT.md",
     profile_snapshot_hash: str = "", model_digest: str = "",
 ) -> dict[str, object]:
     """Ask the lead for one acknowledgement only when trusted context changed."""

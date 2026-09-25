@@ -23,7 +23,9 @@ import uuid
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONTEXT = PROJECT_ROOT / "docs" / "MIKROFIX_GPT_OSS_20B_KONTEKST.md"
+DEFAULT_CONTEXT = (
+    PROJECT_ROOT / "docs" / "local_agents" / "roles" / "LOCAL_REVIEWER_SYSTEM.md"
+)
 DEFAULT_LESSONS = PROJECT_ROOT / "docs" / "local_agents" / "LEKCIJE.md"
 DEFAULT_RULES_DIR = PROJECT_ROOT / "docs" / "local_agents" / "pravila"
 DEFAULT_LOG_DIR = PROJECT_ROOT / "docs" / "local_agents" / "dnevnik"
@@ -147,25 +149,33 @@ def build_user_prompt(task: str, material: str, requested_output: str) -> str:
 
 def load_scoped_context(
     rules_dir: Path,
-    canonical_path: Path,
+    role_prompt_path: Path,
     requested_scopes: list[str],
     searchable_text: str,
 ) -> tuple[str, list[tuple[Path, str]], list[str]]:
     rules_dir = rules_dir.expanduser().resolve()
-    canonical_path = canonical_path.expanduser().resolve()
+    role_prompt_path = role_prompt_path.expanduser().resolve()
     index_path = rules_dir / "INDEX.json"
     try:
         index = json.loads(index_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"Napaka pri branju indeksa pravil '{index_path}': {exc}") from exc
 
-    canonical = read_text(canonical_path, "kanoničnega konteksta")
-    canonical_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    if canonical_hash != index.get("source_sha256"):
-        raise SystemExit(
-            "Moduli pravil niso usklajeni s kanoničnim kontekstom. Zaženi "
-            "python3 tools/build_local_agent_rules.py."
-        )
+    sources = index.get("sources")
+    if index.get("version") != 2 or not isinstance(sources, dict):
+        raise SystemExit("Indeks ciljnih kanoničnih modulov ni različice 2.")
+    for relative, expected_hash in sources.items():
+        source_path = Path(str(relative)).expanduser()
+        if not source_path.is_absolute():
+            source_path = PROJECT_ROOT / source_path
+        source_path = source_path.resolve()
+        content = read_text(source_path, "kanoničnega vira")
+        actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if actual_hash != expected_hash:
+            raise SystemExit(
+                "Moduli pravil niso usklajeni s kanonom. Zaženi "
+                "python3 tools/build_local_agent_rules.py."
+            )
 
     scopes = index.get("scopes", {})
     unknown = sorted(set(requested_scopes) - set(scopes) - {"all"})
@@ -187,13 +197,20 @@ def load_scoped_context(
             if any(keyword.casefold() in haystack for keyword in definition["keywords"])
         ]
         if not selected:
-            selected = list(scopes)
+            selected = [
+                name for name in ("business", "architecture", "acceptance")
+                if name in scopes
+            ]
+            if not selected:
+                selected = list(scopes)
 
     file_names = list(index.get("always", []))
     file_names.extend(scopes[name]["file"] for name in selected)
     file_names = list(dict.fromkeys(file_names))
-    loaded: list[tuple[Path, str]] = []
-    blocks: list[str] = []
+    role_prompt = read_text(role_prompt_path, "prompta vloge")
+    role_hash = hashlib.sha256(role_prompt.encode("utf-8")).hexdigest()
+    loaded: list[tuple[Path, str]] = [(role_prompt_path, role_hash)]
+    blocks: list[str] = [role_prompt.strip()]
     for file_name in file_names:
         path = (rules_dir / file_name).resolve()
         if path.parent != rules_dir:
@@ -207,10 +224,7 @@ def load_scoped_context(
 
 def build_system_prompt(context: str, lessons: str = "") -> str:
     """Adapt the reusable chat context for a one-shot delegated API call."""
-    lesson_block = ""
-    if lessons.strip():
-        lesson_block = "\n\n---\nTRAJNE POTRJENE LEKCIJE:\n" + lessons.strip()
-    return context.rstrip() + lesson_block + BRIDGE_SYSTEM_SUFFIX
+    return context.rstrip() + BRIDGE_SYSTEM_SUFFIX
 
 
 def build_payload(
@@ -226,7 +240,7 @@ def build_payload(
     return {
         "model": model,
         "messages": [
-            {"role": "system", "content": build_system_prompt(context, lessons)},
+            {"role": "system", "content": build_system_prompt(context)},
             {"role": "user", "content": prompt},
         ],
         "stream": True,
@@ -288,8 +302,8 @@ def transcript(
 - Izbrani obsegi: `{', '.join(selected_scopes)}`
 - Naloženi moduli:
 {os.linesep.join(f'  - `{path}` — `{digest}`' for path, digest in context_files)}
-- Potrjene lekcije: `{lessons_path}`
-- SHA-256 lekcij: `{lessons_hash}`
+- Interni eval-dnevnik (ni poslan modelu): `{lessons_path}`
+- SHA-256 internega eval-dnevnika: `{lessons_hash}`
 - Stanje: **{status}**
 - Odločitev glavnega pomočnika: **ČAKA NA PREGLED**
 
@@ -399,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         context_path,
         args.context,
         args.scope,
-        task + "\n" + args.output,
+        task + "\n" + args.output + "\n" + material,
     )
     if args.project_memory:
         memory_path = args.project_memory.expanduser().resolve()

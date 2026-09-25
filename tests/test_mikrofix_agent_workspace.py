@@ -27,11 +27,16 @@ class AgentWorkspaceTests(unittest.TestCase):
         self.git("config", "user.name", "Test")
         required = {
             "AGENTS.md": "rules\n",
-            "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md": "canon\n",
+            "docs/kanon/00_KAZALO.md": "index\n",
+            "docs/kanon/01_POSLOVNA_PRAVILA.md": "business\n",
+            "docs/kanon/02_CILJNA_ARHITEKTURA.md": "architecture\n",
+            "docs/kanon/03_SPREJEMNI_TESTI.md": "acceptance\n",
+            "docs/kanon/04_STANJE_IZVEDBE.md": "state\n",
+            "docs/kanon/05_ZGODOVINA_ODLOCITEV.md": "history\n",
             "docs/local_agents/README.md": "readme\n",
-            "docs/local_agents/STANJE.md": "state\n",
-            "docs/local_agents/LEKCIJE.md": "lessons\n",
-            "docs/local_agents/pravila/00_JEDRO.md": "core\n",
+            "docs/local_agents/PRAVILNIK_VERIGE.md": "chain\n",
+            "docs/local_agents/pravila/00_AVTORITETA.md": "core\n",
+            "docs/local_agents/roles/EXECUTOR_SYSTEM.md": "executor\n",
             "app.py": "print('baseline')\n",
         }
         for relative, content in required.items():

@@ -1,0 +1,153 @@
+{
+  "always": [
+    "00_JEDRO.md"
+  ],
+  "scopes": {
+    "architecture": {
+      "file": "10_ARHITEKTURA_IN_DOSTOP.md",
+      "keywords": [
+        "arhitektura",
+        "api",
+        "postgresql",
+        "sqlite",
+        "prijava",
+        "pin",
+        "uporabnik",
+        "dovoljen",
+        "vloga",
+        "seja",
+        "operation_id",
+        "idempot",
+        "sočas",
+        "concurr",
+        "workstation",
+        "delovna postaja"
+      ]
+    },
+    "buyback": {
+      "file": "60_ODKUP_IN_POOBLASTILO.md",
+      "keywords": [
+        "odkup",
+        "pooblast",
+        "pooblaščen",
+        "prodajalec",
+        "pogodba",
+        "otp",
+        "sigen",
+        "prevzem naprav",
+        "lastništvo",
+        "kratkotrajno delo"
+      ]
+    },
+    "documents": {
+      "file": "50_DOKUMENTI_ZASEBNOST_GARANCIJE.md",
+      "keywords": [
+        "dokument",
+        "zasebnost",
+        "garanc",
+        "reklamac",
+        "fotograf",
+        "pin",
+        "gesl",
+        "imei",
+        "hramba",
+        "retenc",
+        "stranka"
+      ]
+    },
+    "implementation": {
+      "file": "80_STANJE_IZVEDBE.md",
+      "keywords": [
+        "implement",
+        "izvedb",
+        "koda",
+        "test",
+        "produkc",
+        "napredek",
+        "stanje",
+        "manjka",
+        "runtime",
+        "strežnik"
+      ]
+    },
+    "invoices": {
+      "file": "40_RACUNI_BLAGAJNA_FURS.md",
+      "keywords": [
+        "račun",
+        "invoice",
+        "blagaj",
+        "cashier",
+        "furs",
+        "storno",
+        "plačil",
+        "payment",
+        "rabat",
+        "popust",
+        "vrstic",
+        "f10",
+        "zoi",
+        "eor",
+        "ničel",
+        "0,00",
+        "zero_balance",
+        "trr",
+        "gotovin"
+      ]
+    },
+    "pricing": {
+      "file": "70_CENE_IN_FORMULE.md",
+      "keywords": [
+        "cena",
+        "cenik",
+        "formula",
+        "l0",
+        "t1",
+        "t2",
+        "marža",
+        "rabat",
+        "diagnostika",
+        "minimum",
+        "minimalna cena",
+        "odkupna formula"
+      ]
+    },
+    "service": {
+      "file": "20_SERVICE.md",
+      "keywords": [
+        "servis",
+        "service",
+        "čas",
+        "interval",
+        "microdetect",
+        "imei",
+        "naprav",
+        "tehnični zaključek",
+        "obračunski paket",
+        "fotograf"
+      ]
+    },
+    "stock_offline": {
+      "file": "30_ZALOGA_OFFLINE_IN_INVENTURA.md",
+      "keywords": [
+        "zaloga",
+        "artikel",
+        "del",
+        "stock",
+        "inventory",
+        "inventura",
+        "offline",
+        "sinhron",
+        "outbox",
+        "črtna koda",
+        "barkod",
+        "lot",
+        "dobavnica",
+        "donor",
+        "sync_conflict"
+      ]
+    }
+  },
+  "source": "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
+  "source_sha256": "bfbdb19e9c2f6f2aab3b98e2b90ac01922ab9a5bd82dc14137484f1023c6a5e1",
+  "version": 1
+}

@@ -1,8 +1,10 @@
 # MikroFIX local supervisor
 
-Supervisor is the fail-closed coordinator above the existing Qwen bridge. It
+Supervisor is the fail-closed coordinator above the local executor bridge. It
 turns an owner-approved JSON plan into bounded implementation attempts, local
-checks, a GPT-OSS review and an immutable candidate patch for Codex review.
+checks, an independent local review and an immutable candidate patch for Codex
+review. Role contracts are model-independent and are defined in
+`docs/local_agents/PRAVILNIK_VERIGE.md`.
 
 The trusted control checkout and the agent-owned candidate repository may be
 different paths. Pass `--repository-root /path/to/agent/repository` before the
@@ -26,6 +28,11 @@ PLANNED -> NEEDS_WRITE_LEASE -> PLANNED
 any failed gate -> PLANNED (maximum three attempts) or BLOCKED
 out-of-scope mutation -> BLOCKED immediately
 ```
+
+`DISPATCHED_TO_QWEN` and `GPT_OSS_REVIEW` are legacy serialized state labels.
+They remain unchanged so old runs can still be read; they now mean the
+model-independent `executor` and `local_reviewer` stages respectively and do
+not select a model.
 
 `CHECKPOINT` creates `candidate.patch` and `manifest.json` below
 `~/.local/state/mikrofix-supervisor/artifacts/<run-id>/`. It does not create a
@@ -60,7 +67,7 @@ Initialization creates, but does not launch:
 - the exact per-run lease path.
 
 The bridge process is the versioned `tools/mikrofix_bridge.py` from the trusted
-source checkout, invoked by absolute path. The executor module and GPT-OSS
+source checkout, invoked by absolute path. The executor module and local
 reviewer are likewise loaded from the trusted source checkout; none of these
 control-plane programs is imported from the agent-editable worktree. The
 executor's data root remains the isolated candidate worktree.
@@ -94,7 +101,7 @@ loaded agent prompts/rules in `allowed_files`. In supervised executor mode the
 generic `system_command` and mutating `desktop_action` endpoints are disabled,
 even when a valid lease exists.
 
-Queued/running Qwen jobs have a bounded wait (`job_timeout_seconds`, default 30
+Queued/running executor jobs have a bounded wait (`job_timeout_seconds`, default 30
 minutes, allowed 30–7200 seconds). A timed-out active job moves to `BLOCKED`
 instead of dispatching a potentially concurrent replacement. Inspect and stop
 the workers before starting any later attempt.
@@ -173,8 +180,8 @@ changes and repeat `/prepare-plan`; `/plan-dispatch` alone sends the latest
 displayed revision to the fixed validator and deterministic manager. Roles
 after `/approve-plan` remain preconfigured in the supervisor flow.
 
-Autonomous GPT-OSS roles use separate hardware-bounded defaults on the local
-12 GiB GPU. The plan validator uses `num_ctx=32768`, `num_predict=4096` and
+Autonomous downstream roles currently use separately bounded defaults on the
+local 12 GiB GPU. The plan validator uses `num_ctx=32768`, `num_predict=4096` and
 `think=low`; the executor uses `num_ctx=32768`, `num_predict=8192` and
 `think=medium`; the independent local reviewer uses `num_ctx=32768`,
 `num_predict=3072` and `think=medium`. Sampling remains at the model's native

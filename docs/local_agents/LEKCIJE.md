@@ -1,8 +1,9 @@
-# Potrjene lekcije lokalnih pomočnikov MikroFix
+# Interni eval-dnevnik lokalnih modelov MikroFix
 
-Ta dokument je trajen korektivni dodatek kanoničnemu kontekstu. Most ga naloži
-pri vsaki delegirani nalogi. Lekcija ne sme spreminjati poslovnega pravila;
-zapisuje samo potrjene popravke načina pregledovanja in razlage.
+Ta dokument je namenjen lastniku in Codexu. Beleži opaženo vedenje modelov,
+učinkovitost promptov in ponavljajoče se napake. Modelom se ne pošilja in ni
+kanonični poslovni ali procesni vir. Splošno veljavna ugotovitev se po človeškem
+pregledu prenese v ustrezen prompt, shemo, test ali pravilnik verige.
 
 ## 2026-09-19 — prvi nadzorovani pregledi
 

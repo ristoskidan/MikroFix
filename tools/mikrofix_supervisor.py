@@ -31,9 +31,11 @@ import urllib.error
 import urllib.request
 
 try:
-    from tools.mikrofix_lead_session import ensure_lead_session
+    from tools.mikrofix_lead_session import EXECUTION_SOURCES, ensure_lead_session
 except ModuleNotFoundError:
-    from mikrofix_lead_session import ensure_lead_session  # type: ignore[no-redef]
+    from mikrofix_lead_session import (  # type: ignore[no-redef]
+        EXECUTION_SOURCES, ensure_lead_session,
+    )
 
 try:
     from tools.mikrofix_completion import CompletionOutbox, validate_thread_id
@@ -71,19 +73,21 @@ CONTROL_PLANE_FILES = {
     "tests/test_mikrofix_local_manager.py",
     "tests/test_mikrofix_local_manager_ui.py",
     "tests/test_mikrofix_local_web.py",
-    "docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md",
-    "docs/local_agents/LEKCIJE.md",
+    "docs/kanon/00_KAZALO.md",
+    "docs/kanon/01_POSLOVNA_PRAVILA.md",
+    "docs/kanon/02_CILJNA_ARHITEKTURA.md",
+    "docs/kanon/03_SPREJEMNI_TESTI.md",
     "docs/local_agents/WORKSPACE.md",
-    "docs/local_agents/supervisor/PLANNER_SYSTEM.md",
+    "docs/local_agents/PRAVILNIK_VERIGE.md",
+    "docs/local_agents/roles/PLAN_VALIDATOR_SYSTEM.md",
     "docs/local_agents/supervisor/PLAN_PROPOSAL_SCHEMA.json",
-    "docs/local_agents/supervisor/PROTOCOL_V2.md",
     "desktop/mikrofix-local-manager.desktop",
     "desktop/mikrofix-local-manager-autostart.desktop",
 }
 CONTROL_PLANE_PREFIXES = (
     "tools/local_executor/",
-    "docs/local_agents/izvajalec/",
     "docs/local_agents/pravila/",
+    "docs/local_agents/roles/",
     "docs/local_agents/supervisor/",
 )
 CHECK_COMMANDS: dict[str, tuple[str, ...]] = {
@@ -245,7 +249,10 @@ class RunEnvironment:
         lead_home = Path(
             bridge_template.get("lead_home", state_dir / "lead-session")
         ).expanduser().resolve()
-        lead = ensure_lead_session(source_root, lead_home)
+        lead = ensure_lead_session(
+            source_root, lead_home, sources=EXECUTION_SOURCES,
+            memory_name="EXECUTOR_CONTEXT.md",
+        )
         worker_think = str(bridge_template.get("worker_think", "medium"))
         reviewer_think = str(bridge_template.get("reviewer_think", "medium"))
         if worker_think not in {"low", "medium", "high"}:
@@ -261,7 +268,7 @@ class RunEnvironment:
             "token_file": str(executor_config_dir / "token"),
             "project": str(worktree),
             "system_prompt": str(
-                source_root / "docs/local_agents/izvajalec/QWEN_IZVAJALEC_SYSTEM.md"
+                source_root / "docs/local_agents/roles/EXECUTOR_SYSTEM.md"
             ),
             "project_memory": str(lead["memory_file"]),
             "parent_session_id": str(lead["session_id"]),
@@ -272,7 +279,7 @@ class RunEnvironment:
             "think": worker_think,
             "max_steps": int(bridge_template.get("max_steps", 30)),
             "keep_alive": str(bridge_template.get("worker_keep_alive", "5m")),
-            "agent_role": "GPT-OSS — lokalni izvajalec (ločena izvedbena seja)",
+            "agent_role": "Lokalni izvajalec (ločena izvedbena seja)",
             "completion_policy": "supervisor_only",
             "reviewer_num_ctx": min(
                 int(bridge_template.get("reviewer_num_ctx", 32768)), 32768
@@ -1068,10 +1075,9 @@ def qwen_prompt(run: dict[str, Any]) -> str:
         f"  canon: {json.dumps(plan['context_links']['canon'], ensure_ascii=False)}\n"
         f"  code: {json.dumps(plan['context_links']['code'], ensure_ascii=False)}\n"
         f"  tests: {json.dumps(plan['context_links']['tests'], ensure_ascii=False)}\n"
-        "Roles: Codex — vodja projekta in končni pregled; GPT-OSS — lokalni vodja "
-        "izvedbe in načrtovanja; GPT-OSS executor — lokalni izvajalec v ločeni "
-        "seji; GPT-OSS reviewer — skeptični pregledovalec v novi ločeni seji; "
-        "Bridge — nadzorni most. Follow the "
+        "Roles: owner — cilj in odobritev; executor — lokalni izvajalec v "
+        "ločeni seji; local_reviewer — neodvisni pregledovalec v novi seji; "
+        "Codex — končni tehnični pregled; Bridge — nadzorni most. Follow the "
         "persistent AGENTS.md rules loaded in the bridge system prompt. "
         "Make the smallest complete change. Do not modify any other file. "
         "Do not run git checkout, restore, reset, clean, commit, merge, push, "
@@ -1322,7 +1328,7 @@ class Supervisor:
                     run["review_attempt"] = 0
                     retry_or_block(
                         run,
-                        f"GPT-OSS rejected the atom: {result.summary}",
+                        f"Local reviewer rejected the atom: {result.summary}",
                         require_change=True,
                     )
                 self.save(run)
@@ -1593,15 +1599,9 @@ class LocalAdapter:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(material)
-            parent_args: list[str] = []
             config_name = self._bridge_env.get("MIKROFIX_BRIDGE_CONFIG")
             if config_name:
                 config = json.loads(Path(config_name).read_text(encoding="utf-8"))
-                if config.get("project_memory") and config.get("parent_session_id"):
-                    parent_args = [
-                        "--project-memory", str(config["project_memory"]),
-                        "--parent-session-id", str(config["parent_session_id"]),
-                    ]
             else:
                 config = {}
             result = self._run([
@@ -1615,7 +1615,6 @@ class LocalAdapter:
                 "--output", "Specific findings followed by exactly one final verdict line.",
                 "--log-dir", str(self.state_dir / "reviews"),
                 "--console-log", str(self.state_dir / "agent-console.log"),
-                *parent_args,
             ], timeout=1200, check=False)
         finally:
             path.unlink(missing_ok=True)

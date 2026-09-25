@@ -23,14 +23,17 @@ GENERATOR_SPEC.loader.exec_module(generator)
 
 
 class LocalAgentBridgeTests(unittest.TestCase):
-    def test_rule_groups_cover_every_canonical_section_exactly_once(self):
-        numbers = [
-            number
-            for definition in generator.GROUPS.values()
-            for number in definition["sections"]
-        ]
-        self.assertEqual(sorted(numbers), list(range(1, 21)))
-        self.assertEqual(len(numbers), len(set(numbers)))
+    def test_rule_modules_use_distinct_current_canonical_sources(self):
+        sources = [definition["source"] for definition in generator.MODULES.values()]
+        self.assertEqual(len(sources), len(set(sources)))
+        self.assertEqual(
+            set(sources),
+            {f"docs/kanon/0{number}_{name}.md" for number, name in (
+                (1, "POSLOVNA_PRAVILA"), (2, "CILJNA_ARHITEKTURA"),
+                (3, "SPREJEMNI_TESTI"), (4, "STANJE_IZVEDBE"),
+                (5, "ZGODOVINA_ODLOCITEV"),
+            )},
+        )
 
     def test_prompt_has_required_sections(self):
         prompt = bridge.build_user_prompt("naloga", "gradivo", "izhod")
@@ -42,7 +45,7 @@ class LocalAgentBridgeTests(unittest.TestCase):
     def test_system_prompt_skips_chat_only_acknowledgement(self):
         prompt = bridge.build_system_prompt("kanonicni kontekst", "potrjena lekcija")
         self.assertTrue(prompt.startswith("kanonicni kontekst"))
-        self.assertIn("potrjena lekcija", prompt)
+        self.assertNotIn("potrjena lekcija", prompt)
         self.assertIn("Uvodna potrditev", prompt)
         self.assertIn("Odgovori neposredno na", prompt)
 
@@ -81,14 +84,22 @@ class LocalAgentBridgeTests(unittest.TestCase):
         (rules / "00.md").write_text("jedro", encoding="utf-8")
         (rules / "40.md").write_text("računi", encoding="utf-8")
         (rules / "70.md").write_text("cene", encoding="utf-8")
+        source = root / "source.md"
+        source.write_text(canonical_text, encoding="utf-8")
         index = {
-            "source_sha256": hashlib.sha256(
+            "version": 2,
+            "sources": {str(source): hashlib.sha256(
                 canonical_text.encode("utf-8")
-            ).hexdigest(),
+            ).hexdigest()},
             "always": ["00.md"],
             "scopes": {
-                "invoices": {"file": "40.md", "keywords": ["račun", "preveri"]},
-                "pricing": {"file": "70.md", "keywords": ["cena"]},
+                "invoices": {
+                    "file": "40.md", "source": str(source),
+                    "keywords": ["račun", "preveri"],
+                },
+                "pricing": {
+                    "file": "70.md", "source": str(source), "keywords": ["cena"],
+                },
             },
         }
         (rules / "INDEX.json").write_text(
@@ -106,7 +117,9 @@ class LocalAgentBridgeTests(unittest.TestCase):
                 rules, canonical, [], "preveri račun"
             )
             self.assertEqual(scopes, ["invoices"])
-            self.assertEqual([path.name for path, _ in loaded], ["00.md", "40.md"])
+            self.assertEqual(
+                [path.name for path, _ in loaded], ["context.md", "00.md", "40.md"]
+            )
             self.assertIn("jedro", context)
             self.assertIn("računi", context)
             self.assertNotIn("cene", context)
@@ -121,7 +134,7 @@ class LocalAgentBridgeTests(unittest.TestCase):
                 rules, canonical, [], "neznana tema"
             )
             self.assertEqual(set(scopes), {"invoices", "pricing"})
-            self.assertEqual(len(loaded), 3)
+            self.assertEqual(len(loaded), 4)
 
     def test_dry_run_writes_trace_without_calling_ollama(self):
         with tempfile.TemporaryDirectory() as directory:

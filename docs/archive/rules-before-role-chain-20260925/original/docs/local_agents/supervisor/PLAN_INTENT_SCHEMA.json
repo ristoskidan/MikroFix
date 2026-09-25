@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mikrofix.local/schemas/plan-intent-v1.json",
+  "title": "MikroFIX frozen plan intent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "root_turn_id",
+    "root_request",
+    "checkpoint",
+    "turns",
+    "intent_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "root_turn_id": {"type": "string", "pattern": "^turn-[0-9]{4}-owner$"},
+    "root_request": {"type": "string", "minLength": 1},
+    "checkpoint": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "intent_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "turns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["turn_id", "role", "kind", "content", "content_sha256"],
+        "properties": {
+          "turn_id": {"type": "string", "pattern": "^turn-[0-9]{4}-(owner|lead)$"},
+          "role": {"enum": ["owner", "lead"]},
+          "kind": {"enum": ["conversation", "goal_replacement"]},
+          "content": {"type": "string", "minLength": 1},
+          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    }
+  }
+}

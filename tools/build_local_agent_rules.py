@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build small, auditable rule modules from the canonical local-agent context."""
+"""Build auditable task-scoped modules from the current MikroFIX canon."""
 
 from __future__ import annotations
 
@@ -7,87 +7,61 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = ROOT / "docs" / "MIKROFIX_GPT_OSS_20B_KONTEKST.md"
 OUTPUT = ROOT / "docs" / "local_agents" / "pravila"
 
-GROUPS = {
-    "core": {
-        "file": "00_JEDRO.md",
-        "sections": [1, 2, 3, 19, 20],
-        "keywords": [],
+MODULES = {
+    "business": {
+        "file": "10_POSLOVNA_PRAVILA.md",
+        "source": "docs/kanon/01_POSLOVNA_PRAVILA.md",
+        "keywords": [
+            "office", "servis", "service", "blagaj", "račun", "invoice",
+            "zaloga", "artikel", "furs", "storno", "plačil", "rabat",
+            "znesek", "decimal", "cena", "odkup", "garanc", "reklamac",
+            "inventura", "offline", "microdetect", "imei", "dokument",
+        ],
     },
     "architecture": {
-        "file": "10_ARHITEKTURA_IN_DOSTOP.md",
-        "sections": [4, 5, 6],
+        "file": "20_CILJNA_ARHITEKTURA.md",
+        "source": "docs/kanon/02_CILJNA_ARHITEKTURA.md",
         "keywords": [
-            "arhitektura", "api", "postgresql", "sqlite", "prijava", "pin",
-            "uporabnik", "dovoljen", "vloga", "seja", "operation_id",
-            "idempot", "sočas", "concurr", "workstation", "delovna postaja",
+            "arhitektur", "api", "postgres", "sqlite", "outbox", "sync",
+            "idempot", "operation_id", "sočas", "concurr", "stanje",
+            "transakc", "backup", "migracij",
         ],
     },
-    "service": {
-        "file": "20_SERVICE.md",
-        "sections": [7, 8, 9],
+    "acceptance": {
+        "file": "30_SPREJEMNI_TESTI.md",
+        "source": "docs/kanon/03_SPREJEMNI_TESTI.md",
         "keywords": [
-            "servis", "service", "čas", "interval", "microdetect", "imei",
-            "naprav", "tehnični zaključek", "obračunski paket", "fotograf",
-        ],
-    },
-    "stock_offline": {
-        "file": "30_ZALOGA_OFFLINE_IN_INVENTURA.md",
-        "sections": [10, 11, 14],
-        "keywords": [
-            "zaloga", "artikel", "del", "stock", "inventory", "inventura",
-            "offline", "sinhron", "outbox", "črtna koda", "barkod", "lot",
-            "dobavnica", "donor", "sync_conflict",
-        ],
-    },
-    "invoices": {
-        "file": "40_RACUNI_BLAGAJNA_FURS.md",
-        "sections": [12, 13],
-        "keywords": [
-            "račun", "invoice", "blagaj", "cashier", "furs", "storno",
-            "plačil", "payment", "rabat", "popust", "vrstic", "f10", "zoi",
-            "eor", "ničel", "0,00", "zero_balance", "trr", "gotovin",
-        ],
-    },
-    "documents": {
-        "file": "50_DOKUMENTI_ZASEBNOST_GARANCIJE.md",
-        "sections": [15],
-        "keywords": [
-            "dokument", "zasebnost", "garanc", "reklamac", "fotograf", "pin",
-            "gesl", "imei", "hramba", "retenc", "stranka",
-        ],
-    },
-    "buyback": {
-        "file": "60_ODKUP_IN_POOBLASTILO.md",
-        "sections": [16],
-        "keywords": [
-            "odkup", "pooblast", "pooblaščen", "prodajalec", "pogodba",
-            "otp", "sigen", "prevzem naprav", "lastništvo", "kratkotrajno delo",
-        ],
-    },
-    "pricing": {
-        "file": "70_CENE_IN_FORMULE.md",
-        "sections": [17],
-        "keywords": [
-            "cena", "cenik", "formula", "l0", "t1", "t2", "marža", "rabat",
-            "diagnostika", "minimum", "minimalna cena", "odkupna formula",
+            "test", "prever", "sprejem", "regres", "edge", "robna",
+            "pričakov", "scenarij", "pass", "fail",
         ],
     },
     "implementation": {
-        "file": "80_STANJE_IZVEDBE.md",
-        "sections": [18],
+        "file": "40_STANJE_IZVEDBE.md",
+        "source": "docs/kanon/04_STANJE_IZVEDBE.md",
         "keywords": [
-            "implement", "izvedb", "koda", "test", "produkc", "napredek",
-            "stanje", "manjka", "runtime", "strežnik",
+            "implement", "izvedb", "trenutno", "obstoječ", "koda",
+            "narejeno", "manjka", "produkc", "runtime",
         ],
     },
+    "history": {
+        "file": "50_ZGODOVINA_ODLOCITEV.md",
+        "source": "docs/kanon/05_ZGODOVINA_ODLOCITEV.md",
+        "keywords": [
+            "zgodovin", "odločitev", "nadomešč", "odprto", "blokad",
+            "zakaj", "izvor", "prejšnj",
+        ],
+    },
+}
+
+ALWAYS = {
+    "file": "00_AVTORITETA.md",
+    "source": "docs/kanon/00_KAZALO.md",
 }
 
 
@@ -100,6 +74,7 @@ def atomic_write(path: Path, content: str) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        path.chmod(0o644)
     except BaseException:
         try:
             os.unlink(temporary)
@@ -108,56 +83,52 @@ def atomic_write(path: Path, content: str) -> None:
         raise
 
 
-def split_sections(text: str) -> tuple[str, dict[int, str]]:
-    matches = list(re.finditer(r"(?m)^## (\d+)\. .+$", text))
-    if not matches:
-        raise ValueError("Kanon nima oštevilčenih razdelkov.")
-    preamble = text[: matches[0].start()].rstrip()
-    sections: dict[int, str] = {}
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        sections[int(match.group(1))] = text[match.start() : end].rstrip()
-    return preamble, sections
+def source_text(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def generated_module(relative: str) -> str:
+    return (
+        f"<!-- GENERIRANO iz {relative}; ne urejaj ročno. -->\n\n"
+        + source_text(relative).rstrip()
+        + "\n"
+    )
 
 
 def main() -> int:
-    source_text = SOURCE.read_text(encoding="utf-8")
-    source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-    preamble, sections = split_sections(source_text)
-    expected = set(range(1, 21))
-    if set(sections) != expected:
-        raise ValueError(f"Pričakovani razdelki 1–20, prejeti: {sorted(sections)}")
+    definitions = {"authority": ALWAYS, **MODULES}
+    sources: dict[str, str] = {}
+    expected_files: set[str] = set()
+    for definition in definitions.values():
+        relative = str(definition["source"])
+        file_name = str(definition["file"])
+        content = source_text(relative)
+        sources[relative] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        atomic_write(OUTPUT / file_name, generated_module(relative))
+        expected_files.add(file_name)
 
-    generated_header = (
-        "<!-- GENERIRANO iz docs/MIKROFIX_GPT_OSS_20B_KONTEKST.md; "
-        "ne urejaj ročno. -->\n\n"
-    )
-    for name, definition in GROUPS.items():
-        parts = [sections[number] for number in definition["sections"]]
-        if name == "core":
-            parts.insert(0, preamble)
-        content = generated_header + "\n\n---\n\n".join(parts).rstrip() + "\n"
-        atomic_write(OUTPUT / definition["file"], content)
+    for existing in OUTPUT.glob("*.md"):
+        if existing.name not in expected_files:
+            existing.unlink()
 
     index = {
-        "version": 1,
-        "source": str(SOURCE.relative_to(ROOT)),
-        "source_sha256": source_hash,
-        "always": [GROUPS["core"]["file"]],
+        "version": 2,
+        "sources": dict(sorted(sources.items())),
+        "always": [ALWAYS["file"]],
         "scopes": {
             name: {
                 "file": definition["file"],
+                "source": definition["source"],
                 "keywords": definition["keywords"],
             }
-            for name, definition in GROUPS.items()
-            if name != "core"
+            for name, definition in MODULES.items()
         },
     }
     atomic_write(
         OUTPUT / "INDEX.json",
         json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
     )
-    print(f"Izdelanih {len(GROUPS)} modulov v {OUTPUT}")
+    print(f"Izdelanih {len(definitions)} modulov v {OUTPUT}")
     return 0
 
 

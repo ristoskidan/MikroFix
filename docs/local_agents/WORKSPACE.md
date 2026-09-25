@@ -1,6 +1,7 @@
 # Ločeno delovno območje lokalnih agentov
 
-`MikroFIX_Agent_Workspace` je pripravljalno območje, ne kanonični original.
+`MikroFIX_Agent_Workspace` je pripravljalno območje sedanje vlogovno neodvisne
+verige, ne kanonični original.
 Ustvari se iz zadnjega commita zaščitenega projekta:
 
 ```bash
@@ -34,5 +35,5 @@ python3 tools/mikrofix_agent_workspace.py verify
 Po Codexovi odločitvi `REVISE` ali `REJECT` se pripombe vrnejo v izvorni job.
 Splošno uporabna ugotovitev se najprej zapiše v `proposals/`; šele Codexova
 potrditev jo sme prenesti v kanonična pravila oziroma naslednji `knowledge`
-checkpoint. Samo `APPROVE` se sme prenesti v zaščiten original in varnostne
-kopije USB A, USB B ter šifriran oblačni arhiv.
+checkpoint. Samo `APPROVE` se sme prenesti v zaščiten original; varnostna kopija
+se izvede po ločenem, lastnikovo potrjenem postopku.

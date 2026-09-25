@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mikrofix.local/schemas/role-profile-registry-v1.json",
+  "title": "MikroFIX model-independent role profiles",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "roles"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "roles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z0-9_]+$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["version", "role", "display_name", "system_prompt", "enabled"],
+        "properties": {
+          "version": {"type": "integer", "minimum": 1},
+          "role": {"type": "string", "minLength": 1},
+          "display_name": {"type": "string", "minLength": 1},
+          "system_prompt": {"type": "string", "minLength": 1},
+          "enabled": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

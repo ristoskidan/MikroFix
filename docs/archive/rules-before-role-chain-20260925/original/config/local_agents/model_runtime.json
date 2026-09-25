@@ -1,0 +1,52 @@
+{
+  "schema_version": 2,
+  "defaults": {
+    "num_ctx": 32768,
+    "conversation_num_ctx": 16384,
+    "think": true,
+    "keep_alive": "30m",
+    "conversation_keep_alive": "5m"
+  },
+  "overrides": {
+    "gpt-oss:20b": {
+      "num_ctx": 32768,
+      "conversation_num_ctx": 16384,
+      "think": "high",
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m"
+    },
+    "qwen3:14b-q4_K_M": {
+      "num_ctx": 40960,
+      "conversation_num_ctx": 16384,
+      "think": true,
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m"
+    },
+    "deepseek-r1:14b": {
+      "num_ctx": 32768,
+      "conversation_num_ctx": 16384,
+      "think": true,
+      "keep_alive": "30m",
+      "conversation_keep_alive": "5m"
+    },
+    "qwen3:4b-thinking-2507-q8_0": {
+      "num_ctx": 49152,
+      "conversation_num_ctx": 16384,
+      "think": true,
+      "keep_alive": "15m",
+      "conversation_keep_alive": "5m"
+    }
+  },
+  "presets": {
+    "qwen3:4b-thinking-2507-q8_0": {
+      "balanced": {
+        "num_ctx": 32768,
+        "num_predict": 8192
+      },
+      "deep": {
+        "num_ctx": 32768,
+        "num_predict": 12288
+      }
+    }
+  }
+}

@@ -66,6 +66,17 @@ class LocalManagerTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         ).stdout.strip()
 
+    def test_planning_context_is_selected_from_current_canon(self):
+        selected = manager.select_planning_sources(
+            manager.PROJECT_ROOT,
+            "Preveri decimal_value pri prejemu in dodaj sprejemni test",
+        )
+        self.assertEqual("docs/local_agents/PRAVILNIK_VERIGE.md", selected[0])
+        self.assertEqual("docs/kanon/00_KAZALO.md", selected[1])
+        self.assertIn("docs/kanon/01_POSLOVNA_PRAVILA.md", selected)
+        self.assertIn("docs/kanon/03_SPREJEMNI_TESTI.md", selected)
+        self.assertNotIn("docs/kanon/05_ZGODOVINA_ODLOCITEV.md", selected)
+
     def profile_snapshot(self, profile_id, *, model_tag=None):
         return manager.snapshot_for_new_task(
             profile_id, model_tag=model_tag or "gpt-oss:20b",
@@ -384,7 +395,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=resolver,
         )
         self.assertEqual(first["profile_id"], second["profile_id"])
-        self.assertEqual(4, first["profile_version"])
+        self.assertEqual(5, first["profile_version"])
         self.assertEqual(first["role"], second["role"])
         self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
         self.assertNotEqual(first["model_tag"], second["model_tag"])
