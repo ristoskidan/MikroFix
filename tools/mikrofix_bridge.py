@@ -1559,8 +1559,64 @@ def process_job(job_id):
                 })
                 save_job(job)
 
+        if successful_tool_use_count >= MINIMUM_SUCCESSFUL_TOOL_CALLS:
+            final_step = MAX_STEPS + 1
+            job["steps"] = final_step
+            save_job(job)
+            write_log(
+                job_id,
+                f"Dosežena je meja {MAX_STEPS} raziskovalnih korakov; "
+                "iz že zbranih dokazov zahtevam zaključni odgovor brez orodij.",
+            )
+            response = call_qwen(
+                final_reply_messages(messages), final_reply=True,
+                progress_callback=lambda progress: write_trace(
+                    job_id, {
+                        "type": "model_progress",
+                        "role": AGENT_ROLE,
+                        "step": final_step,
+                        **progress,
+                    },
+                ),
+            )
+            message = response.get("message") or {}
+            result = str(message.get("content") or "").strip()
+            write_trace(job_id, {
+                "type": "model",
+                "role": AGENT_ROLE,
+                "step": final_step,
+                "content": result,
+                "tool_call_count": len(message.get("tool_calls") or []),
+                "note": "Namenski zaključni odgovor po meji raziskovanja.",
+            })
+            if result:
+                try:
+                    decoded = json.loads(result)
+                except json.JSONDecodeError:
+                    decoded = None
+                if isinstance(decoded, dict) and isinstance(decoded.get("reply"), str):
+                    result = decoded["reply"].strip()
+            if not result:
+                job["error_code"] = "EMPTY_FINAL_RESPONSE"
+                save_job(job)
+                raise RuntimeError(
+                    "EMPTY_FINAL_RESPONSE: model po meji raziskovanja ni vrnil "
+                    "nepraznega zaključnega odgovora."
+                )
+            wrapped = json.dumps(
+                {"reply": result}, ensure_ascii=False, indent=2,
+            ) if RESPONSE_FORMAT is not None else result
+            atomic_text(job_dir(job_id) / "result.txt", wrapped + "\n")
+            job["status"] = "completed"
+            job["finished_at"] = now()
+            job["result"] = wrapped
+            save_job(job)
+            write_log(job_id, "Naloga je zaključena iz zbranih dokazov.")
+            notify_job_completion(job)
+            return
+
         raise RuntimeError(
-            f"Dosežena omejitev {MAX_STEPS} korakov izvajalca."
+            f"Dosežena omejitev {MAX_STEPS} korakov brez zadostnih dokazov."
         )
 
     except Exception as e:

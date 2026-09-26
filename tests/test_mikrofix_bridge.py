@@ -581,6 +581,42 @@ class BridgeCompletionTests(unittest.TestCase):
                 self.bridge.call_qwen([{"role": "user", "content": "inspect"}])
         self.assertEqual("MODEL_OUTPUT_TRUNCATED", raised.exception.error_code)
 
+    def test_research_step_limit_forces_toolless_evidence_finalizer(self):
+        job = self.bridge.create_job("Inspect broadly, then answer")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}},
+            }]}},
+            {"message": {"tool_calls": [{
+                "function": {
+                    "name": "project_read", "arguments": {"path": "AGENTS.md"},
+                },
+            }]}},
+            {"message": {"content": "Zaključek iz zbranih dokazov."}},
+        ])
+        modes = []
+
+        def answer(_messages, **kwargs):
+            modes.append(kwargs.get("final_reply", False))
+            return next(responses)
+
+        with (
+            mock.patch.object(self.bridge, "MAX_STEPS", 2),
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+            mock.patch.object(
+                self.bridge, "RESPONSE_FORMAT", {"type": "object", "required": ["reply"]},
+            ),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual([False, False, True], modes)
+        self.assertEqual(
+            {"reply": "Zaključek iz zbranih dokazov."},
+            json.loads(persisted["result"]),
+        )
+
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
         job = self.bridge.create_job("Verify with a successful tool")
         responses = iter([
