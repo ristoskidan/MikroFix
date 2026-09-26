@@ -55,6 +55,14 @@ python3 tools/mikrofix_agent_workspace.py recover --rotation-id ID --rollback
 python3 tools/mikrofix_agent_workspace.py recover --rotation-id ID --complete
 ```
 
+Do trajne faze `SERVICES_ACTIVATING` je dovoljen preverjen povratek na stari
+workspace. Ta faza se zapiše pod ekskluzivno ključavnico, preden se zažene prva
+storitev. Po njej je novi preverjeni workspace avtoritativen in je dovoljen samo
+forward recovery storitev; datotečni rollback ni več dovoljen. Dnevnik za vsako
+prej aktivno storitev zapiše začetek zagona, uspeh ukaza in rezultat preverjanja
+aktivnosti. `COMPLETED` oziroma `ROLLED_BACK` nastaneta šele po uspešni obnovi
+vseh zahtevanih storitev.
+
 Po uspehu ali povratku se ponovno zaženejo samo storitve, ki so bile aktivne
 pred rotacijo. Neaktivni uporabniški vmesnik se ne zažene zaradi preverjanja.
 

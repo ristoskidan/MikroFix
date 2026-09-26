@@ -68,6 +68,13 @@ WRITER_MARKERS = (
     "tools/local_executor/control.py",
 )
 FINAL_ROTATION_PHASES = {"COMPLETED", "ROLLED_BACK"}
+FORWARD_ONLY_PHASES = {
+    "SERVICES_ACTIVATING", "SERVICES_RECOVERY_REQUIRED", "SERVICES_RESTORED",
+}
+ROLLBACK_SERVICE_PHASES = {
+    "ROLLBACK_SERVICES_ACTIVATING", "ROLLBACK_SERVICES_RECOVERY_REQUIRED",
+    "ROLLBACK_SERVICES_RESTORED",
+}
 
 
 def run(args: list[str], *, cwd: Path | None = None) -> str:
@@ -173,6 +180,9 @@ class UserServices:
     def start(self, name: str) -> None:
         run(["systemctl", "--user", "start", name])
 
+    def health(self, name: str) -> bool:
+        return self.is_active(name)
+
 
 def workspace_processes(workspace: Path) -> list[str]:
     own_pid = os.getpid()
@@ -219,6 +229,110 @@ def update_rotation(journal_path: Path, journal: dict[str, Any], phase: str, **e
     journal["phase"] = phase
     journal["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     durable_json(journal_path, journal)
+
+
+def workspace_staging_paths(workspace: Path) -> list[Path]:
+    return sorted(workspace.parent.glob(f".{workspace.name}.init-*"))
+
+
+def workspace_identity(path: Path, journal: dict[str, Any]) -> str:
+    if not path.exists():
+        return "MISSING"
+    if not path.is_dir():
+        return "INVALID"
+    try:
+        inventory = workspace_inventory(path)
+    except (OSError, WorkspaceError):
+        return "INVALID"
+    if inventory == journal.get("old_inventory"):
+        return "OLD"
+    try:
+        verification = verify_workspace(path)
+    except (OSError, KeyError, json.JSONDecodeError, WorkspaceError):
+        return "INVALID"
+    if (
+        verification["status"] == "OK"
+        and verification["baseline_commit"] == journal.get("new_checkpoint")
+    ):
+        expected_new = journal.get("new_inventory")
+        if expected_new is None or inventory == expected_new:
+            return "NEW"
+    return "INVALID"
+
+
+def rotation_topology(workspace: Path, journal: dict[str, Any]) -> dict[str, Any]:
+    archive = Path(journal["archive"])
+    failed = Path(journal["failed_candidate"])
+    return {
+        "workspace": workspace_identity(workspace, journal),
+        "archive": workspace_identity(archive, journal),
+        "failed": workspace_identity(failed, journal),
+        "staging": [str(path) for path in workspace_staging_paths(workspace)],
+    }
+
+
+def unique_failed_path(preferred: Path) -> Path:
+    if not preferred.exists():
+        return preferred
+    return Path(str(preferred) + f"-{uuid.uuid4().hex[:8]}")
+
+
+def quarantine_staging(workspace: Path, failed: Path) -> list[str]:
+    quarantined = []
+    for index, staging in enumerate(workspace_staging_paths(workspace), start=1):
+        destination = unique_failed_path(Path(f"{failed}-staging-{index}"))
+        os.replace(staging, destination)
+        fsync_directory(workspace.parent)
+        quarantined.append(str(destination))
+    return quarantined
+
+
+def service_health(services: Any, name: str) -> bool:
+    health = getattr(services, "health", None)
+    return bool(health(name) if health is not None else services.is_active(name))
+
+
+def activate_services(
+    journal_path: Path, journal: dict[str, Any], services: Any, *,
+    activating_phase: str, restored_phase: str, final_phase: str,
+    failure_phase: str,
+) -> None:
+    records = journal.setdefault("service_recovery", {})
+    try:
+        for name, was_active in journal.get("services_before", {}).items():
+            record = records.setdefault(name, {"was_active": bool(was_active)})
+            if not was_active:
+                record["state"] = "NOT_REQUIRED"
+                continue
+            if service_health(services, name):
+                record.update({"state": "HEALTHY", "command_succeeded": True,
+                               "health_ok": True})
+                update_rotation(journal_path, journal, activating_phase)
+                continue
+            record.update({
+                "state": "STARTING",
+                "start_started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "command_succeeded": False,
+                "health_ok": False,
+            })
+            update_rotation(journal_path, journal, activating_phase)
+            services.start(name)
+            record.update({"state": "COMMAND_OK", "command_succeeded": True})
+            update_rotation(journal_path, journal, activating_phase)
+            healthy = service_health(services, name)
+            record.update({"state": "HEALTHY" if healthy else "UNHEALTHY",
+                           "health_ok": healthy})
+            update_rotation(journal_path, journal, activating_phase)
+            if not healthy:
+                raise WorkspaceError(f"service health-check failed: {name}")
+        update_rotation(journal_path, journal, restored_phase)
+        update_rotation(journal_path, journal, final_phase)
+    except BaseException as exc:
+        try:
+            update_rotation(journal_path, journal, failure_phase, service_error=str(exc))
+        except BaseException:
+            pass
+        raise
 
 
 def copy_knowledge(source: Path, destination: Path) -> dict[str, str]:
@@ -324,6 +438,7 @@ def init_workspace(
                 encoding="utf-8",
             )
         os.replace(staging, workspace)
+        fsync_directory(workspace.parent)
     except BaseException:
         if failed_destination is not None and staging.exists():
             os.replace(staging, failed_destination)
@@ -405,6 +520,8 @@ def rotate_workspace(
     archive = workspace.parent / f"{workspace.name}.archive-{old_check['baseline_commit'][:8]}-{rotation_id}"
     failed = workspace.parent / f"{workspace.name}.failed-{rotation_id}"
     journal_path = rotation_root(workspace) / f"{rotation_id}.json"
+    journal: dict[str, Any] | None = None
+    original_error: BaseException | None = None
     try:
         with workspace_lock(workspace, exclusive=True, blocking=False):
             processes = process_checker(workspace)
@@ -413,57 +530,106 @@ def rotate_workspace(
             old_inventory = workspace_inventory(workspace)
             new_commit = run(["git", "-C", str(source), "rev-parse", "HEAD"])
             journal = {
-                "schema_version": 1, "rotation_id": rotation_id,
+                "schema_version": 2, "rotation_id": rotation_id,
                 "workspace": str(workspace), "archive": str(archive),
                 "failed_candidate": str(failed),
                 "old_checkpoint": old_check["baseline_commit"],
                 "new_checkpoint": new_commit,
                 "verified_ancestor": "b0d6e25cc31191c4589f00f7b6f5e2d49983ba10",
                 "old_inventory": old_inventory, "services_before": active,
+                "service_recovery": {
+                    name: {"was_active": was_active, "state": "PENDING"}
+                    for name, was_active in active.items()
+                },
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
             update_rotation(journal_path, journal, "PREPARED")
-            os.replace(workspace, archive)
-            fsync_directory(workspace.parent)
-            update_rotation(journal_path, journal, "OLD_ARCHIVED")
-            init_workspace(source, workspace, failed_destination=failed)
-            update_rotation(journal_path, journal, "NEW_INITIALIZED")
-            new_check = verify_workspace(workspace)
-            if new_check["status"] != "OK" or new_check["baseline_commit"] != new_commit:
-                raise WorkspaceError("new workspace failed checkpoint verification")
-            if workspace_inventory(archive) != old_inventory:
-                raise WorkspaceError("archived workspace inventory changed")
-            update_rotation(journal_path, journal, "NEW_VERIFIED", new_verification=new_check)
-        for name, was_active in active.items():
-            if was_active:
-                services.start(name)
-        update_rotation(journal_path, journal, "SERVICES_RESTORED")
-        update_rotation(journal_path, journal, "COMPLETED")
-        return {"status": "OK", "rotation": journal}
-    except BaseException as exc:
-        if journal_path.exists():
-            journal = json.loads(journal_path.read_text(encoding="utf-8"))
-            update_rotation(journal_path, journal, "ROLLBACK_REQUIRED", error=str(exc))
-        if journal_path.exists():
-            if workspace.exists():
-                quarantine = failed
-                if quarantine.exists():
-                    quarantine = Path(str(failed) + f"-{uuid.uuid4().hex[:8]}")
-                os.replace(workspace, quarantine)
+            try:
+                os.replace(workspace, archive)
                 fsync_directory(workspace.parent)
-            if archive.exists() and not workspace.exists():
-                os.replace(archive, workspace)
-                fsync_directory(workspace.parent)
-            restored = verify_workspace(workspace)
-            if restored["status"] != "OK":
-                raise WorkspaceError(f"rotation failed and rollback is invalid: {exc}") from exc
-            if workspace_inventory(workspace) != journal["old_inventory"]:
-                raise WorkspaceError(f"rotation failed and rollback hash differs: {exc}") from exc
-            update_rotation(journal_path, journal, "ROLLED_BACK", rollback_verification=restored)
-        for name, was_active in active.items():
-            if was_active:
-                services.start(name)
+                update_rotation(journal_path, journal, "OLD_ARCHIVED")
+                init_workspace(source, workspace, failed_destination=failed)
+                update_rotation(journal_path, journal, "NEW_INITIALIZED")
+                new_check = verify_workspace(workspace)
+                if new_check["status"] != "OK" or new_check["baseline_commit"] != new_commit:
+                    raise WorkspaceError("new workspace failed checkpoint verification")
+                if workspace_inventory(archive) != old_inventory:
+                    raise WorkspaceError("archived workspace inventory changed")
+                new_inventory = workspace_inventory(workspace)
+                update_rotation(
+                    journal_path, journal, "NEW_VERIFIED",
+                    new_verification=new_check, new_inventory=new_inventory,
+                )
+                # This durable boundary makes every later failure forward-only.
+                update_rotation(journal_path, journal, "SERVICES_ACTIVATING")
+            except BaseException as exc:
+                original_error = exc
+                update_rotation(journal_path, journal, "ROLLBACK_REQUIRED", error=str(exc))
+                rollback_paths_locked(
+                    workspace, journal_path, journal, process_checker=process_checker,
+                )
+    except BaseException:
+        if journal is None:
+            for name, was_active in active.items():
+                if was_active:
+                    services.start(name)
         raise
+
+    if original_error is not None:
+        activate_services(
+            journal_path, journal, services,
+            activating_phase="ROLLBACK_SERVICES_ACTIVATING",
+            restored_phase="ROLLBACK_SERVICES_RESTORED",
+            final_phase="ROLLED_BACK",
+            failure_phase="ROLLBACK_SERVICES_RECOVERY_REQUIRED",
+        )
+        raise original_error
+
+    activate_services(
+        journal_path, journal, services,
+        activating_phase="SERVICES_ACTIVATING",
+        restored_phase="SERVICES_RESTORED",
+        final_phase="COMPLETED",
+        failure_phase="SERVICES_RECOVERY_REQUIRED",
+    )
+    return {"status": "OK", "rotation": journal}
+
+
+def rollback_paths_locked(
+    workspace: Path, journal_path: Path, journal: dict[str, Any], *,
+    process_checker: Any = workspace_processes,
+) -> dict[str, Any]:
+    processes = process_checker(workspace)
+    if processes:
+        raise WorkspaceError("workspace writers are still active: " + "; ".join(processes))
+    archive = Path(journal["archive"])
+    failed = Path(journal["failed_candidate"])
+    topology = rotation_topology(workspace, journal)
+    quarantined: list[str] = []
+    if topology["workspace"] == "OLD" and topology["archive"] == "MISSING":
+        # PREPARED or a failed W -> A rename: the original is already authoritative.
+        pass
+    elif topology["workspace"] == "OLD":
+        raise WorkspaceError(f"old archive changed or is ambiguous; rollback refused: {topology}")
+    elif topology["archive"] == "OLD":
+        if topology["workspace"] != "MISSING":
+            quarantine = unique_failed_path(failed)
+            os.replace(workspace, quarantine)
+            fsync_directory(workspace.parent)
+            quarantined.append(str(quarantine))
+        os.replace(archive, workspace)
+        fsync_directory(workspace.parent)
+    else:
+        raise WorkspaceError(f"no unambiguous old workspace for rollback: {topology}")
+    quarantined.extend(quarantine_staging(workspace, failed))
+    if workspace_identity(workspace, journal) != "OLD":
+        raise WorkspaceError("restored workspace does not match the original tree hash")
+    restored = verify_workspace(workspace)
+    update_rotation(
+        journal_path, journal, "ROLLBACK_SERVICES_ACTIVATING",
+        rollback_verification=restored, quarantined=quarantined,
+    )
+    return restored
 
 
 def recover_rotation(
@@ -476,44 +642,91 @@ def recover_rotation(
     if not journal_path.is_file():
         raise WorkspaceError(f"rotation journal does not exist: {journal_path}")
     journal = json.loads(journal_path.read_text(encoding="utf-8"))
-    if journal.get("phase") in FINAL_ROTATION_PHASES:
-        raise WorkspaceError(f"rotation is already final: {journal.get('phase')}")
-    archive = Path(journal["archive"])
-    with workspace_lock(workspace, exclusive=True, blocking=False):
-        processes = process_checker(workspace)
-        if processes:
-            raise WorkspaceError("workspace writers are still active: " + "; ".join(processes))
+    if Path(journal.get("workspace", "")).resolve() != workspace:
+        raise WorkspaceError("rotation journal belongs to a different workspace")
+    phase = str(journal.get("phase"))
+    if phase in FINAL_ROTATION_PHASES:
+        raise WorkspaceError(f"rotation is already final: {phase}")
+
+    if phase in FORWARD_ONLY_PHASES:
+        if not complete:
+            raise WorkspaceError(f"rollback is forbidden after service activation began: {phase}")
+        verify_forward_topology(workspace, journal)
+        activate_services(
+            journal_path, journal, services,
+            activating_phase="SERVICES_ACTIVATING",
+            restored_phase="SERVICES_RESTORED",
+            final_phase="COMPLETED",
+            failure_phase="SERVICES_RECOVERY_REQUIRED",
+        )
+        return {"status": "OK", "rotation": journal}
+
+    if phase in ROLLBACK_SERVICE_PHASES:
         if complete:
+            raise WorkspaceError(f"completion is forbidden after rollback began: {phase}")
+        try:
+            old_result = verify_workspace(workspace)
+        except (OSError, KeyError, json.JSONDecodeError, WorkspaceError) as exc:
+            raise WorkspaceError("rollback service recovery has no valid old workspace") from exc
+        if (
+            old_result["status"] != "OK"
+            or old_result["baseline_commit"] != journal["old_checkpoint"]
+        ):
+            raise WorkspaceError("rollback service recovery has no valid old workspace")
+        activate_services(
+            journal_path, journal, services,
+            activating_phase="ROLLBACK_SERVICES_ACTIVATING",
+            restored_phase="ROLLBACK_SERVICES_RESTORED",
+            final_phase="ROLLED_BACK",
+            failure_phase="ROLLBACK_SERVICES_RECOVERY_REQUIRED",
+        )
+        return {"status": "OK", "rotation": journal}
+
+    with workspace_lock(workspace, exclusive=True, blocking=False):
+        topology = rotation_topology(workspace, journal)
+        if complete:
+            if topology["workspace"] != "NEW" or topology["archive"] != "OLD":
+                raise WorkspaceError(f"new workspace cannot be completed safely: {topology}")
+            if topology["staging"]:
+                raise WorkspaceError(f"unfinished staging prevents completion: {topology['staging']}")
             result = verify_workspace(workspace)
-            if result["status"] != "OK" or result["baseline_commit"] != journal["new_checkpoint"]:
-                raise WorkspaceError("new workspace cannot be completed safely")
-            if not archive.is_dir() or workspace_inventory(archive) != journal["old_inventory"]:
-                raise WorkspaceError("old archive is missing or changed")
-            update_rotation(journal_path, journal, "NEW_VERIFIED", new_verification=result)
+            new_inventory = workspace_inventory(workspace)
+            update_rotation(
+                journal_path, journal, "NEW_VERIFIED",
+                new_verification=result, new_inventory=new_inventory,
+            )
+            update_rotation(journal_path, journal, "SERVICES_ACTIVATING")
         else:
-            if not archive.is_dir():
-                raise WorkspaceError("old archive is unavailable for rollback")
-            if workspace_inventory(archive) != journal["old_inventory"]:
-                raise WorkspaceError("old archive changed; rollback refused")
-            if workspace.exists():
-                failed = Path(journal["failed_candidate"])
-                if failed.exists():
-                    failed = Path(str(failed) + f"-{uuid.uuid4().hex[:8]}")
-                os.replace(workspace, failed)
-                fsync_directory(workspace.parent)
-            os.replace(archive, workspace)
-            fsync_directory(workspace.parent)
-            result = verify_workspace(workspace)
-            if result["status"] != "OK" or workspace_inventory(workspace) != journal["old_inventory"]:
-                raise WorkspaceError("restored workspace failed verification")
-            update_rotation(journal_path, journal, "ROLLED_BACK", rollback_verification=result)
-    for name, was_active in journal.get("services_before", {}).items():
-        if was_active:
-            services.start(name)
+            result = rollback_paths_locked(
+                workspace, journal_path, journal, process_checker=process_checker,
+            )
+
     if complete:
-        update_rotation(journal_path, journal, "SERVICES_RESTORED")
-        update_rotation(journal_path, journal, "COMPLETED")
+        activate_services(
+            journal_path, journal, services,
+            activating_phase="SERVICES_ACTIVATING",
+            restored_phase="SERVICES_RESTORED",
+            final_phase="COMPLETED",
+            failure_phase="SERVICES_RECOVERY_REQUIRED",
+        )
+    else:
+        activate_services(
+            journal_path, journal, services,
+            activating_phase="ROLLBACK_SERVICES_ACTIVATING",
+            restored_phase="ROLLBACK_SERVICES_RESTORED",
+            final_phase="ROLLED_BACK",
+            failure_phase="ROLLBACK_SERVICES_RECOVERY_REQUIRED",
+        )
     return {"status": "OK", "rotation": journal}
+
+
+def verify_forward_topology(workspace: Path, journal: dict[str, Any]) -> None:
+    archive = Path(journal["archive"])
+    result = verify_workspace(workspace)
+    if result["status"] != "OK" or result["baseline_commit"] != journal["new_checkpoint"]:
+        raise WorkspaceError("forward recovery has no valid new workspace")
+    if workspace_identity(archive, journal) != "OLD":
+        raise WorkspaceError("forward recovery has no valid old archive")
 
 
 def parse_args() -> argparse.Namespace:
