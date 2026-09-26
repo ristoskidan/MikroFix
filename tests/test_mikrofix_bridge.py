@@ -147,6 +147,39 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual(schema, calls[0]["format"])
         self.assertNotIn("tools", calls[0])
 
+    def test_final_reply_mode_is_compact_toolless_and_low_thinking(self):
+        calls = []
+        messages = [
+            {"role": "system", "content": "large role prompt and schema"},
+            {"role": "user", "content": "Original owner request"},
+            {"role": "assistant", "thinking": "very long hidden reasoning", "content": ""},
+            {"role": "assistant", "tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}},
+            }]},
+            {"role": "tool", "content": '{"status":"clean"}'},
+        ]
+
+        def fake_request(_url, **kwargs):
+            calls.append(kwargs["data"])
+            return {"message": {"content": '{"reply":"done"}'}}
+
+        with (
+            mock.patch.object(self.bridge, "THINK", "high"),
+            mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
+        ):
+            final_messages = self.bridge.final_reply_messages(messages)
+            self.bridge.call_qwen(final_messages, final_reply=True)
+
+        payload = calls[0]
+        self.assertNotIn("tools", payload)
+        self.assertEqual("low", payload["think"])
+        self.assertEqual(self.bridge.FINAL_REPLY_FORMAT, payload["format"])
+        self.assertIn("prvo uporabnikovo zahtevo", payload["messages"][0]["content"])
+        self.assertNotIn("large role prompt", payload["messages"][0]["content"])
+        self.assertEqual("Original owner request", payload["messages"][1]["content"])
+        self.assertTrue(any(message.get("role") == "tool" for message in payload["messages"]))
+        self.assertFalse(any("thinking" in message for message in payload["messages"]))
+
     def test_terminal_notification_is_at_most_once_across_replay(self):
         job = self.bridge.create_job(
             "Finish safely", display_name="Safe finish", codex_thread_id=THREAD_ID
@@ -335,12 +368,14 @@ class BridgeCompletionTests(unittest.TestCase):
                 "thinking": "Dokaze imam, odgovor moram še oblikovati.",
                 "content": "",
             }},
-            {"message": {"content": "Neprazen odgovor lastniku."}},
+            {"message": {"content": '{"reply":"Neprazen odgovor lastniku."}'}},
         ])
         received_messages = []
+        received_modes = []
 
-        def answer(messages, **_kwargs):
+        def answer(messages, **kwargs):
             received_messages.append(json.loads(json.dumps(messages)))
+            received_modes.append(kwargs.get("final_reply", False))
             return next(responses)
 
         with (
@@ -361,6 +396,18 @@ class BridgeCompletionTests(unittest.TestCase):
             {"reply": "Neprazen odgovor lastniku."},
             json.loads(persisted["result"]),
         )
+        self.assertEqual([False, False, True], received_modes)
+        self.assertIn(
+            "prvo uporabnikovo zahtevo",
+            received_messages[2][0]["content"],
+        )
+        self.assertEqual(
+            "Inspect then answer visibly",
+            received_messages[2][1]["content"],
+        )
+        self.assertFalse(any(
+            "thinking" in message for message in received_messages[2]
+        ))
         retry_instruction = received_messages[2][-1]["content"]
         self.assertIn("Ne kliči dodatnih orodij", retry_instruction)
         self.assertIn("neprazen odgovor lastniku", retry_instruction)
@@ -397,6 +444,36 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual("EMPTY_FINAL_RESPONSE", persisted["error_code"])
         self.assertEqual(2, persisted["empty_final_responses"])
         self.assertIn("EMPTY_FINAL_RESPONSE", persisted["error"])
+        self.assertFalse((self.bridge.job_dir(job["id"]) / "result.txt").exists())
+
+    def test_unstructured_final_reply_does_not_bypass_strict_wrapper(self):
+        job = self.bridge.create_job("Do not accept malformed final output")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {"thinking": "Prvi premislek.", "content": ""}},
+            {"message": {"content": "plain text outside the required JSON"}},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _messages, **_kwargs: next(responses),
+            ),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+            mock.patch.object(
+                self.bridge, "RESPONSE_FORMAT",
+                {"type": "object", "required": ["reply"]},
+            ),
+            mock.patch.object(self.bridge, "MINIMUM_SUCCESSFUL_TOOL_CALLS", 1),
+            mock.patch.object(self.bridge, "MAX_TOOLLESS_RESPONSES", 2),
+            mock.patch.object(self.bridge, "DETERMINISTIC_REPLY_WRAPPER", True),
+        ):
+            self.bridge.process_job(job["id"])
+
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("EMPTY_FINAL_RESPONSE", persisted["error_code"])
         self.assertFalse((self.bridge.job_dir(job["id"]) / "result.txt").exists())
 
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):

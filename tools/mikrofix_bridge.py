@@ -84,6 +84,23 @@ COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
 PROJECT_MEMORY = Path(CFG["project_memory"]) if CFG.get("project_memory") else None
 PARENT_SESSION_ID = str(CFG.get("parent_session_id", ""))
 
+FINAL_REPLY_FORMAT = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string", "minLength": 1},
+    },
+    "required": ["reply"],
+    "additionalProperties": False,
+}
+FINAL_REPLY_SYSTEM_PROMPT = """\
+Si zaključni zapisovalec pogovorne naloge MikroFIX. Projektna orodja so že zbrala
+dokaze v priloženem pogovoru. Odgovori neposredno na prvo uporabnikovo zahtevo
+in uporabi samo dejstva, ki jih podpirajo rezultati orodij. Ne kliči orodij, ne
+nadaljuj notranjega premisleka in ne odgovori zgolj, da so informacije zbrane.
+Kjer dokaz manjka, to jasno povej. Vrni samo JSON objekt z enim nepraznim poljem
+`reply`, ki vsebuje celoten odgovor lastniku.
+""".strip()
+
 if not 30 <= REQUEST_TIMEOUT_SECONDS <= 1800:
     raise RuntimeError("request_timeout_seconds must be between 30 and 1800")
 if not 1 <= MINIMUM_SUCCESSFUL_TOOL_CALLS <= MAX_STEPS:
@@ -749,8 +766,30 @@ def execute_tool(name, arguments):
     )
 
 
-def call_qwen(messages, *, structured=False):
-    """Call Ollama in either tool-use or final structured-output mode.
+def final_reply_messages(messages):
+    """Build a compact, evidence-preserving context for the final reply only."""
+    final_messages = [{
+        "role": "system",
+        "content": FINAL_REPLY_SYSTEM_PROMPT,
+    }]
+    for message in messages[1:]:
+        cleaned = {
+            key: value
+            for key, value in message.items()
+            if key != "thinking"
+        }
+        if (
+            cleaned.get("role") == "assistant"
+            and not str(cleaned.get("content") or "").strip()
+            and not cleaned.get("tool_calls")
+        ):
+            continue
+        final_messages.append(cleaned)
+    return final_messages
+
+
+def call_qwen(messages, *, structured=False, final_reply=False):
+    """Call Ollama in tool-use, role-structured, or compact final-reply mode.
 
     Ollama models may treat ``tools`` and a strict JSON ``format`` as competing
     output contracts.  Keep the schema out of evidence-gathering calls and add
@@ -763,12 +802,19 @@ def call_qwen(messages, *, structured=False):
             "options": {"num_ctx": NUM_CTX, **RUNTIME_OPTIONS},
             "messages": messages,
     }
-    if THINK is not None:
-        payload["think"] = THINK
-    if structured and RESPONSE_FORMAT is not None:
-        payload["format"] = RESPONSE_FORMAT
+    if final_reply:
+        if isinstance(THINK, str):
+            payload["think"] = "low"
+        elif THINK is not None:
+            payload["think"] = False
+        payload["format"] = FINAL_REPLY_FORMAT
     else:
-        payload["tools"] = TOOLS
+        if THINK is not None:
+            payload["think"] = THINK
+        if structured and RESPONSE_FORMAT is not None:
+            payload["format"] = RESPONSE_FORMAT
+        else:
+            payload["tools"] = TOOLS
     return request_json(
         OLLAMA,
         method="POST",
@@ -1006,6 +1052,7 @@ def process_job(job_id):
     tool_less_response_count = 0
     empty_final_response_count = 0
     finalization_requested = False
+    final_reply_requested = False
     tool_call_repeats = {}
     tool_result_cache = {}
     suspicious_empty_searches = 0
@@ -1026,8 +1073,17 @@ def process_job(job_id):
                 f"Izvajalec korak {step}/{MAX_STEPS}"
             )
 
-            structured = finalization_requested
-            response = call_qwen(messages, structured=structured)
+            structured = finalization_requested or final_reply_requested
+            request_messages = (
+                final_reply_messages(messages)
+                if final_reply_requested
+                else messages
+            )
+            response = call_qwen(
+                request_messages,
+                structured=finalization_requested,
+                final_reply=final_reply_requested,
+            )
 
             message = response.get("message", {})
             tool_calls = message.get("tool_calls") or []
@@ -1096,8 +1152,8 @@ def process_job(job_id):
 
                     continue
 
-                visible_reply = result
-                if RESPONSE_FORMAT is not None and result:
+                visible_reply = "" if final_reply_requested else result
+                if (RESPONSE_FORMAT is not None or final_reply_requested) and result:
                     try:
                         decoded = json.loads(result)
                         if (
@@ -1134,6 +1190,7 @@ def process_job(job_id):
                             "neprazen odgovor lastniku na podlagi že zbranih dokazov."
                         ),
                     })
+                    final_reply_requested = True
                     continue
 
                 if RESPONSE_FORMAT is not None and not structured:
@@ -1181,6 +1238,7 @@ def process_job(job_id):
 
             tool_less_response_count = 0
             finalization_requested = False
+            final_reply_requested = False
             messages.append(message)
 
             for call in tool_calls:
