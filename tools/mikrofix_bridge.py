@@ -709,7 +709,10 @@ def suspicious_search_arguments(arguments):
         return False
     candidate = value.strip("*?[]").strip()
     query = query.strip()
-    query_looks_like_glob = any(marker in query for marker in "*?[")
+    query_looks_like_file_glob = (
+        query.startswith("*.")
+        or query.startswith("**/")
+    )
     file_glob_looks_like_symbol = (
         "." not in value and "/" not in value and "\\" not in value
         and not any(marker in value for marker in "*?[")
@@ -721,7 +724,7 @@ def suspicious_search_arguments(arguments):
             candidate == query
             or candidate in query
             or query in candidate
-            or (query_looks_like_glob and file_glob_looks_like_symbol)
+            or (query_looks_like_file_glob and file_glob_looks_like_symbol)
         )
     )
 

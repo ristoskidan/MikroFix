@@ -554,6 +554,39 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual(1, persisted["successful_tool_calls"])
         self.assertEqual(1, persisted["tool_feedback_events"])
 
+    def test_empty_valid_regex_search_is_not_misuse(self):
+        job = self.bridge.create_job("Search one valid regular expression")
+        responses = iter([
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "[A-Z]+", "file_glob": "Makefile"},
+            }}]}},
+            {"message": {"content": "No match found"}},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _messages, **_kwargs: next(responses),
+            ),
+            mock.patch.object(
+                self.bridge, "execute_tool",
+                return_value={"matches": [], "count": 0, "exit_code": 1},
+            ),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(1, persisted["successful_tool_calls"])
+        self.assertEqual(0, persisted["tool_feedback_events"])
+        events = [
+            json.loads(line) for line in (
+                self.bridge.job_dir(job["id"]) / "trace.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        tool_results = [event for event in events if event["type"] == "tool_result"]
+        self.assertEqual(1, len(tool_results))
+        self.assertNotIn("warning", tool_results[0])
+
     def test_repeated_textual_tool_names_fail_closed(self):
         job = self.bridge.create_job("Inspect through tools")
         responses = iter([
@@ -630,8 +663,17 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertTrue(self.bridge.suspicious_search_arguments({
             "query": "*.py", "file_glob": "reversal_of_invoice_uuid",
         }))
+        self.assertTrue(self.bridge.suspicious_search_arguments({
+            "query": "**/*.py", "file_glob": "reversal_of_invoice_uuid",
+        }))
         self.assertFalse(self.bridge.suspicious_search_arguments({
             "query": "invoice", "file_glob": "Makefile",
+        }))
+        self.assertFalse(self.bridge.suspicious_search_arguments({
+            "query": "[A-Z]+", "file_glob": "Makefile",
+        }))
+        self.assertFalse(self.bridge.suspicious_search_arguments({
+            "query": "invoice.*draft", "file_glob": "Dockerfile",
         }))
 
     def test_validate_tool_arguments_enforces_max_length(self):
