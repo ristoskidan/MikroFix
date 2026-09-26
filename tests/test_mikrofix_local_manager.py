@@ -339,14 +339,14 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual(
             (16384, "5m"), manager.conversation_runtime_settings(legacy),
         )
-        self.assertIn('"request_timeout_seconds": 360', source)
+        self.assertIn('"model_silence_timeout_seconds": 900', source)
         self.assertIn('"max_steps": 40', source)
         self.assertIn('"minimum_successful_tool_calls": 1', source)
         self.assertIn('"project_run_check"', source)
         self.assertNotIn('"project_apply_patch"', source)
         self.assertIn("MIKROFIX_EXECUTOR_READ_ONLY_CHECKS", source)
         self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
-        self.assertIn("idle_timeout_seconds=900", source)
+        self.assertIn("idle_timeout_seconds=1200", source)
 
     def test_plan_intent_keeps_root_request_and_excludes_discussion_from_task(self):
         conversation = {"turns": [

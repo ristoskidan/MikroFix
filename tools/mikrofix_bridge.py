@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -74,7 +75,12 @@ RUNTIME_OPTIONS = {
 KEEP_ALIVE = str(CFG.get("keep_alive", "30m"))
 THINK = CFG.get("think")
 REQUIRE_TOOL_USE = bool(CFG.get("require_tool_use", True))
-REQUEST_TIMEOUT_SECONDS = int(CFG.get("request_timeout_seconds", 900))
+MODEL_SILENCE_TIMEOUT_SECONDS = int(
+    CFG.get(
+        "model_silence_timeout_seconds",
+        CFG.get("request_timeout_seconds", 900),
+    )
+)
 MINIMUM_SUCCESSFUL_TOOL_CALLS = int(CFG.get("minimum_successful_tool_calls", 1))
 MAX_TOOLLESS_RESPONSES = int(CFG.get("max_toolless_responses", 2))
 DETERMINISTIC_REPLY_WRAPPER = bool(CFG.get("deterministic_reply_wrapper", False))
@@ -84,25 +90,19 @@ COMPLETION_POLICY = str(CFG.get("completion_policy", "per_job"))
 PROJECT_MEMORY = Path(CFG["project_memory"]) if CFG.get("project_memory") else None
 PARENT_SESSION_ID = str(CFG.get("parent_session_id", ""))
 
-FINAL_REPLY_FORMAT = {
-    "type": "object",
-    "properties": {
-        "reply": {"type": "string", "minLength": 1},
-    },
-    "required": ["reply"],
-    "additionalProperties": False,
-}
 FINAL_REPLY_SYSTEM_PROMPT = """\
 Si zaključni zapisovalec pogovorne naloge MikroFIX. Projektna orodja so že zbrala
 dokaze v priloženem pogovoru. Odgovori neposredno na prvo uporabnikovo zahtevo
 in uporabi samo dejstva, ki jih podpirajo rezultati orodij. Ne kliči orodij, ne
 nadaljuj notranjega premisleka in ne odgovori zgolj, da so informacije zbrane.
-Kjer dokaz manjka, to jasno povej. Vrni samo JSON objekt z enim nepraznim poljem
-`reply`, ki vsebuje celoten odgovor lastniku.
+Kjer dokaz manjka, to jasno povej. Vrni samo celoten neprazen odgovor lastniku
+kot navadno besedilo. JSON ovoj bo deterministično dodal bridge.
 """.strip()
 
-if not 30 <= REQUEST_TIMEOUT_SECONDS <= 1800:
-    raise RuntimeError("request_timeout_seconds must be between 30 and 1800")
+if not 30 <= MODEL_SILENCE_TIMEOUT_SECONDS <= 3600:
+    raise RuntimeError(
+        "model_silence_timeout_seconds must be between 30 and 3600"
+    )
 if not 1 <= MINIMUM_SUCCESSFUL_TOOL_CALLS <= MAX_STEPS:
     raise RuntimeError(
         "minimum_successful_tool_calls must be between 1 and max_steps"
@@ -470,7 +470,16 @@ def atomic_text(path, text):
         os.close(directory_fd)
 
 
-def request_json(url, method="GET", data=None, headers=None, timeout=900):
+class BridgeTransportError(RuntimeError):
+    def __init__(self, error_code, message):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+def request_json(
+    url, method="GET", data=None, headers=None, timeout=900, *,
+    stream_response=False, progress_callback=None,
+):
     hdrs = dict(headers or {})
 
     body = None
@@ -487,6 +496,59 @@ def request_json(url, method="GET", data=None, headers=None, timeout=900):
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
+            if stream_response:
+                message = {"role": "assistant", "content": "", "thinking": ""}
+                metadata = {}
+                chunk_count = 0
+                byte_count = 0
+                last_progress_at = 0.0
+                for raw_line in r:
+                    if not raw_line.strip():
+                        continue
+                    byte_count += len(raw_line)
+                    try:
+                        chunk = json.loads(raw_line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        raise BridgeTransportError(
+                            "OLLAMA_STREAM_INVALID",
+                            "Ollama je vrnila neveljaven pretočni JSON odgovor.",
+                        ) from exc
+                    if chunk.get("error"):
+                        raise BridgeTransportError(
+                            "OLLAMA_RESPONSE_ERROR", str(chunk["error"]),
+                        )
+                    chunk_count += 1
+                    part = chunk.get("message") or {}
+                    if part.get("role"):
+                        message["role"] = part["role"]
+                    for field in ("content", "thinking"):
+                        if part.get(field):
+                            message[field] += str(part[field])
+                    if part.get("tool_calls"):
+                        message.setdefault("tool_calls", []).extend(part["tool_calls"])
+                    metadata.update({
+                        key: value for key, value in chunk.items()
+                        if key != "message"
+                    })
+                    current = time.monotonic()
+                    if progress_callback is not None and (
+                        chunk_count == 1 or chunk.get("done")
+                        or current - last_progress_at >= 10
+                    ):
+                        progress_callback({
+                            "chunk_count": chunk_count,
+                            "byte_count": byte_count,
+                            "content_chars": len(message["content"]),
+                            "thinking_chars": len(message["thinking"]),
+                            "done": bool(chunk.get("done")),
+                        })
+                        last_progress_at = current
+                if not chunk_count:
+                    raise BridgeTransportError(
+                        "OLLAMA_STREAM_EMPTY",
+                        "Ollama je zaprla povezavo brez odgovora.",
+                    )
+                return {"message": message, **metadata, "stream_chunks": chunk_count}
             raw = r.read()
 
             if not raw:
@@ -497,12 +559,25 @@ def request_json(url, method="GET", data=None, headers=None, timeout=900):
 
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
+        raise BridgeTransportError(
+            "OLLAMA_HTTP_ERROR",
             f"HTTP {e.code} za {url}: {body}"
         ) from e
 
+    except (TimeoutError, socket.timeout) as e:
+        raise BridgeTransportError(
+            "OLLAMA_SILENCE_TIMEOUT",
+            f"Ollama {timeout} sekund ni poslala nobenega novega podatka.",
+        ) from e
+
     except urllib.error.URLError as e:
-        raise RuntimeError(
+        if isinstance(e.reason, (TimeoutError, socket.timeout)):
+            raise BridgeTransportError(
+                "OLLAMA_SILENCE_TIMEOUT",
+                f"Ollama {timeout} sekund ni poslala nobenega novega podatka.",
+            ) from e
+        raise BridgeTransportError(
+            "OLLAMA_CONNECT_FAILED",
             f"Povezava ni uspela za {url}: {e}"
         ) from e
 
@@ -772,6 +847,7 @@ def final_reply_messages(messages):
         "role": "system",
         "content": FINAL_REPLY_SYSTEM_PROMPT,
     }]
+    cleaned_messages = []
     for message in messages[1:]:
         cleaned = {
             key: value
@@ -784,11 +860,26 @@ def final_reply_messages(messages):
             and not cleaned.get("tool_calls")
         ):
             continue
-        final_messages.append(cleaned)
+        if isinstance(cleaned.get("content"), str) and len(cleaned["content"]) > 6000:
+            cleaned["content"] = cleaned["content"][:6000] + "\n[skrajšano]"
+        cleaned_messages.append(cleaned)
+    if cleaned_messages:
+        final_messages.append(cleaned_messages[0])
+        budget = 36000 - len(str(cleaned_messages[0].get("content") or ""))
+        selected = []
+        for cleaned in reversed(cleaned_messages[1:]):
+            size = len(json.dumps(cleaned, ensure_ascii=False, default=str))
+            if size > budget:
+                continue
+            selected.append(cleaned)
+            budget -= size
+        final_messages.extend(reversed(selected))
     return final_messages
 
 
-def call_qwen(messages, *, structured=False, final_reply=False):
+def call_qwen(
+    messages, *, structured=False, final_reply=False, progress_callback=None,
+):
     """Call Ollama in tool-use, role-structured, or compact final-reply mode.
 
     Ollama models may treat ``tools`` and a strict JSON ``format`` as competing
@@ -797,7 +888,7 @@ def call_qwen(messages, *, structured=False, final_reply=False):
     """
     payload = {
             "model": MODEL,
-            "stream": False,
+            "stream": True,
             "keep_alive": KEEP_ALIVE,
             "options": {"num_ctx": NUM_CTX, **RUNTIME_OPTIONS},
             "messages": messages,
@@ -807,7 +898,6 @@ def call_qwen(messages, *, structured=False, final_reply=False):
             payload["think"] = "low"
         elif THINK is not None:
             payload["think"] = False
-        payload["format"] = FINAL_REPLY_FORMAT
     else:
         if THINK is not None:
             payload["think"] = THINK
@@ -815,12 +905,20 @@ def call_qwen(messages, *, structured=False, final_reply=False):
             payload["format"] = RESPONSE_FORMAT
         else:
             payload["tools"] = TOOLS
-    return request_json(
+    response = request_json(
         OLLAMA,
         method="POST",
         data=payload,
-        timeout=REQUEST_TIMEOUT_SECONDS
+        timeout=MODEL_SILENCE_TIMEOUT_SECONDS,
+        stream_response=True,
+        progress_callback=progress_callback,
     )
+    if response.get("done_reason") == "length":
+        raise BridgeTransportError(
+            "MODEL_OUTPUT_TRUNCATED",
+            "Model je dosegel izhodno omejitev pred celotnim odgovorom.",
+        )
+    return response
 
 
 def next_job_id():
@@ -1083,6 +1181,14 @@ def process_job(job_id):
                 request_messages,
                 structured=finalization_requested,
                 final_reply=final_reply_requested,
+                progress_callback=lambda progress, current_step=step: write_trace(
+                    job_id, {
+                        "type": "model_progress",
+                        "role": AGENT_ROLE,
+                        "step": current_step,
+                        **progress,
+                    },
+                ),
             )
 
             message = response.get("message", {})
@@ -1152,7 +1258,7 @@ def process_job(job_id):
 
                     continue
 
-                visible_reply = "" if final_reply_requested else result
+                visible_reply = result
                 if (RESPONSE_FORMAT is not None or final_reply_requested) and result:
                     try:
                         decoded = json.loads(result)
@@ -1192,6 +1298,22 @@ def process_job(job_id):
                     })
                     final_reply_requested = True
                     continue
+
+                if final_reply_requested:
+                    result = json.dumps(
+                        {"reply": visible_reply}, ensure_ascii=False, indent=2,
+                    )
+                    atomic_text(job_dir(job_id) / "result.txt", result + "\n")
+                    job["status"] = "completed"
+                    job["finished_at"] = now()
+                    job["result"] = result
+                    save_job(job)
+                    write_log(
+                        job_id,
+                        "Zaključni odgovor je deterministično zapakiran.",
+                    )
+                    notify_job_completion(job)
+                    return
 
                 if RESPONSE_FORMAT is not None and not structured:
                     if DETERMINISTIC_REPLY_WRAPPER:
@@ -1443,6 +1565,8 @@ def process_job(job_id):
 
     except Exception as e:
         job = load_job(job_id)
+        if isinstance(e, BridgeTransportError):
+            job["error_code"] = e.error_code
         job["status"] = "failed"
         job["finished_at"] = now()
         job["error"] = str(e)

@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,20 @@ from unittest import mock
 PROJECT = Path(__file__).resolve().parents[1]
 MODULE_PATH = PROJECT / "tools" / "mikrofix_bridge.py"
 THREAD_ID = "12345678-1234-5678-9234-567812345678"
+
+
+class FakeHTTPResponse:
+    def __init__(self, lines):
+        self.lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def __iter__(self):
+        return iter(self.lines)
 
 
 class FakeRunner:
@@ -173,7 +188,8 @@ class BridgeCompletionTests(unittest.TestCase):
         payload = calls[0]
         self.assertNotIn("tools", payload)
         self.assertEqual("low", payload["think"])
-        self.assertEqual(self.bridge.FINAL_REPLY_FORMAT, payload["format"])
+        self.assertNotIn("format", payload)
+        self.assertTrue(payload["stream"])
         self.assertIn("prvo uporabnikovo zahtevo", payload["messages"][0]["content"])
         self.assertNotIn("large role prompt", payload["messages"][0]["content"])
         self.assertEqual("Original owner request", payload["messages"][1]["content"])
@@ -446,7 +462,7 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertIn("EMPTY_FINAL_RESPONSE", persisted["error"])
         self.assertFalse((self.bridge.job_dir(job["id"]) / "result.txt").exists())
 
-    def test_unstructured_final_reply_does_not_bypass_strict_wrapper(self):
+    def test_plain_final_reply_is_wrapped_by_host(self):
         job = self.bridge.create_job("Do not accept malformed final output")
         responses = iter([
             {"message": {"tool_calls": [{
@@ -472,9 +488,98 @@ class BridgeCompletionTests(unittest.TestCase):
             self.bridge.process_job(job["id"])
 
         persisted = self.bridge.load_job(job["id"])
-        self.assertEqual("failed", persisted["status"])
-        self.assertEqual("EMPTY_FINAL_RESPONSE", persisted["error_code"])
-        self.assertFalse((self.bridge.job_dir(job["id"]) / "result.txt").exists())
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(
+            {"reply": "plain text outside the required JSON"},
+            json.loads(persisted["result"]),
+        )
+
+    def test_streaming_chat_aggregates_chunks_and_reports_progress(self):
+        lines = [
+            json.dumps({
+                "message": {"role": "assistant", "thinking": "premislek "},
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"content": "odgovor", "tool_calls": [{
+                    "function": {"name": "project_status", "arguments": {}},
+                }]},
+                "done": True, "done_reason": "stop", "eval_count": 7,
+            }).encode() + b"\n",
+        ]
+        progress = []
+        with mock.patch.object(
+            self.bridge.urllib.request, "urlopen",
+            return_value=FakeHTTPResponse(lines),
+        ):
+            response = self.bridge.request_json(
+                "http://ollama.invalid/api/chat", method="POST",
+                data={"stream": True}, timeout=900, stream_response=True,
+                progress_callback=progress.append,
+            )
+        self.assertEqual("premislek ", response["message"]["thinking"])
+        self.assertEqual("odgovor", response["message"]["content"])
+        self.assertEqual(1, len(response["message"]["tool_calls"]))
+        self.assertEqual("stop", response["done_reason"])
+        self.assertEqual(2, response["stream_chunks"])
+        self.assertTrue(progress[-1]["done"])
+
+    def test_streaming_chat_has_no_total_duration_limit(self):
+        lines = [
+            json.dumps({
+                "message": {"role": "assistant", "thinking": "a"},
+                "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"thinking": "b"}, "done": False,
+            }).encode() + b"\n",
+            json.dumps({
+                "message": {"content": "končano"},
+                "done": True, "done_reason": "stop",
+            }).encode() + b"\n",
+        ]
+        progress = []
+        with (
+            mock.patch.object(
+                self.bridge.urllib.request, "urlopen",
+                return_value=FakeHTTPResponse(lines),
+            ) as opened,
+            mock.patch.object(
+                self.bridge.time, "monotonic", side_effect=[0, 400, 800],
+            ),
+        ):
+            response = self.bridge.request_json(
+                "http://ollama.invalid/api/chat", method="POST",
+                data={"stream": True}, timeout=900, stream_response=True,
+                progress_callback=progress.append,
+            )
+        self.assertEqual("končano", response["message"]["content"])
+        self.assertEqual(3, len(progress))
+        self.assertEqual(900, opened.call_args.kwargs["timeout"])
+
+    def test_stream_silence_timeout_has_specific_error_code(self):
+        class SilentResponse(FakeHTTPResponse):
+            def __iter__(self):
+                raise socket.timeout("silent")
+
+        with mock.patch.object(
+            self.bridge.urllib.request, "urlopen",
+            return_value=SilentResponse([]),
+        ):
+            with self.assertRaises(self.bridge.BridgeTransportError) as raised:
+                self.bridge.request_json(
+                    "http://ollama.invalid/api/chat", method="POST",
+                    data={"stream": True}, timeout=900, stream_response=True,
+                )
+        self.assertEqual("OLLAMA_SILENCE_TIMEOUT", raised.exception.error_code)
+
+    def test_length_limited_model_output_fails_closed(self):
+        with mock.patch.object(self.bridge, "request_json", return_value={
+            "message": {"content": "odrezano"}, "done_reason": "length",
+        }):
+            with self.assertRaises(self.bridge.BridgeTransportError) as raised:
+                self.bridge.call_qwen([{"role": "user", "content": "inspect"}])
+        self.assertEqual("MODEL_OUTPUT_TRUNCATED", raised.exception.error_code)
 
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
         job = self.bridge.create_job("Verify with a successful tool")

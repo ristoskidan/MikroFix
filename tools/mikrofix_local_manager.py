@@ -1448,7 +1448,8 @@ def run_lead_conversation(
         "keep_alive": keep_alive,
         "think": think,
         "require_tool_use": True,
-        "request_timeout_seconds": 360,
+        # Ollama is streamed; this is an inactivity window, not a total limit.
+        "model_silence_timeout_seconds": 900,
         "minimum_successful_tool_calls": 1,
         "allowed_tools": [
             "project_status", "project_read", "project_list",
@@ -1505,7 +1506,9 @@ def run_lead_conversation(
         ).splitlines()[-1]
         run_bridge_monitor(
             bridge, bridge_env, bridge_home, bridge_job_id,
-            idle_timeout_seconds=900, progress_callback=progress_callback,
+            # Keep the outer watchdog longer than the bridge's own silence
+            # window so the durable inner error remains the primary evidence.
+            idle_timeout_seconds=1200, progress_callback=progress_callback,
         )
         raw_response = command(
             bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
