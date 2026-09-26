@@ -245,6 +245,7 @@ class LocalManagerTests(unittest.TestCase):
             (16384, "5m"), manager.conversation_runtime_settings(legacy),
         )
         self.assertIn('"request_timeout_seconds": 360', source)
+        self.assertIn('"max_steps": 40', source)
         self.assertIn('"minimum_successful_tool_calls": 1', source)
         self.assertIn('"project_run_check"', source)
         self.assertNotIn('"project_apply_patch"', source)

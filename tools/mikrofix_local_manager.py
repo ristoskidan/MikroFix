@@ -1384,9 +1384,9 @@ def run_lead_conversation(
         "project_memory": str(lead["memory_file"]),
         "parent_session_id": str(lead["session_id"]),
         "num_ctx": num_ctx,
-        # One generous loop bound protects the host from a runaway session;
-        # it is not a target or a required number of model/tool attempts.
-        "max_steps": 20,
+        # Read-only research may legitimately traverse several project paths.
+        # Duplicate/misused-call guards stop loops before this final host bound.
+        "max_steps": 40,
         "keep_alive": keep_alive,
         "think": think,
         "require_tool_use": True,

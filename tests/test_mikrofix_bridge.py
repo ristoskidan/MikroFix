@@ -358,6 +358,165 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual("completed", persisted["status"])
         self.assertEqual("verified", persisted["result"])
 
+    def test_invalid_tool_arguments_return_actionable_session_guidance(self):
+        job = self.bridge.create_job("Correct a malformed call")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_search", "arguments": "{bad-json"}
+            }]}},
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {"content": "corrected"}},
+        ])
+        received_messages = []
+
+        def answer(messages, **_kwargs):
+            received_messages.append(json.loads(json.dumps(messages)))
+            return next(responses)
+
+        with (
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(
+                self.bridge, "execute_tool", return_value={"exit_code": 0},
+            ) as execute,
+        ):
+            self.bridge.process_job(job["id"])
+        feedback = json.loads(received_messages[1][-1]["content"])
+        self.assertEqual("TOOL_CALL_INVALID", feedback["error_code"])
+        self.assertIn("project_search", feedback["guidance"]["available_tools"])
+        search_help = feedback["guidance"]["use_them_as_follows"][0]
+        self.assertEqual("project_search", search_help["name"])
+        self.assertEqual("*.py", search_help["example"]["file_glob"])
+        execute.assert_called_once_with("project_status", {})
+        self.assertEqual("completed", self.bridge.load_job(job["id"])["status"])
+
+    def test_identical_search_warns_blocks_then_fails_as_loop(self):
+        job = self.bridge.create_job("Do not repeat one search")
+        call = {"message": {"tool_calls": [{
+            "function": {
+                "name": "project_search",
+                "arguments": {"query": "invoice", "path": ".", "file_glob": "*.py"},
+            }
+        }]}}
+        responses = iter([call, call, call, call])
+        old_steps = self.bridge.MAX_STEPS
+        self.bridge.MAX_STEPS = 4
+        try:
+            with (
+                mock.patch.object(
+                    self.bridge, "call_qwen",
+                    side_effect=lambda _messages, **_kwargs: next(responses),
+                ),
+                mock.patch.object(
+                    self.bridge, "execute_tool",
+                    return_value={"matches": [], "count": 0, "exit_code": 1},
+                ) as execute,
+            ):
+                self.bridge.process_job(job["id"])
+        finally:
+            self.bridge.MAX_STEPS = old_steps
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertIn("LOOP_DETECTED", persisted["error"])
+        self.assertEqual(3, persisted["duplicate_tool_calls"])
+        self.assertEqual(2, persisted["blocked_tool_calls"])
+        self.assertEqual(1, execute.call_count)
+        events = [
+            json.loads(line) for line in (
+                self.bridge.job_dir(job["id"]) / "trace.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        codes = [event.get("error_code") for event in events]
+        self.assertIn("DUPLICATE_CALL_WARNING", codes)
+        self.assertIn("DUPLICATE_CALL_BLOCKED", codes)
+
+    def test_repeated_symbol_as_file_glob_is_guided_then_blocked(self):
+        job = self.bridge.create_job("Correct semantic search misuse")
+        responses = iter([
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "alpha", "file_glob": "alpha"},
+            }}]}},
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "beta", "file_glob": "beta"},
+            }}]}},
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "gamma", "file_glob": "gamma"},
+            }}]}},
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "delta", "file_glob": "delta"},
+            }}]}},
+        ])
+        old_steps = self.bridge.MAX_STEPS
+        self.bridge.MAX_STEPS = 4
+        try:
+            with (
+                mock.patch.object(
+                    self.bridge, "call_qwen",
+                    side_effect=lambda _messages, **_kwargs: next(responses),
+                ),
+                mock.patch.object(
+                    self.bridge, "execute_tool",
+                    return_value={"matches": [], "count": 0, "exit_code": 1},
+                ) as execute,
+            ):
+                self.bridge.process_job(job["id"])
+        finally:
+            self.bridge.MAX_STEPS = old_steps
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertIn("LOOP_DETECTED", persisted["error"])
+        self.assertEqual(2, execute.call_count)
+        events = [
+            json.loads(line) for line in (
+                self.bridge.job_dir(job["id"]) / "trace.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        warnings = [
+            event.get("warning", {}).get("code") for event in events
+            if event.get("warning")
+        ]
+        codes = [event.get("error_code") for event in events]
+        self.assertEqual(["SEARCH_ARGUMENT_HINT", "SEARCH_MISUSE_WARNING"], warnings)
+        self.assertIn("SEARCH_MISUSE_BLOCKED", codes)
+
+    def test_corrected_search_after_hint_can_complete(self):
+        job = self.bridge.create_job("Correct the search and finish")
+        responses = iter([
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "invoice", "file_glob": "invoice"},
+            }}]}},
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {"query": "invoice", "file_glob": "*.py"},
+            }}]}},
+            {"message": {"content": "verified"}},
+        ])
+        results = iter([
+            {"matches": [], "count": 0, "exit_code": 1},
+            {"matches": ["app.py:1:invoice"], "count": 1, "exit_code": 0},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _messages, **_kwargs: next(responses),
+            ),
+            mock.patch.object(
+                self.bridge, "execute_tool", side_effect=lambda *_args: next(results),
+            ),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual("verified", persisted["result"])
+        self.assertEqual(1, persisted["successful_tool_calls"])
+        self.assertEqual(1, persisted["tool_feedback_events"])
+
     def test_repeated_textual_tool_names_fail_closed(self):
         job = self.bridge.create_job("Inspect through tools")
         responses = iter([
@@ -402,6 +561,38 @@ class BridgeCompletionTests(unittest.TestCase):
                 {"path": "   ", "query": "Office", "max_results": 999},
             ),
         )
+        self.assertEqual(
+            {
+                "query": "invoice", "path": ".", "file_glob": None,
+                "max_results": 80,
+            },
+            self.bridge.canonical_tool_arguments(
+                "project_search", {"query": "invoice"},
+            ),
+        )
+        implicit = self.bridge.tool_fingerprint(
+            "project_search",
+            self.bridge.canonical_tool_arguments(
+                "project_search", {"query": "invoice"},
+            ),
+        )
+        explicit = self.bridge.tool_fingerprint(
+            "project_search",
+            self.bridge.canonical_tool_arguments(
+                "project_search", {
+                    "query": "invoice", "path": ".", "file_glob": None,
+                    "max_results": 80,
+                },
+            ),
+        )
+        self.assertEqual(implicit, explicit)
+        self.assertTrue(self.bridge.suspicious_search_arguments({
+            "query": "reversal_of_invoice_uuid",
+            "file_glob": "reversal_of_invoice_uuid",
+        }))
+        self.assertFalse(self.bridge.suspicious_search_arguments({
+            "query": "invoice", "file_glob": "Makefile",
+        }))
 
     def test_execute_tool_sends_normalized_arguments(self):
         with mock.patch.object(

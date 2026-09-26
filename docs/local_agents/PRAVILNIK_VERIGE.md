@@ -87,6 +87,15 @@ Moduli pod `docs/local_agents/pravila/` so mehansko generirani iz trenutnega
   nadaljevanja.
 - Modelov opis ni dokaz. Dokazi so dejanski tool calli, prebrane datoteke,
   diff, izpis imenovanega testa in trajni audit dogodki.
+- Bridge pred izvedbo preveri ime, dovoljeni seznam, argumente in osnovno shemo
+  orodja. Ob napaki model dobi strukturirano kodo napake, opis pravilne rabe,
+  seznam orodij, dovoljenih v konkretni seji, ter primer relevantnega klica.
+- Pri `project_search` je `query` iskano besedilo, `file_glob` pa samo filter
+  imen datotek. Prazno iskanje z očitno zamenjanima pomenoma ne šteje kot nov
+  projektni dokaz; bridge najprej opozori, nato ponovitev iste napake blokira.
+- Identičen `project_search` se izvede samo prvič. Drugi klic dobi opozorilo,
+  tretji je blokiran, četrti pa zaključi nalogo z `LOOP_DETECTED`. Vsi dogodki
+  in števci ostanejo v trajni bridge sledi.
 - Sprememba zunaj `allowed_files`, odsoten pričakovani diff ali ponavljanje brez
   nove spremembe blokira tek.
 - Nobena lokalna oznaka `READY`, `APPROVE` ali `VERDICT` ne pomeni mergea,
@@ -109,4 +118,3 @@ Celotni tek obvesti lastnika samo ob pomembnem checkpointu:
 `READY_FOR_OWNER_LEASE`, `READY_FOR_CODEX_REVIEW`, `BLOCKED` ali `FAILED`.
 Surov modelni izhod in skrivnosti ne sodijo v obvestilo. Audit in bridge sled
 ostaneta avtoritativni dokaz pod konkretnim ID-jem naloge.
-

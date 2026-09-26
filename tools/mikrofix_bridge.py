@@ -530,11 +530,195 @@ def normalize_tool_arguments(name, arguments):
     return normalized
 
 
-def execute_tool(name, arguments):
+TOOL_EXAMPLES = {
+    "project_status": {},
+    "project_read": {"path": "mikrofix_server/operations.py", "start_line": 1, "end_line": 240},
+    "project_list": {"path": "mikrofix_server", "max_entries": 200},
+    "project_search": {
+        "query": "reversal_of_invoice_uuid", "path": ".",
+        "file_glob": "*.py", "max_results": 80,
+    },
+    "project_diff": {},
+    "project_apply_patch": {
+        "patch": "*** Begin Patch\n...\n*** End Patch",
+        "summary": "Kratek opis dovoljene spremembe",
+    },
+    "project_create": {
+        "path": "dovoljena/pot.txt", "content": "vsebina",
+        "summary": "Ustvari dovoljeno datoteko",
+    },
+    "project_replace": {
+        "path": "dovoljena/pot.py", "old": "stari blok", "new": "novi blok",
+        "summary": "Zamenja en dovoljeni blok",
+    },
+    "project_run_check": {"profile": "local_agent_tests"},
+    "system_command": {
+        "command": "dovoljen ukaz", "purpose": "Namen ukaza",
+    },
+    "desktop_inspect": {},
+    "desktop_action": {"action": "focus_window", "window_id": 1},
+}
+
+
+class ToolCallValidationError(RuntimeError):
+    pass
+
+
+def tool_definition(name):
+    return next(
+        (tool["function"] for tool in TOOLS if tool["function"]["name"] == name),
+        None,
+    )
+
+
+def available_tool_guidance(preferred=None):
+    """Return compact, session-specific usage guidance after a bad call."""
+    names = sorted(ALLOWED_TOOL_NAMES)
+    details = []
+    ordered = ([preferred] if preferred in ALLOWED_TOOL_NAMES else []) + [
+        name for name in names if name != preferred
+    ]
+    for name in ordered:
+        definition = tool_definition(name)
+        if definition is None:
+            continue
+        parameters = definition.get("parameters") or {}
+        details.append({
+            "name": name,
+            "purpose": definition.get("description", ""),
+            "required": parameters.get("required", []),
+            "accepted_arguments": sorted((parameters.get("properties") or {}).keys()),
+            "example": TOOL_EXAMPLES.get(name),
+        })
+    return {
+        "message": (
+            "Uporabi enega od dovoljenih strukturiranih orodnih klicev spodaj. "
+            "`file_glob` filtrira IMENA DATOTEK (npr. `*.py`); iskani simbol "
+            "ali besedilo vedno sodi v `query`."
+        ),
+        "available_tools": names,
+        "use_them_as_follows": details,
+    }
+
+
+def _matches_json_type(value, expected):
+    kinds = expected if isinstance(expected, list) else [expected]
+    for kind in kinds:
+        if kind == "null" and value is None:
+            return True
+        if kind == "string" and isinstance(value, str):
+            return True
+        if kind == "integer" and isinstance(value, int) and not isinstance(value, bool):
+            return True
+        if kind == "number" and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return True
+        if kind == "boolean" and isinstance(value, bool):
+            return True
+        if kind == "object" and isinstance(value, dict):
+            return True
+    return False
+
+
+def validate_tool_arguments(name, arguments):
+    """Fail closed before contacting the executor and return normalized arguments."""
+    if not isinstance(name, str) or not name:
+        raise ToolCallValidationError("Ime orodja manjka ali ni besedilo.")
     if name not in ALLOWED_TOOL_NAMES:
-        raise RuntimeError(f"Orodje ni dovoljeno v tej seji: {name}")
-    if name not in TOOL_ENDPOINTS:
-        raise RuntimeError(f"Neznano orodje: {name}")
+        raise ToolCallValidationError(f"Orodje ni dovoljeno v tej seji: {name}")
+    definition = tool_definition(name)
+    if definition is None or name not in TOOL_ENDPOINTS:
+        raise ToolCallValidationError(f"Neznano orodje: {name}")
+    if not isinstance(arguments, dict):
+        raise ToolCallValidationError("Argumenti orodja morajo biti JSON objekt.")
+    normalized = normalize_tool_arguments(name, arguments)
+    schema = definition.get("parameters") or {}
+    properties = schema.get("properties") or {}
+    unknown = sorted(set(normalized) - set(properties))
+    if unknown:
+        raise ToolCallValidationError("Neznani argumenti: " + ", ".join(unknown))
+    missing = [key for key in schema.get("required", []) if key not in normalized]
+    if missing:
+        raise ToolCallValidationError("Manjkajo obvezni argumenti: " + ", ".join(missing))
+    for key, value in normalized.items():
+        rule = properties[key]
+        if not _matches_json_type(value, rule.get("type")):
+            raise ToolCallValidationError(f"Argument {key!r} ima napačen tip.")
+        if "enum" in rule and value not in rule["enum"]:
+            raise ToolCallValidationError(
+                f"Argument {key!r} mora biti eden od: "
+                + ", ".join(map(str, rule["enum"]))
+            )
+        if isinstance(value, str) and len(value) < int(rule.get("minLength", 0)):
+            raise ToolCallValidationError(f"Argument {key!r} je prekratek.")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in rule and value < rule["minimum"]:
+                raise ToolCallValidationError(f"Argument {key!r} je pod dovoljeno mejo.")
+            if "maximum" in rule and value > rule["maximum"]:
+                raise ToolCallValidationError(f"Argument {key!r} je nad dovoljeno mejo.")
+    return normalized
+
+
+def tool_failure_payload(name, error, *, code="TOOL_CALL_FAILED", extra=None):
+    payload = {
+        "ok": False,
+        "error_code": code,
+        "error": str(error),
+        "guidance": available_tool_guidance(name),
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def tool_fingerprint(name, arguments):
+    return hashlib.sha256(json.dumps(
+        {"tool": name, "arguments": arguments},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+    ).encode("utf-8")).hexdigest()
+
+
+def canonical_tool_arguments(name, arguments):
+    """Add schema defaults only for stable duplicate-call comparison."""
+    normalized = normalize_tool_arguments(name, arguments)
+    definition = tool_definition(name) or {}
+    properties = (definition.get("parameters") or {}).get("properties") or {}
+    for key, rule in properties.items():
+        if key not in normalized and "default" in rule:
+            normalized[key] = rule["default"]
+    if name == "project_search" and "file_glob" not in normalized:
+        normalized["file_glob"] = None
+    return normalized
+
+
+def suspicious_search_arguments(arguments):
+    """Detect the common symbol-in-file_glob mistake without rejecting valid globs."""
+    if not isinstance(arguments, dict):
+        return False
+    file_glob = arguments.get("file_glob")
+    if not isinstance(file_glob, str) or not file_glob.strip():
+        return False
+    value = file_glob.strip()
+    query = arguments.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return False
+    candidate = value.strip("*?[]").strip()
+    query = query.strip()
+    return (
+        "." not in value and "/" not in value and "\\" not in value
+        and bool(candidate)
+        and (candidate == query or candidate in query or query in candidate)
+    )
+
+
+def search_result_count(result):
+    if not isinstance(result, dict):
+        return None
+    count = result.get("count")
+    return count if isinstance(count, int) and not isinstance(count, bool) else None
+
+
+def execute_tool(name, arguments):
+    arguments = validate_tool_arguments(name, arguments)
 
     method, path = TOOL_ENDPOINTS[name]
 
@@ -542,7 +726,7 @@ def execute_tool(name, arguments):
         return executor_request(method, path)
 
     return executor_request(
-        method, path, normalize_tool_arguments(name, arguments)
+        method, path, arguments
     )
 
 
@@ -735,6 +919,12 @@ Deluješ preko lokalnega MikroFIX bridge izvajalca.
 Ko potrebuješ dejanske podatke ali želiš nekaj spremeniti,
 uporabi razpoložljiva orodja.
 
+Pri `project_search` je `query` iskani simbol ali besedilo, `file_glob` pa
+izključno filter imen datotek, na primer `*.py`. Če bridge vrne
+`TOOL_CALL_INVALID`, `SEARCH_ARGUMENT_HINT`, `DUPLICATE_CALL_WARNING` ali
+`DUPLICATE_CALL_BLOCKED`, preberi priloženi `guidance` in spremeni strategijo.
+Ne ponavljaj blokiranega klica.
+
 Ne trdi, da je bilo nekaj prebrano, spremenjeno ali preverjeno,
 če za to nisi prejel rezultata ustreznega orodja.
 
@@ -796,6 +986,13 @@ def process_job(job_id):
     successful_tool_use_count = 0
     tool_less_response_count = 0
     finalization_requested = False
+    tool_call_repeats = {}
+    tool_result_cache = {}
+    suspicious_empty_searches = 0
+    suspicious_search_blocks = 0
+    job.setdefault("tool_feedback_events", 0)
+    job.setdefault("duplicate_tool_calls", 0)
+    job.setdefault("blocked_tool_calls", 0)
 
     try:
         for step in range(1, MAX_STEPS + 1):
@@ -958,11 +1155,13 @@ def process_job(job_id):
                 fn = call.get("function", {})
                 name = fn.get("name")
                 arguments = fn.get("arguments", {})
+                argument_error = None
 
                 if isinstance(arguments, str):
                     try:
                         arguments = json.loads(arguments)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as exc:
+                        argument_error = f"Argumenti niso veljaven JSON: {exc}"
                         arguments = {}
 
                 tool_use_count += 1
@@ -984,50 +1183,159 @@ def process_job(job_id):
                     "arguments": arguments,
                 })
 
-                try:
-                    result = execute_tool(
+                fingerprint = None
+                repeat_count = 1
+                if name == "project_search" and isinstance(arguments, dict):
+                    fingerprint_arguments = canonical_tool_arguments(name, arguments)
+                    fingerprint = tool_fingerprint(name, fingerprint_arguments)
+                    repeat_count = tool_call_repeats.get(fingerprint, 0) + 1
+                    tool_call_repeats[fingerprint] = repeat_count
+
+                guarded_result = None
+                if fingerprint is not None and repeat_count >= 2:
+                    job["duplicate_tool_calls"] += 1
+                    job["tool_feedback_events"] += 1
+                    if repeat_count >= 4:
+                        job["blocked_tool_calls"] += 1
+                        save_job(job)
+                        raise RuntimeError(
+                            "LOOP_DETECTED: isti project_search je bil zahtevan "
+                            "štirikrat. Naloga je varno blokirana."
+                        )
+                    code = (
+                        "DUPLICATE_CALL_WARNING" if repeat_count == 2
+                        else "DUPLICATE_CALL_BLOCKED"
+                    )
+                    if repeat_count == 3:
+                        job["blocked_tool_calls"] += 1
+                    guarded_result = tool_failure_payload(
                         name,
-                        arguments
+                        (
+                            "Ta identični project_search je bil že izveden. "
+                            + (
+                                "Prejšnji rezultat je že v pogovoru; spremeni query, "
+                                "path ali file_glob. Naslednja enaka ponovitev bo blokirana."
+                                if repeat_count == 2 else
+                                "Klic ni bil ponovno izveden. Uporabi drugo strategijo; "
+                                "naslednja enaka ponovitev bo zaključila nalogo."
+                            )
+                        ),
+                        code=code,
+                        extra={
+                            "repeat_count": repeat_count,
+                            "previous_result_available": fingerprint in tool_result_cache,
+                        },
                     )
 
-                    tool_result = {
-                        "ok": True,
-                        "result": result
-                    }
-                    successful_tool_use_count += 1
-                    job["successful_tool_calls"] = successful_tool_use_count
-
-                    write_log(
-                        job_id,
-                        f"TOOL {name}: OK"
+                suspicious = (
+                    name == "project_search"
+                    and suspicious_search_arguments(arguments)
+                )
+                if (
+                    guarded_result is None and suspicious
+                    and suspicious_empty_searches >= 2
+                ):
+                    suspicious_search_blocks += 1
+                    job["blocked_tool_calls"] += 1
+                    job["tool_feedback_events"] += 1
+                    if suspicious_search_blocks >= 2:
+                        save_job(job)
+                        raise RuntimeError(
+                            "LOOP_DETECTED: model po blokadi še vedno uporablja simbol "
+                            "kot file_glob. Naloga je varno blokirana."
+                        )
+                    guarded_result = tool_failure_payload(
+                        name,
+                        "Klic ni bil izveden: file_glob je bil že dvakrat uporabljen "
+                        "kot iskani simbol namesto filtra imen datotek.",
+                        code="SEARCH_MISUSE_BLOCKED",
+                        extra={"repeat_count": suspicious_empty_searches + 1},
                     )
-                    write_trace(job_id, {
-                        "type": "tool_result",
-                        "role": AGENT_ROLE,
-                        "step": step,
-                        "tool": name,
-                        "ok": True,
-                        "result": result,
-                    })
+
+                try:
+                    if guarded_result is not None:
+                        tool_result = guarded_result
+                    else:
+                        if argument_error is not None:
+                            raise ToolCallValidationError(argument_error)
+                        normalized_arguments = validate_tool_arguments(name, arguments)
+                        result = execute_tool(name, normalized_arguments)
+                        tool_result = {"ok": True, "result": result}
+                        counts_as_evidence = True
+                        if name == "project_search":
+                            count = search_result_count(result)
+                            if count == 0 and suspicious:
+                                suspicious_empty_searches += 1
+                                counts_as_evidence = False
+                                code = (
+                                    "SEARCH_ARGUMENT_HINT"
+                                    if suspicious_empty_searches == 1
+                                    else "SEARCH_MISUSE_WARNING"
+                                )
+                                tool_result["warning"] = {
+                                    "code": code,
+                                    "message": (
+                                        "Iskanje ni našlo rezultatov in file_glob je "
+                                        "videti kot simbol. Uporabi file_glob='*.py' ter "
+                                        "iskani simbol v query."
+                                    ),
+                                    "repeat_count": suspicious_empty_searches,
+                                    "next_action": (
+                                        "Popravi argumente. Naslednji podoben napačen "
+                                        "klic bo blokiran."
+                                        if suspicious_empty_searches >= 2 else
+                                        "Popravi argumente pred naslednjim iskanjem."
+                                    ),
+                                    "guidance": available_tool_guidance(name),
+                                }
+                                tool_result["counts_as_evidence"] = False
+                                job["tool_feedback_events"] += 1
+                            else:
+                                suspicious_empty_searches = 0
+                                suspicious_search_blocks = 0
+                        if counts_as_evidence:
+                            successful_tool_use_count += 1
+                            job["successful_tool_calls"] = successful_tool_use_count
+                        if fingerprint is not None:
+                            tool_result_cache[fingerprint] = tool_result
 
                 except Exception as e:
-                    tool_result = {
-                        "ok": False,
-                        "error": str(e)
-                    }
+                    tool_result = tool_failure_payload(
+                        name,
+                        e,
+                        code=(
+                            "TOOL_CALL_INVALID"
+                            if isinstance(e, ToolCallValidationError)
+                            else "TOOL_CALL_FAILED"
+                        ),
+                    )
+                    job["tool_feedback_events"] += 1
+                    if fingerprint is not None:
+                        tool_result_cache[fingerprint] = tool_result
 
+                if tool_result.get("ok") and tool_result.get("warning"):
                     write_log(
                         job_id,
-                        f"TOOL {name}: ERROR: {e}"
+                        f"TOOL {name}: OK_WITH_WARNING: "
+                        f"{tool_result['warning'].get('code', 'LOW_VALUE')}",
                     )
-                    write_trace(job_id, {
-                        "type": "tool_result",
-                        "role": AGENT_ROLE,
-                        "step": step,
-                        "tool": name,
-                        "ok": False,
-                        "error": str(e),
-                    })
+                elif tool_result.get("ok"):
+                    write_log(job_id, f"TOOL {name}: OK")
+                else:
+                    write_log(
+                        job_id,
+                        f"TOOL {name}: {tool_result.get('error_code', 'ERROR')}: "
+                        f"{tool_result.get('error', '')}",
+                    )
+
+                trace_result = {
+                    "type": "tool_result",
+                    "role": AGENT_ROLE,
+                    "step": step,
+                    "tool": name,
+                    **tool_result,
+                }
+                write_trace(job_id, trace_result)
 
                 messages.append({
                     "role": "tool",
