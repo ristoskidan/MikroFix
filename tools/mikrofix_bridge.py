@@ -1004,6 +1004,7 @@ def process_job(job_id):
     tool_use_count = 0
     successful_tool_use_count = 0
     tool_less_response_count = 0
+    empty_final_response_count = 0
     finalization_requested = False
     tool_call_repeats = {}
     tool_result_cache = {}
@@ -1012,6 +1013,8 @@ def process_job(job_id):
     job.setdefault("tool_feedback_events", 0)
     job.setdefault("duplicate_tool_calls", 0)
     job.setdefault("blocked_tool_calls", 0)
+    job["empty_final_responses"] = 0
+    job.pop("error_code", None)
 
     try:
         for step in range(1, MAX_STEPS + 1):
@@ -1093,19 +1096,50 @@ def process_job(job_id):
 
                     continue
 
+                visible_reply = result
+                if RESPONSE_FORMAT is not None and result:
+                    try:
+                        decoded = json.loads(result)
+                        if (
+                            isinstance(decoded, dict)
+                            and isinstance(decoded.get("reply"), str)
+                        ):
+                            visible_reply = decoded["reply"].strip()
+                    except json.JSONDecodeError:
+                        pass
+
+                if not visible_reply:
+                    empty_final_response_count += 1
+                    job["empty_final_responses"] = empty_final_response_count
+                    save_job(job)
+                    if empty_final_response_count >= MAX_TOOLLESS_RESPONSES:
+                        job["error_code"] = "EMPTY_FINAL_RESPONSE"
+                        save_job(job)
+                        raise RuntimeError(
+                            "EMPTY_FINAL_RESPONSE: model po zbranih dokazih "
+                            f"{empty_final_response_count}-krat ni vrnil "
+                            "nepraznega odgovora lastniku."
+                        )
+                    write_log(
+                        job_id,
+                        "Model je po zbranih dokazih vrnil samo premislek brez "
+                        "vidnega odgovora; zahtevam neposreden odgovor lastniku."
+                    )
+                    messages.append(message)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Dokazi so že zbrani. Ne kliči dodatnih orodij in ne "
+                            "nadaljuj samo s premislekom. Zdaj vrni neposreden, "
+                            "neprazen odgovor lastniku na podlagi že zbranih dokazov."
+                        ),
+                    })
+                    continue
+
                 if RESPONSE_FORMAT is not None and not structured:
                     if DETERMINISTIC_REPLY_WRAPPER:
-                        reply = result
-                        try:
-                            decoded = json.loads(result)
-                            if isinstance(decoded, dict) and isinstance(
-                                decoded.get("reply"), str
-                            ):
-                                reply = decoded["reply"].strip()
-                        except json.JSONDecodeError:
-                            pass
                         result = json.dumps(
-                            {"reply": reply}, ensure_ascii=False, indent=2,
+                            {"reply": visible_reply}, ensure_ascii=False, indent=2,
                         )
                         atomic_text(job_dir(job_id) / "result.txt", result + "\n")
                         job["status"] = "completed"
@@ -1133,27 +1167,6 @@ def process_job(job_id):
                         job_id,
                         "Dokazi so zbrani; zahtevam ločen strukturirani končni odgovor."
                     )
-                    continue
-
-                if not result:
-                    write_log(
-                        job_id,
-                        "Izvajalec je vrnil prazen končni odgovor; zahtevam besedni povzetek."
-                    )
-
-                    messages.append(message)
-
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Orodja si že uporabil. Zdaj ne kliči dodatnih orodij, "
-                            "ampak napiši jasen končni odgovor uporabniku. "
-                            "Povzemi konkretne ugotovitve, kaj si preveril in "
-                            "kaj predlagaš kot naslednje korake. "
-                            "Končni odgovor ne sme biti prazen."
-                        )
-                    })
-
                     continue
 
                 atomic_text(job_dir(job_id) / "result.txt", result + "\n")
@@ -1385,6 +1398,10 @@ def process_job(job_id):
             "type": "error",
             "role": AGENT_ROLE,
             "content": str(e),
+            **(
+                {"error_code": job["error_code"]}
+                if job.get("error_code") else {}
+            ),
         })
         notify_job_completion(job)
 

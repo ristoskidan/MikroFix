@@ -325,6 +325,80 @@ class BridgeCompletionTests(unittest.TestCase):
             json.loads(persisted["result"]),
         )
 
+    def test_thinking_only_reply_is_retried_then_wrapped(self):
+        job = self.bridge.create_job("Inspect then answer visibly")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {
+                "thinking": "Dokaze imam, odgovor moram še oblikovati.",
+                "content": "",
+            }},
+            {"message": {"content": "Neprazen odgovor lastniku."}},
+        ])
+        received_messages = []
+
+        def answer(messages, **_kwargs):
+            received_messages.append(json.loads(json.dumps(messages)))
+            return next(responses)
+
+        with (
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+            mock.patch.object(
+                self.bridge, "RESPONSE_FORMAT",
+                {"type": "object", "required": ["reply"]},
+            ),
+            mock.patch.object(self.bridge, "MINIMUM_SUCCESSFUL_TOOL_CALLS", 1),
+            mock.patch.object(self.bridge, "DETERMINISTIC_REPLY_WRAPPER", True),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(1, persisted["empty_final_responses"])
+        self.assertEqual(
+            {"reply": "Neprazen odgovor lastniku."},
+            json.loads(persisted["result"]),
+        )
+        retry_instruction = received_messages[2][-1]["content"]
+        self.assertIn("Ne kliči dodatnih orodij", retry_instruction)
+        self.assertIn("neprazen odgovor lastniku", retry_instruction)
+
+    def test_repeated_empty_final_replies_fail_closed(self):
+        job = self.bridge.create_job("Never complete with an empty reply")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}}
+            }]}},
+            {"message": {"thinking": "Prvi premislek.", "content": ""}},
+            {"message": {
+                "thinking": "Drugi premislek.",
+                "content": '{"reply": "   "}',
+            }},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _messages, **_kwargs: next(responses),
+            ),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+            mock.patch.object(
+                self.bridge, "RESPONSE_FORMAT",
+                {"type": "object", "required": ["reply"]},
+            ),
+            mock.patch.object(self.bridge, "MINIMUM_SUCCESSFUL_TOOL_CALLS", 1),
+            mock.patch.object(self.bridge, "MAX_TOOLLESS_RESPONSES", 2),
+            mock.patch.object(self.bridge, "DETERMINISTIC_REPLY_WRAPPER", True),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("EMPTY_FINAL_RESPONSE", persisted["error_code"])
+        self.assertEqual(2, persisted["empty_final_responses"])
+        self.assertIn("EMPTY_FINAL_RESPONSE", persisted["error"])
+        self.assertFalse((self.bridge.job_dir(job["id"]) / "result.txt").exists())
+
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
         job = self.bridge.create_job("Verify with a successful tool")
         responses = iter([
