@@ -48,50 +48,48 @@ sledljivosti in nove centralne zapisovalne meje.
 
 Celotni preverljivi indeks 25 pogovorov, najdenih formul in dokumentov je v
 [`../POGOVORI_RISTOSKI_DAN_INDEKS_2026-09-18.md`](../POGOVORI_RISTOSKI_DAN_INDEKS_2026-09-18.md).
-Pregled je potrdil obstoj izdelane odkupne pogodbe s prodajalcem, ne pa tudi
-dokončanega ločenega pisnega pooblastila osebi, ki odkupuje v imenu MikroFIX.
-Pooblastila zato pred uporabo agentskega toka ni dovoljeno šteti za že izdelan
-dokument.
+Ločeno pisno pooblastilo je bilo pozneje izdelano in je sledljivo v
+`docs/pravni/POOBLASTILO_ZA_PREGLED_IN_PREVZEM_NAPRAV.docx`; njegov generator
+je `tools/build_pooblastilo_docx.py`. Pooblastilo ne prenese pravice do končne
+odobritve ali sklenitve pogodbe in ne dovoljuje plačila.
 
-## 4. Produkcijske blokade, ki zahtevajo zunanjo potrditev
+## 4. Potrjene odločitve 26. 9. 2026
 
-### FURS in interni akt
+- vsak sken ali izbor artikla ustvari novo kronološko vrstico `x1`; vrstice se
+  ne združujejo in ne brišejo;
+- pred izdajo je količina neposredno spremenljiva na pozitivno ali negativno
+  celo število, nikoli na `0`; sprememba ima notranjo revizijsko sled in ne
+  ustvari avtomatske korekcijske vrstice;
+- ročna negativna vrstica se poveže s konkretno neizravnano pozitivno vrstico
+  in prevzame njen cenovni, davčni ter rabatni posnetek;
+- ob enem kandidatu ga sistem jasno izbere, ob več kandidatih mora izbrati
+  uporabnik; sistem ne ugiba;
+- izdani račun ohrani vse končne vrstice kronološko in je nespremenljiv;
+- vsak neprazen neposredni ali servisni račun se lahko izravna na `0,00 EUR` in
+  izda; negativni račun ni dovoljen;
+- po izdaji je dovoljen samo vezan storno, njegov saldo pa se uporabi na istem
+  izvornem računu;
+- minimum artikla je dokumentirani skupni strošek + `5 %`, zaokrožen navzgor na
+  naslednjih `5 EUR`; `L0` je ločen različicen minimum dela, cena pa se v
+  Blagajni spreminja samo prek rabata;
+- Blagajna sprejme reklamacijo in jo poveže z računom, Office jo administrira,
+  Servis pa opravi tehnično delo;
+- pooblaščenka sme pregledati in prevzeti napravo ter pripraviti samo osnutek
+  pogodbe. Daniel Ristoski jo dokončno odobri in sklene ter izvede plačilo.
 
-Pred produkcijo je treba določiti končno matriko:
+## 5. Tri odprte odločitve
 
-- fizična naprava;
-- nameščeni program;
-- dejanski poslovni prostor `MFD` ali `MFT`;
-- FURS oznaka elektronske naprave;
-- uporabljeno številčno zaporedje.
+1. **Aktivni cenovni profil in `L0`:** določiti začetno vrednost `L0`, lastnika
+   cenovnega profila, njegovo različico ter postopek potrditve spremembe.
+2. **Saldo vezanega storna:** določiti podatkovni model in uporabniški tok, s
+   katerima se saldo uporabi na istem izvornem računu brez izgube kronološke in
+   davčne sledi.
+3. **SIGEN-CA:** pred produkcijo pri veljavnem pravnem oziroma uradnem viru
+   potrditi dovoljeni tehnični in organizacijski način uporabe namenskega
+   digitalnega potrdila v centralizirani FURS arhitekturi.
 
-Po potrebi se spremeni prijava FURS in izdela nov interni akt. Sedanja podpisana
-različica 1.2 ostane zgodovinski veljavni dokument za doslej prijavljeno
-postavitev in se je ne prepisuje.
-
-### Ničelni, garancijski in brezplačni račun
-
-Poslovno je odločeno, da se vsak servis zaključi z računom in da ničelni račun
-ohrani pozitivne obračunske vrstice ter enake negativne izravnalne vrstice.
-Pred produkcijo je treba pri računovodji oziroma uradnem viru potrditi samo še
-davčno/računovodsko obravnavo tako oblikovanega dokumenta.
-
-### Garancija in neskladnost
-
-Pred produkcijo se ponovno preverijo trenutno veljavni roki, začetek teka z
-dobavo, obvezna vsebina garancijskega lista, razmerje med komercialno garancijo
-in zakonsko neskladnostjo ter pravila za rabljeno blago.
-
-### VKR in izredna izdaja
-
-Pred produkcijo se uradno preveri razmejitev med začasno prekinjeno povezavo,
-nedelovanjem posameznega odjemalca, nedosegljivim centralnim strežnikom in
-primerom, ko je dejansko treba uporabiti VKR.
-
-## 5. Odprte izvedbene podrobnosti
-
-- podrobnosti uporabniškega toka reklamacije po obvezni izbiri računa;
-- dokončna FURS matrika delovnih postaj in programov.
+Vse druge zgoraj zapisane točke so potrjeno ciljno poslovno stanje. Njihova
+neizvedenost v trenutni kodi je izvedbena vrzel, ne odprta poslovna odločitev.
 
 ## 6. Dodatno potrjeno 14. 9. 2026
 

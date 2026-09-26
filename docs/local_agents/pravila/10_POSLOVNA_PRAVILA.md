@@ -2,7 +2,7 @@
 
 # MikroFIX — veljavna poslovna pravila
 
-Datum konsolidacije: 14. 9. 2026
+Datum konsolidacije: 26. 9. 2026
 
 ## 1. Programi in odgovornosti
 
@@ -132,19 +132,40 @@ samo eno od potrditev:
 - `Zaključek je shranjen in čaka sinhronizacijo`, če povezave ni;
 - jasno napako oziroma `KONFLIKT SINHRONIZACIJE`, če strežnik zaključek zavrne.
 
-Centralni osnutek je vsebinsko zaklenjen. Blagajna ne spreminja vrstic, cen,
-količin ali rabatov in mu ne dodaja neposredno prodanih artiklov. Neposredna
-prodaja vedno nastane na ločenem računu.
+Centralni servisni osnutek ostane nespremenljiva izvorna referenca. Blagajna iz
+njega pripravi sledljiv predizdajni račun in ne prepisuje izvornega servisnega
+paketa. Neposredna prodaja vedno nastane na ločenem računu.
 
-## 8. Servis in račun
+## 8. Blagajniške vrstice, servis in račun
+
+- Vsak sken barkode oziroma ročna izbira artikla ustvari novo kronološko
+  vrstico s količino `1`. Sistem enakih artiklov ne združuje samodejno.
+- Pred izdajo je količino obstoječe vrstice dovoljeno neposredno spremeniti na
+  pozitivno ali negativno celo število, nikoli na `0`.
+- Sprememba količine ne ustvari avtomatske korekcijske vrstice. V notranjo
+  revizijsko sled se zapišejo dokument, vrstica, stara in nova vrednost,
+  uporabnik ter čas.
+- Vrstica se ne briše. Če ni več potrebna, se popravi z dovoljenim sledljivim
+  postopkom; izdani račun vedno ohrani končne vrstice v kronološkem vrstnem
+  redu in jih ne združi v neto prikaz.
+- Ročna negativna vrstica nastane z novim skenom oziroma izborom artikla in
+  nato ročno negativno količino. Negativna vrstica mora biti povezana s
+  konkretno neizravnano pozitivno vrstico istega artikla.
+- Če obstaja natanko ena primerna pozitivna vrstica, jo sistem izbere in
+  povezavo jasno pokaže. Če jih je več, mora uporabnik izbrati; sistem ne sme
+  ugibati po starosti, ceni ali podobnosti.
+- Negativna vrstica prevzame nespremenljiv cenovni, davčni in rabatni posnetek
+  povezane pozitivne vrstice. Povezava in prevzeti posnetek sta del revizijske
+  sledi. Negativna vrstica sama ne vrača zaloge.
 
 - Vsak servis se obračunsko zaključi z izdanim povezanim računom.
 - Pred računom je lahko tehnično zaključen oziroma pripravljen za obračun, ni pa
   dokončno zaključen.
 - Pravilo velja tudi za garancijsko, brezplačno, zavrnjeno ali drugače
   nezaračunano obravnavo.
-- Prazno neposredno prodajno košarico je mogoče opustiti. Servisnega obračuna ni
-  mogoče opustiti samo zato, ker je znesek `0,00 EUR`.
+- Prazno neposredno prodajno košarico je mogoče opustiti. Vsak neprazen
+  predizdajni račun, neposredni ali servisni, je dovoljeno pravilno izravnati na
+  `0,00 EUR` in ga izdati. Končni negativni znesek je vedno prepovedan.
 - Ničelni servisni račun ni prazen. Vsebuje prvotne obračunske vrstice in enake
   izravnalne vrstice z negativno količino. Potrjeni primer je:
 
@@ -156,6 +177,10 @@ prodaja vedno nastane na ločenem računu.
   Skupni znesek je `0,00 EUR`. Negativni vrstici sta sledljiva razloga za
   izravnavo istega dela in storitve; ne pomenita vračila kosa v zalogo in ne
   ustvarita pozitivne zaloge.
+- Po izdaji so vrstice nespremenljive. Popravek izdanega računa je dovoljen samo
+  z vezanim storno dokumentom; saldo storna se uporabi na istem izvornem
+  računu, natančni podatkovni model in uporabniški tok te poravnave pa sta še
+  odprta.
 
 ## 9. Offline Servis in sinhronizacija
 
@@ -212,6 +237,9 @@ Blagajna in Office v prvi fazi nimata offline zapisovalnega načina.
 
 ## 12. Reklamacije in povezave dokumentov
 
+- Blagajna fizično sprejme reklamacijo, izbere konkretni račun in odpre
+  sledljivo povezavo. Office vodi in administrira reklamacijski zapis. Servis
+  opravi tehnično diagnostiko in delo, ne odpira pa reklamacije brez računa.
 - Reklamacija se vedno odpre iz konkretnega izdanega računa in mora hraniti
   njegovo nespremenljivo identiteto.
 - Če račun izvira iz servisa, je povezan tudi s konkretnim servisnim nalogom.
@@ -249,3 +277,24 @@ Glavno poslovno stanje ostane preprosto:
 Tehnična faza in stanje sinhronizacije sta ločena podatka. Zato so
 `Pripravljeno za obračun`, `Čaka sinhronizacijo` in `SYNC_CONFLICT` vidna
 pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
+
+## 15. Najnižja cena in rabat
+
+- Najnižja dovoljena prodajna cena artikla je dokumentirani skupni strošek,
+  povečan za `5 %`, nato zaokrožen navzgor na naslednjih `5 EUR`.
+- `L0` je ločen, različicen interni minimum dela, ki ga določa aktivni potrjeni
+  cenovni profil. Njegova začetna vrednost še ni potrjena.
+- Blagajnik transakcijske cene ne prepisuje neposredno. Spremeni jo lahko samo
+  z rabatom, ki ne sme prebiti veljavnega minimuma artikla ali `L0`.
+- Na računu se ob izdaji shrani uporabljena različica cenovnega profila in
+  odločilni cenovni posnetek.
+
+## 16. Omejeno zastopanje pri odkupu
+
+- Pooblaščenka sme v okviru veljavnega pisnega pooblastila pregledati in
+  prevzeti napravo ter pripraviti samo osnutek pogodbe.
+- MikroFIX ne sme zavezati, pogodbe dokončno odobriti ali skleniti in ne sme
+  izvesti plačila. Končno odobritev, sklenitev in plačilo opravi Daniel
+  Ristoski.
+- Sistem pred sprejemom takega dejanja preveri veljavnost in obseg pooblastila
+  ter v revizijsko sled zapiše uporabljeno različico.

@@ -75,16 +75,34 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 - Dva blagajnika istočasno izdata isti servisni osnutek: nastane največ en račun
   in ena številka.
 - Ponovitev iste operacije vrne že znani rezultat.
-- Servisnih vrstic, cen, količin in rabatov ni mogoče spremeniti.
 - Neposredna prodaja nastane na ločenem računu.
 - Prazna neposredna prodaja se lahko opusti brez številke.
-- Servis z vrednostjo `0,00 EUR` se ne more dokončno zapreti brez povezanega
-  računa.
-- Ničelni račun ohrani pozitivni vrstici storitve in materiala ter ustvari
-  ustrezni negativni izravnalni vrstici; seštevek je `0,00 EUR`, zaloga pa se ob
-  negativni vrstici ne poveča.
+- Dva zaporedna skena istega artikla ustvarita dve vrstici `x1`; nobena se ne
+  združi ali izbriše.
+- Pred izdajo se količina vrstice spremeni na pozitivno in negativno celo
+  vrednost, sprememba na `0` pa je zavrnjena. Revizijska sled vsebuje staro in
+  novo vrednost, uporabnika, čas, dokument ter vrstico.
+- Nova negativna vrstica se lahko poveže samodejno samo, kadar obstaja natanko
+  ena primerna neizravnana pozitivna vrstica. Pri dveh kandidatih izdaja ostane
+  blokirana do izrecne uporabnikove izbire.
+- Negativna vrstica prevzame točno ceno, davek in rabat povezane pozitivne
+  vrstice tudi, če se je trenutni cenik medtem spremenil; ne poveča zaloge.
+- Izdani račun pokaže vse končne vrstice kronološko in jih ne netira.
+- Servisni in neposredni neprazni račun se lahko izravnata na `0,00 EUR` ter se
+  vseeno izdata. Negativni končni znesek je zavrnjen.
+- Po izdaji ni mogoče spremeniti vrstice; dovoljen je samo vezan storno, ki
+  ohrani revizijsko povezavo do izvornega računa.
 
-## 8. Inventura
+## 8. Cena in rabat
+
+- Za več različnih stroškov se minimum artikla izračuna kot dokumentirani skupni
+  strošek + `5 %` in vedno zaokroži navzgor na naslednjih `5 EUR`.
+- Sprememba cene v Blagajni je mogoča samo prek rabata. Poskus preboja minimuma
+  artikla ali veljavnega `L0` je zavrnjen.
+- Izdani račun ohrani različico profila in cenovni posnetek tudi po poznejši
+  spremembi cenika.
+
+## 9. Inventura
 
 - Polna inventura se ne začne, če prodaja ni zaprta.
 - Ne začne se ob odprtem, neknjiženem ali konfliktnem dokumentu.
@@ -92,7 +110,7 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
 - Med polno inventuro so vsi zalogovni in dokumentni vpisi blokirani.
 - Delna inventura ne spremeni zaloge.
 
-## 9. Dokumenti in zasebnost
+## 10. Dokumenti in zasebnost
 
 - Garancijski list konkretne naprave vsebuje polni IMEI.
 - Drugi javni dokumenti uporabljajo maskirano vrednost, kadar ni izrecno
@@ -104,15 +122,25 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
   garancije. Po poteku jo nadzorovana retencija izbriše, razen ob reklamaciji,
   sporu ali drugem veljavnem zadržanju.
 
-## 10. Reklamacije
+## 11. Reklamacije
 
+- Blagajna sprejme predmet in izbere račun, Office vodi reklamacijski zapis,
+  Servis pa izvede tehnični del. Servis brez računa reklamacije ne more odpreti.
 - Reklamacije ni mogoče ustvariti brez izbire konkretnega izdanega računa.
 - Reklamacija za servisni račun prek računa kaže isti servis in pripadajoči
   garancijski list.
 - Storno in nadomestni račun ohranita celotno verigo povezav in ne ustvarita
   nepovezane reklamacije.
 
-## 11. FURS in izredni postopki
+## 12. Omejeno pooblastilo
+
+- Veljavno pooblastilo pooblaščenki dovoli pregled in prevzem naprave ter
+  pripravo osnutka pogodbe.
+- Poskus končne odobritve, sklenitve pogodbe ali plačila z njeno identiteto je
+  zavrnjen. Enaka dejanja z Danielovo potrditvijo so sledljivo dovoljena.
+- Poteklo, preklicano ali vsebinsko neustrezno pooblastilo dejanje zavrne.
+
+## 13. FURS in izredni postopki
 
 - Dvojni klik ne ustvari druge številke, ZOI ali FURS dogodka.
 - Nejasen odgovor se usklajuje z natančno istim podpisanim zahtevkom.

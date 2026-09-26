@@ -1,6 +1,6 @@
 # MikroFIX — stanje izvedbe
 
-Datum dokumenta: 19. 9. 2026
+Datum dokumenta: 26. 9. 2026
 
 ## Namen
 
@@ -79,17 +79,28 @@ stenski zapis; če bi dal negativen rezultat, se izračun izrecno blokira namest
 tihega popravka na nič. Strežniško označevanje nenavadnega razmerja med
 stenskim in izmerjenim časom še ni izvedeno.
 
-Centralna pogodba, strežnik in Blagajna podpirajo način `ZERO_BALANCE` samo pri
-izdaji centralnega servisnega osnutka. Blagajnik ga izrecno izbere v plačilnem
-koraku. Predogled ohrani vse pozitivne zaklenjene vrstice v prvotnem vrstnem
-redu in za njimi pokaže enake negativne izravnalne vrstice v istem vrstnem
-redu; seštevek je `0,00 EUR`, plačila in UPN ni. Izbira se hrani v lokalnem
-varnostnem osnutku ter je del kontrolnega odtisa predogleda. Drugi F10 pošlje
-samo `payments=[]` in `settlement_mode=ZERO_BALANCE`, brez odjemalskih vrstic;
-strežnik končni posnetek sestavi iz svojega zaklenjenega osnutka. Neposredna
-prodaja tega načina nima. Ciljani testi preverjajo vrstni red, predogled PDF,
-prazna plačila, dejanski runtime klic in prepoved pri neposredni prodaji. Ročni
-preizkus celotnega zaslona še ostaja potreben.
+Centralna pogodba, strežnik in Blagajna trenutno podpirajo način
+`ZERO_BALANCE` samo pri izdaji centralnega servisnega osnutka. Predogled ohrani
+pozitivne zaklenjene vrstice in doda negativne izravnalne vrstice, plačil in UPN
+ni. Neposredna prodaja je v trenutni kodi iz tega načina izrecno izključena in
+to potrjuje tudi aktivni test `test_direct_sale_cannot_select_zero_balance`.
+To ni več ciljno poslovno pravilo: potrjeno ciljno stanje dovoljuje vsak
+neprazen neposredni ali servisni račun z vsoto `0,00 EUR`. Koda in test morata
+biti spremenjena šele v ločenem blagajniškem izvedbenem sklopu.
+
+Sedanja Blagajna prav tako še ni skladna z novo potrjenimi pravili vrstic:
+ponovni sken lahko poveča obstoječo vrstico, sprememba količine lahko vrstico
+prepiše ali odstrani, javni prikaz pa lahko korekcije združi. Ciljno stanje
+zahteva novo vrstico za vsak sken, prepoved količine `0`, notranjo revizijsko
+sled sprememb, prepoved brisanja, povezano negativno vrstico z izvirnim
+cenovnim/davčnim/rabatnim posnetkom in kronološki izpis. To je dokumentirana
+izvedbena vrzel, ne trditev o že narejeni funkciji.
+
+Prav tako še niso kot celota izvedeni in dokazani novi minimum cene artikla,
+različicen `L0`, delitev reklamacijskih odgovornosti ter preverjanje obsega
+pooblastila pri agentskem odkupu. Obstoječa datoteka pooblastila in njen
+generator sta prisotna, vendar aplikacijska uveljavitev vseh novih omejitev ni
+razglašena za dokončano.
 
 Centralni PostgreSQL del ima od 19. 9. 2026 trajno pripravljalno pregrado za
 polno inventuro. Začetek seje `PREPARING` in njen preklic sta idempotentna,
@@ -117,7 +128,8 @@ Kodo je treba primerjati po tem vrstnem redu:
 4. tehnični zaključek brez odpiranja Blagajne;
 5. enkratna poraba delov in sinhronizacijski konflikt;
 6. zaklenjen servisni osnutek ter ločena neposredna prodaja;
-7. ničelni servisni račun z izravnalnimi negativnimi vrsticami;
+7. kronološke blagajniške vrstice, njihove audit spremembe, povezane negativne
+   vrstice ter ničelni neposredni in servisni račun;
 8. polna inventura in stanje vseh Service postaj;
 9. reklamacija, ki se vedno začne iz računa in ohrani povezave;
 10. centralne priloge, garancijsko vezana retencija in nova strategija
@@ -129,12 +141,19 @@ Kodo je treba primerjati po tem vrstnem redu:
 Produkcijska izdaja ostaja blokirana, dokler niso opravljeni kanonični sprejemni
 testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
 
-## Lokalna pregledovalca
+## Lokalna agentska veriga
 
-Lokalna modela ob posvetu prejmeta celoten urejeni kanonski sklop 01–06;
-`06_LOKALNI_AGENTI.md` dodatno določa njune meje. Modela sta samo pregledovalca:
-nimata izvajalnih pravic,
-ne določata poslovnih pravil in njun odgovor ni dokaz izvedbe. Qwen 3.5 9B je
-predviden za običajni tehnični pregled, GPT-OSS 20B pa za občasno drugo
-skeptično mnenje. Codex ostane nadzornik, doda najmanjši potreben nalogi
-specifičen izsek ter sam preveri rezultat.
+Aktivna veriga ločuje vlogo od izbranega modela. `conversation_lead` je
+naravni pogovorni in raziskovalni vodja z bralnimi orodji. `/prepare-plan`
+prikaže načrt v istem pogovoru in ga je mogoče popraviti; šele
+`/plan-dispatch` ga pošlje v `plan_validator`, lastnikov `/approve-plan` pa
+dovoli izvedbo. Nato `executor` dela v omejenem izoliranem worktreeju,
+deterministični gate preveri dovoljene poti in teste, `local_reviewer` pa
+neodvisno pregleda dejanski diff. Rezultat se vrne lastniku in ostane kandidat,
+dokler ga Codex ne pregleda in odobri.
+
+Vloge niso vezane na Qwen, GPT-OSS ali drug model. Izvajalna pravica pripada
+omejeni vlogi `executor`, ne modelu kot takemu. Modeli ne določajo poslovnih
+pravil in njihov odgovor sam ni dokaz izvedbe. Vsaka vloga prejme najmanjši
+nalogi potreben izbor generiranih kanoničnih modulov, ne celotnega zgodovinskega
+spomina.

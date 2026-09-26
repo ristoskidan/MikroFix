@@ -2,7 +2,7 @@
 
 # MikroFIX — ciljna arhitektura
 
-Datum konsolidacije: 14. 9. 2026
+Datum konsolidacije: 26. 9. 2026
 
 ## 1. Topologija
 
@@ -83,14 +83,36 @@ ponovitev ter nato ustvari zalogovne dogodke in centralni servisni osnutek.
 ## 7. Izdaja računa
 
 - Odpiranje osnutka ne ustvari poslovnega zakupa `CLAIMED`.
+- Predizdajni račun hrani kronološke vrstice z lastno stabilno identiteto.
+  Urejanje količine je audit dogodek `old → new`, ne prepis brez sledi; vrednost
+  `0` je zavrnjena in vrstic ni mogoče brisati.
+- Vsaka negativna vrstica nosi obvezni sklic na pozitivno vrstico, ki jo
+  izravnava, ter njen nespremenljivi cenovni, davčni in rabatni posnetek. Če je
+  kandidatov več, je izrecna uporabnikova izbira del ukaza.
+- Strežnik preveri, da povezava pripada istemu predizdajnemu računu, da
+  pozitivna količina še ni prekomerno izravnana in da prevzeti posnetek ni bil
+  spremenjen.
 - Strežniški ukaz izdaje zaklene osnutek in atomsko zagotovi največ en veljaven
   račun ter eno porabljeno številko.
+- Strežniški ukaz dovoljuje končni znesek `0,00 EUR` pri neposrednem in
+  servisnem računu, zavrne pa negativni končni znesek.
 - Pred prvim FURS klicem se trajno shranijo natančni podpisani zahtevek,
   `MessageID`, ZOI in kontrolni odtis.
 - Nejasen rezultat nadaljuje isto operacijo; ne ustvari novega računa ali ZOI.
 - Servisna poraba zaloge se ob računu ne ponovi.
+- Izdani posnetek ohrani vse vrstice kronološko. Poznejša sprememba je možna
+  samo z vezanim storno dokumentom; model uporabe salda na istem izvornem
+  računu ostaja odprta ciljna podrobnost.
 
-## 8. Priloge in varnostne kopije
+## 8. Cenovni posnetki
+
+Centralni cenovni profil je različicen. Za artikel hrani dokumentirani skupni
+strošek in izračunani minimum `strošek + 5 %`, zaokrožen navzgor na naslednjih
+`5 EUR`; za delo hrani ločen minimum `L0`. Računska vrstica ob nastanku zajame
+ceno, davek, rabat, odločilni minimum in različico profila. Blagajna zahteva
+rabat, ne poljubnega prepisa cene. Strežnik pred izdajo ponovno preveri prag.
+
+## 9. Priloge in varnostne kopije
 
 Centralno potrjeni dokumenti in priloge imajo centralno avtoritativno hrambo.
 Offline Servis lahko hrani lokalne delovne kopije do potrjene sinhronizacije.
@@ -106,7 +128,7 @@ Varnostne kopije so ločene na:
 
 Obnova se šteje za preverjeno šele po dejanski testni obnovi združljive celote.
 
-## 9. Polna inventura
+## 10. Polna inventura
 
 Pred inventurnim zaklepom strežnik preveri:
 
@@ -118,7 +140,19 @@ Pred inventurnim zaklepom strežnik preveri:
 Šele nato izda inventurni zaklep. Med njim noben program ne sme ustvariti
 poslovnega dogodka, ki bi vplival na zamrznjeno stanje.
 
-## 10. Postopna migracija
+## 11. Reklamacije in pooblastila
+
+Reklamacijski zapis je centralen in ga Office administrira. Blagajna ga odpre
+iz konkretnega računa ob fizičnem sprejemu, Servis pa nanj dodaja tehnične
+ugotovitve. Povezave do računa, servisa, garancijskega lista, storna in
+nadomestnega računa so nespremenljive.
+
+Pooblastilo je različicen centralni zapis obsega in veljavnosti. Dejanja
+pooblaščenke morajo dokazati veljavno pooblastilo; dovoljen je pregled, prevzem
+in priprava osnutka pogodbe, medtem ko odobritev, sklenitev in plačilo zahtevajo
+Danielovo identiteto.
+
+## 12. Postopna migracija
 
 - Stari monolit ostane primerjalna osnova in se ne prepiše naenkrat.
 - Preverjene poslovne funkcije se izločajo za centralni API po posameznih
