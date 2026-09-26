@@ -291,8 +291,8 @@ pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
 
 - Pooblaščenka sme v okviru veljavnega pisnega pooblastila pregledati in
   prevzeti napravo ter pripraviti samo osnutek pogodbe.
-- MikroFIX ne sme zavezati, pogodbe dokončno odobriti ali skleniti in ne sme
-  izvesti plačila. Končno odobritev, sklenitev in plačilo opravi Daniel
+- Pooblaščenka ne sme zavezati MikroFix, pogodbe dokončno odobriti ali skleniti
+  in ne sme izvesti plačila. Končno odobritev, sklenitev in plačilo opravi Daniel
   Ristoski.
 - Sistem pred sprejemom takega dejanja preveri veljavnost in obseg pooblastila
   ter v revizijsko sled zapiše uporabljeno različico.

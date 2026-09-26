@@ -84,9 +84,11 @@ odobritve ali sklenitve pogodbe in ne dovoljuje plačila.
 2. **Saldo vezanega storna:** določiti podatkovni model in uporabniški tok, s
    katerima se saldo uporabi na istem izvornem računu brez izgube kronološke in
    davčne sledi.
-3. **SIGEN-CA:** pred produkcijo pri veljavnem pravnem oziroma uradnem viru
-   potrditi dovoljeni tehnični in organizacijski način uporabe namenskega
-   digitalnega potrdila v centralizirani FURS arhitekturi.
+3. **SIGEN-CA:** pri veljavnem pravnem oziroma uradnem viru potrditi dovoljeni
+   način uporabe Danielovega osebnega certifikata za podpis odkupne pogodbe
+   oziroma drugega poslovnega dokumenta. To vprašanje je ločeno od namenskega
+   digitalnega potrdila za davčno potrjevanje računov in centralizirano FURS
+   komunikacijo.
 
 Vse druge zgoraj zapisane točke so potrjeno ciljno poslovno stanje. Njihova
 neizvedenost v trenutni kodi je izvedbena vrzel, ne odprta poslovna odločitev.
