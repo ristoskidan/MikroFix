@@ -954,6 +954,20 @@ def run_bridge_monitor(
                     raise ManagerError(reason)
                 time.sleep(0.1)
             offset = forward_trace_events(trace_path, offset, callback)
+        except BaseException:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+            mark_bridge_job_interrupted(
+                bridge_home, job_id,
+                "Bridge monitoring was interrupted before worker completion.",
+                error_code="BRIDGE_MONITOR_INTERRUPTED",
+            )
+            raise
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -964,9 +978,12 @@ def run_bridge_monitor(
                     process.wait(timeout=5)
         if process.returncode:
             output.seek(0)
-            raise ManagerError(
-                "Bridge monitor failed: " + output.read()[-4000:]
+            reason = "Bridge monitor failed: " + output.read()[-4000:]
+            mark_bridge_job_interrupted(
+                bridge_home, job_id, reason,
+                error_code="BRIDGE_MONITOR_FAILED",
             )
+            raise ManagerError(reason)
 
 
 def mark_bridge_job_interrupted(

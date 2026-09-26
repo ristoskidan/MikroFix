@@ -145,7 +145,7 @@ class LocalManagerTests(unittest.TestCase):
             "id": "MF-2026-0001", "status": "running",
         }), encoding="utf-8")
         process = mock.Mock(returncode=-15)
-        process.poll.side_effect = [None, 0]
+        process.poll.side_effect = [None, 0, 0]
         with (
             mock.patch.object(manager.subprocess, "Popen", return_value=process),
             mock.patch.object(manager, "forward_trace_events", return_value=0),
@@ -162,6 +162,52 @@ class LocalManagerTests(unittest.TestCase):
         self.assertEqual("failed", persisted["status"])
         self.assertEqual("BRIDGE_MONITOR_IDLE_TIMEOUT", persisted["error_code"])
         self.assertIn("without progress", persisted["error"])
+
+    def test_bridge_monitor_nonzero_exit_closes_running_inner_job(self):
+        runtime = self.workspace / "runtime"
+        job_dir = runtime / "jobs" / "MF-2026-0001"
+        job_dir.mkdir(parents=True)
+        (job_dir / "job.json").write_text(json.dumps({
+            "id": "MF-2026-0001", "status": "running",
+        }), encoding="utf-8")
+        process = mock.Mock(returncode=7)
+        process.poll.side_effect = [7, 7]
+        with (
+            mock.patch.object(manager.subprocess, "Popen", return_value=process),
+            mock.patch.object(manager, "forward_trace_events", return_value=0),
+            self.assertRaisesRegex(manager.ManagerError, "Bridge monitor failed"),
+        ):
+            manager.run_bridge_monitor(
+                ["python", "bridge.py"], {}, runtime, "MF-2026-0001",
+            )
+        persisted = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("BRIDGE_MONITOR_FAILED", persisted["error_code"])
+
+    def test_bridge_monitor_interruption_stops_process_and_closes_inner_job(self):
+        runtime = self.workspace / "runtime"
+        job_dir = runtime / "jobs" / "MF-2026-0001"
+        job_dir.mkdir(parents=True)
+        (job_dir / "job.json").write_text(json.dumps({
+            "id": "MF-2026-0001", "status": "running",
+        }), encoding="utf-8")
+        process = mock.Mock(returncode=-15)
+        process.poll.side_effect = [None, None, 0]
+        with (
+            mock.patch.object(manager.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                manager, "forward_trace_events", side_effect=KeyboardInterrupt,
+            ),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            manager.run_bridge_monitor(
+                ["python", "bridge.py"], {}, runtime, "MF-2026-0001",
+            )
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+        persisted = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("BRIDGE_MONITOR_INTERRUPTED", persisted["error_code"])
 
     def test_trace_forwarder_waits_for_complete_jsonl_records(self):
         trace = self.root / "trace.jsonl"
