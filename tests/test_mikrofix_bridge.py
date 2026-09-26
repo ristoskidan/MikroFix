@@ -517,6 +517,43 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual(1, persisted["successful_tool_calls"])
         self.assertEqual(1, persisted["tool_feedback_events"])
 
+    def test_swapped_search_arguments_warn_and_do_not_count_as_evidence(self):
+        job = self.bridge.create_job("Correct swapped search arguments")
+        responses = iter([
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {
+                    "query": "*.py", "file_glob": "reversal_of_invoice_uuid",
+                },
+            }}]}},
+            {"message": {"tool_calls": [{"function": {
+                "name": "project_search",
+                "arguments": {
+                    "query": "reversal_of_invoice_uuid", "file_glob": "*.py",
+                },
+            }}]}},
+            {"message": {"content": "verified"}},
+        ])
+        results = iter([
+            {"matches": [], "count": 0, "exit_code": 1},
+            {"matches": ["app.py:1:reversal_of_invoice_uuid"], "count": 1,
+             "exit_code": 0},
+        ])
+        with (
+            mock.patch.object(
+                self.bridge, "call_qwen",
+                side_effect=lambda _messages, **_kwargs: next(responses),
+            ),
+            mock.patch.object(
+                self.bridge, "execute_tool", side_effect=lambda *_args: next(results),
+            ),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(1, persisted["successful_tool_calls"])
+        self.assertEqual(1, persisted["tool_feedback_events"])
+
     def test_repeated_textual_tool_names_fail_closed(self):
         job = self.bridge.create_job("Inspect through tools")
         responses = iter([
@@ -590,9 +627,31 @@ class BridgeCompletionTests(unittest.TestCase):
             "query": "reversal_of_invoice_uuid",
             "file_glob": "reversal_of_invoice_uuid",
         }))
+        self.assertTrue(self.bridge.suspicious_search_arguments({
+            "query": "*.py", "file_glob": "reversal_of_invoice_uuid",
+        }))
         self.assertFalse(self.bridge.suspicious_search_arguments({
             "query": "invoice", "file_glob": "Makefile",
         }))
+
+    def test_validate_tool_arguments_enforces_max_length(self):
+        with self.assertRaisesRegex(
+            self.bridge.ToolCallValidationError, "query.*predolg",
+        ):
+            self.bridge.validate_tool_arguments(
+                "project_search", {"query": "x" * 501},
+            )
+        with self.assertRaisesRegex(
+            self.bridge.ToolCallValidationError, "content.*predolg",
+        ):
+            self.bridge.validate_tool_arguments(
+                "project_create",
+                {
+                    "path": "allowed.txt",
+                    "content": "x" * 128001,
+                    "summary": "valid summary",
+                },
+            )
 
     def test_execute_tool_sends_normalized_arguments(self):
         with mock.patch.object(

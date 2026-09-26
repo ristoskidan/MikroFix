@@ -650,6 +650,12 @@ def validate_tool_arguments(name, arguments):
             )
         if isinstance(value, str) and len(value) < int(rule.get("minLength", 0)):
             raise ToolCallValidationError(f"Argument {key!r} je prekratek.")
+        if (
+            isinstance(value, str)
+            and "maxLength" in rule
+            and len(value) > int(rule["maxLength"])
+        ):
+            raise ToolCallValidationError(f"Argument {key!r} je predolg.")
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if "minimum" in rule and value < rule["minimum"]:
                 raise ToolCallValidationError(f"Argument {key!r} je pod dovoljeno mejo.")
@@ -703,10 +709,20 @@ def suspicious_search_arguments(arguments):
         return False
     candidate = value.strip("*?[]").strip()
     query = query.strip()
+    query_looks_like_glob = any(marker in query for marker in "*?[")
+    file_glob_looks_like_symbol = (
+        "." not in value and "/" not in value and "\\" not in value
+        and not any(marker in value for marker in "*?[")
+    )
     return (
         "." not in value and "/" not in value and "\\" not in value
         and bool(candidate)
-        and (candidate == query or candidate in query or query in candidate)
+        and (
+            candidate == query
+            or candidate in query
+            or query in candidate
+            or (query_looks_like_glob and file_glob_looks_like_symbol)
+        )
     )
 
 
