@@ -39,6 +39,7 @@ try:
     from tools.mikrofix_owner_commands import (
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
     )
+    from tools.mikrofix_workspace_lock import workspace_lock
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_codex_review import (  # type: ignore[no-redef]
         ReviewError, prepare_review, record_codex_approved,
@@ -60,6 +61,7 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_owner_commands import (  # type: ignore[no-redef]
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
     )
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -784,13 +786,14 @@ def main() -> int:
         return open_in_brave()
     if not (args.workspace / "workspace.json").is_file():
         return 2
-    server = LocalWebServer((HOST, args.port), args.workspace)
-    try:
-        server.serve_forever(poll_interval=0.5)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
+    with workspace_lock(args.workspace):
+        server = LocalWebServer((HOST, args.port), args.workspace)
+        try:
+            server.serve_forever(poll_interval=0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
     return 0
 
 

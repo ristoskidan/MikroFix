@@ -30,6 +30,7 @@ try:
     from tools.mikrofix_local_web import dispatch_owner_command
     from tools.mikrofix_owner_commands import OwnerCommandError, parse_owner_command
     from tools.mikrofix_task_lifecycle import read_profile_snapshot
+    from tools.mikrofix_workspace_lock import workspace_lock
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from mikrofix_local_manager import (  # type: ignore
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
@@ -42,6 +43,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         OwnerCommandError, parse_owner_command,
     )
     from mikrofix_task_lifecycle import read_profile_snapshot  # type: ignore
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore
 
 
 MODEL_PREFIX = "mikrofix::"
@@ -596,7 +598,8 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8767)
     args = parser.parse_args()
     import uvicorn
-    uvicorn.run(app, host=args.host, port=args.port)
+    with workspace_lock(WORKSPACE):
+        uvicorn.run(app, host=args.host, port=args.port)
     return 0
 
 

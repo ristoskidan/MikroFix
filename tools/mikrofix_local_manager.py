@@ -36,6 +36,7 @@ try:
         sha256_text, transition_task, write_profile_snapshot,
         write_system_prompt_snapshot,
     )
+    from tools.mikrofix_workspace_lock import workspace_lock
 except ModuleNotFoundError:
     from mikrofix_codex_review import (  # type: ignore[no-redef]
         prepare_review, record_codex_approved, record_codex_rejected,
@@ -54,6 +55,7 @@ except ModuleNotFoundError:
         sha256_text, transition_task, write_profile_snapshot,
         write_system_prompt_snapshot,
     )
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
 
 
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
@@ -1112,6 +1114,7 @@ def run_planner(
             "MIKROFIX_BRIDGE_HOME": str(home),
             "MIKROFIX_BRIDGE_CONFIG": str(config),
             "CODEX_THREAD_ID": "",
+            "MIKROFIX_WORKSPACE": str(job_dir.parent.parent),
         }
 
     def ask_stage(
@@ -1427,6 +1430,7 @@ def run_lead_conversation(
         "MIKROFIX_BRIDGE_HOME": str(bridge_home),
         "MIKROFIX_BRIDGE_CONFIG": str(config_path),
         "CODEX_THREAD_ID": "",
+        "MIKROFIX_WORKSPACE": str(job_dir.parent.parent),
     }
     try:
         wait_for_executor(executor_url, token_file, process)
@@ -2315,8 +2319,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
+def _main(args: argparse.Namespace) -> int:
     try:
         if args.command_name == "submit":
             result = submit(
@@ -2362,6 +2365,12 @@ def main() -> int:
         return 2
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    with workspace_lock(args.workspace):
+        return _main(args)
 
 
 if __name__ == "__main__":

@@ -14,10 +14,17 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
 from typing import Any
+import uuid
+
+try:
+    from tools.mikrofix_workspace_lock import workspace_lock
+except ModuleNotFoundError:
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +41,7 @@ KNOWLEDGE_PATHS = (
     "docs/kanon/03_SPREJEMNI_TESTI.md",
     "docs/kanon/04_STANJE_IZVEDBE.md",
     "docs/kanon/05_ZGODOVINA_ODLOCITEV.md",
+    "docs/kanon/06_LOKALNI_AGENTI.md",
     "docs/local_agents/README.md",
     "docs/local_agents/PRAVILNIK_VERIGE.md",
     "docs/local_agents/pravila",
@@ -43,6 +51,23 @@ KNOWLEDGE_PATHS = (
 
 class WorkspaceError(RuntimeError):
     pass
+
+
+WRITER_SERVICES = (
+    "mikrofix-local-web.service",
+    "mikrofix-openwebui-gateway.service",
+    "mikrofix-bridge.service",
+    "mikrofix-local-executor.service",
+)
+WRITER_MARKERS = (
+    "mikrofix_local_manager.py", "mikrofix_local_manager_ui.py",
+    "mikrofix_supervisor.py", "mikrofix_bridge.py", "mikrofix_local_agent.py",
+    "mikrofix_codex_review.py", "mikrofix_completion.py",
+    "mikrofix_owner_commands.py", "tools.local_executor.server",
+    "tools/local_executor/server.py", "tools/local_executor/start.sh",
+    "tools/local_executor/control.py",
+)
+FINAL_ROTATION_PHASES = {"COMPLETED", "ROLLED_BACK"}
 
 
 def run(args: list[str], *, cwd: Path | None = None) -> str:
@@ -65,6 +90,135 @@ def write_json(path: Path, value: Any, mode: int = 0o600) -> None:
         encoding="utf-8",
     )
     path.chmod(mode)
+
+
+def durable_json(path: Path, value: Any, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(mode)
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def workspace_inventory(root: Path) -> dict[str, Any]:
+    root = root.resolve()
+    records: list[bytes] = []
+    counts = {"directories": 0, "files": 0, "symlinks": 0, "bytes": 0}
+    for current, directories, files in os.walk(root, topdown=True, followlinks=False):
+        current_path = Path(current)
+        names = sorted(directories + files, key=lambda value: value.encode("utf-8"))
+        for name in names:
+            path = current_path / name
+            relative = path.relative_to(root).as_posix()
+            metadata = path.lstat()
+            mode = format(stat.S_IMODE(metadata.st_mode), "04o")
+            encoded_path = relative.encode("utf-8")
+            if stat.S_ISLNK(metadata.st_mode):
+                target = os.readlink(path).encode("utf-8")
+                digest = hashlib.sha256(target).hexdigest().encode("ascii")
+                records.append(b"L\0" + encoded_path + b"\0" + mode.encode() + b"\0" + digest + b"\n")
+                counts["symlinks"] += 1
+                if name in directories:
+                    directories.remove(name)
+            elif stat.S_ISDIR(metadata.st_mode):
+                records.append(b"D\0" + encoded_path + b"\0" + mode.encode() + b"\n")
+                counts["directories"] += 1
+            elif stat.S_ISREG(metadata.st_mode):
+                digest = sha256(path).encode("ascii")
+                records.append(
+                    b"F\0" + encoded_path + b"\0" + mode.encode() + b"\0"
+                    + str(metadata.st_size).encode("ascii") + b"\0" + digest + b"\n"
+                )
+                counts["files"] += 1
+                counts["bytes"] += metadata.st_size
+    records.sort(key=lambda record: record.split(b"\0", 2)[1])
+    digest = hashlib.sha256(b"".join(records)).hexdigest()
+    return {"algorithm": "sha256-dfl-v1", "tree_sha256": digest, **counts}
+
+
+class UserServices:
+    def is_active(self, name: str) -> bool:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", "--quiet", name], check=False,
+        )
+        return result.returncode == 0
+
+    def stop(self, name: str) -> None:
+        run(["systemctl", "--user", "stop", name])
+
+    def start(self, name: str) -> None:
+        run(["systemctl", "--user", "start", name])
+
+
+def workspace_processes(workspace: Path) -> list[str]:
+    own_pid = os.getpid()
+    matches = []
+    proc = Path("/proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == own_pid:
+            continue
+        try:
+            command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", errors="replace"
+            )
+            cwd = (entry / "cwd").resolve()
+        except (OSError, PermissionError):
+            continue
+        in_workspace = cwd == workspace or workspace in cwd.parents
+        marked = any(marker in command for marker in WRITER_MARKERS)
+        if in_workspace or marked:
+            matches.append(f"{entry.name}:{command.strip()}")
+    return sorted(matches)
+
+
+def rotation_root(workspace: Path) -> Path:
+    return workspace.parent / ".mikrofix-workspace-rotations"
+
+
+def unfinished_rotations(workspace: Path) -> list[Path]:
+    root = rotation_root(workspace)
+    if not root.is_dir():
+        return []
+    result = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            phase = json.loads(path.read_text(encoding="utf-8")).get("phase")
+        except (OSError, json.JSONDecodeError):
+            phase = "INVALID"
+        if phase not in FINAL_ROTATION_PHASES:
+            result.append(path)
+    return result
+
+
+def update_rotation(journal_path: Path, journal: dict[str, Any], phase: str, **extra: Any) -> None:
+    journal.update(extra)
+    journal["phase"] = phase
+    journal["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    durable_json(journal_path, journal)
 
 
 def copy_knowledge(source: Path, destination: Path) -> dict[str, str]:
@@ -106,7 +260,9 @@ def policy_text() -> str:
 """
 
 
-def init_workspace(source: Path, workspace: Path) -> dict[str, Any]:
+def init_workspace(
+    source: Path, workspace: Path, *, failed_destination: Path | None = None,
+) -> dict[str, Any]:
     source = source.expanduser().resolve()
     workspace = workspace.expanduser().resolve()
     if workspace.exists():
@@ -169,7 +325,10 @@ def init_workspace(source: Path, workspace: Path) -> dict[str, Any]:
             )
         os.replace(staging, workspace)
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        if failed_destination is not None and staging.exists():
+            os.replace(staging, failed_destination)
+        else:
+            shutil.rmtree(staging, ignore_errors=True)
         raise
     return verify_workspace(workspace)
 
@@ -216,6 +375,147 @@ def verify_workspace(workspace: Path) -> dict[str, Any]:
     }
 
 
+def rotate_workspace(
+    source: Path, workspace: Path, *, services: Any | None = None,
+    process_checker: Any = workspace_processes,
+) -> dict[str, Any]:
+    source = source.expanduser().resolve()
+    workspace = workspace.expanduser().resolve()
+    services = services or UserServices()
+    pending = unfinished_rotations(workspace)
+    if pending:
+        raise WorkspaceError(f"unfinished rotation requires recovery: {pending[0]}")
+    if run(["git", "-C", str(source), "status", "--short"]):
+        raise WorkspaceError("source repository must be clean before rotation")
+    old_check = verify_workspace(workspace)
+    if old_check["status"] != "OK":
+        raise WorkspaceError("existing workspace failed verification")
+    active = {name: services.is_active(name) for name in WRITER_SERVICES}
+    stopped = []
+    try:
+        for name, was_active in active.items():
+            if was_active:
+                services.stop(name)
+                stopped.append(name)
+    except BaseException:
+        for name in stopped:
+            services.start(name)
+        raise
+    rotation_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:12]}"
+    archive = workspace.parent / f"{workspace.name}.archive-{old_check['baseline_commit'][:8]}-{rotation_id}"
+    failed = workspace.parent / f"{workspace.name}.failed-{rotation_id}"
+    journal_path = rotation_root(workspace) / f"{rotation_id}.json"
+    try:
+        with workspace_lock(workspace, exclusive=True, blocking=False):
+            processes = process_checker(workspace)
+            if processes:
+                raise WorkspaceError("workspace writers are still active: " + "; ".join(processes))
+            old_inventory = workspace_inventory(workspace)
+            new_commit = run(["git", "-C", str(source), "rev-parse", "HEAD"])
+            journal = {
+                "schema_version": 1, "rotation_id": rotation_id,
+                "workspace": str(workspace), "archive": str(archive),
+                "failed_candidate": str(failed),
+                "old_checkpoint": old_check["baseline_commit"],
+                "new_checkpoint": new_commit,
+                "verified_ancestor": "b0d6e25cc31191c4589f00f7b6f5e2d49983ba10",
+                "old_inventory": old_inventory, "services_before": active,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            update_rotation(journal_path, journal, "PREPARED")
+            os.replace(workspace, archive)
+            fsync_directory(workspace.parent)
+            update_rotation(journal_path, journal, "OLD_ARCHIVED")
+            init_workspace(source, workspace, failed_destination=failed)
+            update_rotation(journal_path, journal, "NEW_INITIALIZED")
+            new_check = verify_workspace(workspace)
+            if new_check["status"] != "OK" or new_check["baseline_commit"] != new_commit:
+                raise WorkspaceError("new workspace failed checkpoint verification")
+            if workspace_inventory(archive) != old_inventory:
+                raise WorkspaceError("archived workspace inventory changed")
+            update_rotation(journal_path, journal, "NEW_VERIFIED", new_verification=new_check)
+        for name, was_active in active.items():
+            if was_active:
+                services.start(name)
+        update_rotation(journal_path, journal, "SERVICES_RESTORED")
+        update_rotation(journal_path, journal, "COMPLETED")
+        return {"status": "OK", "rotation": journal}
+    except BaseException as exc:
+        if journal_path.exists():
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            update_rotation(journal_path, journal, "ROLLBACK_REQUIRED", error=str(exc))
+        if journal_path.exists():
+            if workspace.exists():
+                quarantine = failed
+                if quarantine.exists():
+                    quarantine = Path(str(failed) + f"-{uuid.uuid4().hex[:8]}")
+                os.replace(workspace, quarantine)
+                fsync_directory(workspace.parent)
+            if archive.exists() and not workspace.exists():
+                os.replace(archive, workspace)
+                fsync_directory(workspace.parent)
+            restored = verify_workspace(workspace)
+            if restored["status"] != "OK":
+                raise WorkspaceError(f"rotation failed and rollback is invalid: {exc}") from exc
+            if workspace_inventory(workspace) != journal["old_inventory"]:
+                raise WorkspaceError(f"rotation failed and rollback hash differs: {exc}") from exc
+            update_rotation(journal_path, journal, "ROLLED_BACK", rollback_verification=restored)
+        for name, was_active in active.items():
+            if was_active:
+                services.start(name)
+        raise
+
+
+def recover_rotation(
+    workspace: Path, rotation_id: str, *, complete: bool,
+    services: Any | None = None, process_checker: Any = workspace_processes,
+) -> dict[str, Any]:
+    workspace = workspace.expanduser().resolve()
+    services = services or UserServices()
+    journal_path = rotation_root(workspace) / f"{rotation_id}.json"
+    if not journal_path.is_file():
+        raise WorkspaceError(f"rotation journal does not exist: {journal_path}")
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if journal.get("phase") in FINAL_ROTATION_PHASES:
+        raise WorkspaceError(f"rotation is already final: {journal.get('phase')}")
+    archive = Path(journal["archive"])
+    with workspace_lock(workspace, exclusive=True, blocking=False):
+        processes = process_checker(workspace)
+        if processes:
+            raise WorkspaceError("workspace writers are still active: " + "; ".join(processes))
+        if complete:
+            result = verify_workspace(workspace)
+            if result["status"] != "OK" or result["baseline_commit"] != journal["new_checkpoint"]:
+                raise WorkspaceError("new workspace cannot be completed safely")
+            if not archive.is_dir() or workspace_inventory(archive) != journal["old_inventory"]:
+                raise WorkspaceError("old archive is missing or changed")
+            update_rotation(journal_path, journal, "NEW_VERIFIED", new_verification=result)
+        else:
+            if not archive.is_dir():
+                raise WorkspaceError("old archive is unavailable for rollback")
+            if workspace_inventory(archive) != journal["old_inventory"]:
+                raise WorkspaceError("old archive changed; rollback refused")
+            if workspace.exists():
+                failed = Path(journal["failed_candidate"])
+                if failed.exists():
+                    failed = Path(str(failed) + f"-{uuid.uuid4().hex[:8]}")
+                os.replace(workspace, failed)
+                fsync_directory(workspace.parent)
+            os.replace(archive, workspace)
+            fsync_directory(workspace.parent)
+            result = verify_workspace(workspace)
+            if result["status"] != "OK" or workspace_inventory(workspace) != journal["old_inventory"]:
+                raise WorkspaceError("restored workspace failed verification")
+            update_rotation(journal_path, journal, "ROLLED_BACK", rollback_verification=result)
+    for name, was_active in journal.get("services_before", {}).items():
+        if was_active:
+            services.start(name)
+    if complete:
+        update_rotation(journal_path, journal, "SERVICES_RESTORED")
+        update_rotation(journal_path, journal, "COMPLETED")
+    return {"status": "OK", "rotation": journal}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="MikroFix local-agent workspace")
     parser.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
@@ -223,6 +523,13 @@ def parse_args() -> argparse.Namespace:
     init = sub.add_parser("init")
     init.add_argument("--source", type=Path, default=PROJECT_ROOT)
     sub.add_parser("verify")
+    rotate = sub.add_parser("rotate")
+    rotate.add_argument("--source", type=Path, default=PROJECT_ROOT)
+    recover = sub.add_parser("recover")
+    recover.add_argument("--rotation-id", required=True)
+    action = recover.add_mutually_exclusive_group(required=True)
+    action.add_argument("--rollback", action="store_true")
+    action.add_argument("--complete", action="store_true")
     return parser.parse_args()
 
 
@@ -230,7 +537,11 @@ def main() -> int:
     args = parse_args()
     result = (
         init_workspace(args.source, args.workspace)
-        if args.command == "init" else verify_workspace(args.workspace)
+        if args.command == "init" else
+        rotate_workspace(args.source, args.workspace)
+        if args.command == "rotate" else
+        recover_rotation(args.workspace, args.rotation_id, complete=args.complete)
+        if args.command == "recover" else verify_workspace(args.workspace)
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if result["status"] == "OK" else 2

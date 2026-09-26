@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import argparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,22 +96,18 @@ def generated_module(relative: str) -> str:
     )
 
 
-def main() -> int:
+def expected_outputs() -> dict[str, str]:
     definitions = {"authority": ALWAYS, **MODULES}
-    sources: dict[str, str] = {}
-    expected_files: set[str] = set()
-    for definition in definitions.values():
-        relative = str(definition["source"])
-        file_name = str(definition["file"])
-        content = source_text(relative)
-        sources[relative] = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        atomic_write(OUTPUT / file_name, generated_module(relative))
-        expected_files.add(file_name)
-
-    for existing in OUTPUT.glob("*.md"):
-        if existing.name not in expected_files:
-            existing.unlink()
-
+    outputs = {
+        str(definition["file"]): generated_module(str(definition["source"]))
+        for definition in definitions.values()
+    }
+    sources = {
+        str(definition["source"]): hashlib.sha256(
+            source_text(str(definition["source"])).encode("utf-8")
+        ).hexdigest()
+        for definition in definitions.values()
+    }
     index = {
         "version": 2,
         "sources": dict(sorted(sources.items())),
@@ -124,11 +121,45 @@ def main() -> int:
             for name, definition in MODULES.items()
         },
     }
-    atomic_write(
-        OUTPUT / "INDEX.json",
-        json.dumps(index, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-    )
-    print(f"Izdelanih {len(definitions)} modulov v {OUTPUT}")
+    outputs["INDEX.json"] = json.dumps(
+        index, ensure_ascii=False, indent=2, sort_keys=True
+    ) + "\n"
+    return outputs
+
+
+def check_outputs() -> list[str]:
+    expected = expected_outputs()
+    problems = []
+    actual_names = {path.name for path in OUTPUT.iterdir() if path.is_file()}
+    for name, content in expected.items():
+        path = OUTPUT / name
+        if not path.is_file():
+            problems.append(f"missing:{name}")
+        elif path.read_text(encoding="utf-8") != content:
+            problems.append(f"stale:{name}")
+    for name in sorted(actual_names - set(expected)):
+        problems.append(f"unexpected:{name}")
+    return problems
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    if args.check:
+        problems = check_outputs()
+        if problems:
+            print("\n".join(problems))
+            return 2
+        print("Aktivni agentni moduli so usklajeni.")
+        return 0
+    outputs = expected_outputs()
+    for file_name, content in outputs.items():
+        atomic_write(OUTPUT / file_name, content)
+    for existing in OUTPUT.iterdir():
+        if existing.is_file() and existing.name not in outputs:
+            existing.unlink()
+    print(f"Izdelanih {len(outputs) - 1} modulov v {OUTPUT}")
     return 0
 
 

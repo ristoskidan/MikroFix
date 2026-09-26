@@ -20,12 +20,14 @@ try:
         CompletionOutbox,
         validate_thread_id,
     )
+    from tools.mikrofix_workspace_lock import workspace_lock
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_completion import (  # type: ignore[no-redef]
         CompletionError,
         CompletionOutbox,
         validate_thread_id,
     )
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
 
 
 BASE = Path(
@@ -1455,4 +1457,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    workspace_value = os.environ.get("MIKROFIX_WORKSPACE")
+    if workspace_value:
+        with workspace_lock(Path(workspace_value)):
+            main()
+    else:
+        main()

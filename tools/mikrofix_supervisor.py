@@ -39,11 +39,13 @@ except ModuleNotFoundError:
 
 try:
     from tools.mikrofix_completion import CompletionOutbox, validate_thread_id
+    from tools.mikrofix_workspace_lock import workspace_lock
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_completion import (  # type: ignore[no-redef]
         CompletionOutbox,
         validate_thread_id,
     )
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +66,7 @@ CONTROL_PLANE_FILES = {
     "tools/mikrofix_local_manager_ui.py",
     "tools/mikrofix_local_web.py",
     "tools/mikrofix_local_manager_web.html",
+    "tools/build_local_agent_rules.py",
     "tests/test_mikrofix_supervisor.py",
     "tests/test_mikrofix_bridge.py",
     "tests/test_mikrofix_completion.py",
@@ -73,6 +76,7 @@ CONTROL_PLANE_FILES = {
     "tests/test_mikrofix_local_manager.py",
     "tests/test_mikrofix_local_manager_ui.py",
     "tests/test_mikrofix_local_web.py",
+    "tests/test_build_local_agent_rules.py",
     "docs/kanon/00_KAZALO.md",
     "docs/kanon/01_POSLOVNA_PRAVILA.md",
     "docs/kanon/02_CILJNA_ARHITEKTURA.md",
@@ -85,10 +89,14 @@ CONTROL_PLANE_FILES = {
     "desktop/mikrofix-local-manager-autostart.desktop",
 }
 CONTROL_PLANE_PREFIXES = (
+    "config/local_agents/",
+    "docs/archive/",
+    "docs/kanon/",
+    "docs/local_agents/",
+    "desktop/mikrofix-local-",
+    "tests/test_mikrofix_",
     "tools/local_executor/",
-    "docs/local_agents/pravila/",
-    "docs/local_agents/roles/",
-    "docs/local_agents/supervisor/",
+    "tools/mikrofix_",
 )
 CHECK_COMMANDS: dict[str, tuple[str, ...]] = {
     "syntax_changed_python": (".venv/bin/python", "-m", "py_compile"),
@@ -302,6 +310,7 @@ class RunEnvironment:
                 "env": {
                     "MIKROFIX_BRIDGE_HOME": str(bridge_home),
                     "MIKROFIX_BRIDGE_CONFIG": str(bridge_config),
+                    "MIKROFIX_WORKSPACE": str(state_dir),
                 },
             },
             "executor": {
@@ -372,6 +381,7 @@ class RunEnvironment:
         return {
             "MIKROFIX_BRIDGE_HOME": str(self.bridge_home),
             "MIKROFIX_BRIDGE_CONFIG": str(self.bridge_config),
+            "MIKROFIX_WORKSPACE": str(self.run_dir.parents[1]),
         }
 
     def executor_env(self) -> dict[str, str]:
@@ -442,7 +452,9 @@ class WorkerManager:
         "MIKROFIX_EXECUTOR_RUN_ID", "MIKROFIX_EXECUTOR_PLAN_SHA256",
         "MIKROFIX_EXECUTOR_ALLOWED_FILES_SHA256",
     }
-    BRIDGE_ENV_KEYS = {"MIKROFIX_BRIDGE_HOME", "MIKROFIX_BRIDGE_CONFIG"}
+    BRIDGE_ENV_KEYS = {
+        "MIKROFIX_BRIDGE_HOME", "MIKROFIX_BRIDGE_CONFIG", "MIKROFIX_WORKSPACE",
+    }
 
     def __init__(
         self,
@@ -1735,8 +1747,7 @@ def require_resume_ready(manager: WorkerManager) -> dict[str, Any]:
     return status
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def _main(args: argparse.Namespace) -> int:
     state_dir = args.state_dir.expanduser().resolve()
     state_file = (args.state or state_dir / "active-run.json").expanduser().resolve()
     if args.command == "init":
@@ -1829,6 +1840,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if not progressed:
             time.sleep(max(0.2, args.interval))
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    with workspace_lock(args.state_dir):
+        return _main(args)
 
 
 if __name__ == "__main__":

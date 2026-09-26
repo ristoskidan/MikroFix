@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -358,9 +359,36 @@ class PlanValidationTests(unittest.TestCase):
             "docs/local_agents/roles/EXECUTOR_SYSTEM.md",
             "docs/local_agents/pravila/00_AVTORITETA.md",
             "docs/local_agents/LEKCIJE.md",
+            "docs/kanon/06_LOKALNI_AGENTI.md",
+            "config/local_agents/role_profiles.json",
+            "tools/mikrofix_task_lifecycle.py",
+            "tools/build_local_agent_rules.py",
+            "desktop/mikrofix-local-manager.desktop",
+            "docs/archive/original.md",
         ):
-            with self.subTest(protected=protected), self.assertRaises(ValueError):
-                validate_plan(plan(allowed_files=[protected]))
+            candidate = plan(allowed_files=[protected])
+            candidate["atoms"][0]["expected_files"] = [protected]
+            with self.subTest(protected=protected), self.assertRaisesRegex(
+                ValueError, "protected control-plane paths.*" + re.escape(protected)
+            ):
+                validate_plan(candidate)
+
+    def test_control_plane_path_is_allowed_as_read_context(self):
+        candidate = plan()
+        candidate["context_links"]["canon"] = ["docs/kanon/01_POSLOVNA_PRAVILA.md"]
+        self.assertEqual("MF-RUN-TEST", validate_plan(candidate)["run_id"])
+
+    def test_control_plane_path_normalization_cannot_bypass_protection(self):
+        for protected in (
+            "./docs/kanon/01_POSLOVNA_PRAVILA.md",
+            "docs//kanon/01_POSLOVNA_PRAVILA.md",
+        ):
+            candidate = plan(allowed_files=[protected])
+            candidate["atoms"][0]["expected_files"] = [protected]
+            with self.subTest(protected=protected), self.assertRaisesRegex(
+                ValueError, "protected control-plane paths"
+            ):
+                validate_plan(candidate)
 
     def test_rejects_missing_constraints(self):
         with self.assertRaises(ValueError) as error:

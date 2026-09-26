@@ -17,8 +17,10 @@ from typing import Any
 
 try:
     from tools.mikrofix_local_manager import installed_ollama_models
+    from tools.mikrofix_workspace_lock import workspace_lock
 except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     from mikrofix_local_manager import installed_ollama_models  # type: ignore[no-redef]
+    from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -520,9 +522,10 @@ def main() -> int:
         activate_existing_window()
         lock.close()
         return 0
-    root = tk.Tk()
-    LocalManagerUI(root)
-    root.mainloop()
+    with workspace_lock(DEFAULT_WORKSPACE):
+        root = tk.Tk()
+        LocalManagerUI(root)
+        root.mainloop()
     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     lock.close()
     return 0
