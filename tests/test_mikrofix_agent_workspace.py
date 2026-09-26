@@ -219,6 +219,29 @@ class AgentWorkspaceTests(unittest.TestCase):
             self.workspace
         )["baseline_commit"])
 
+    def test_prepared_journal_write_failure_restores_previously_active_services(self):
+        workspace_module.init_workspace(self.source, self.workspace)
+        service_names = workspace_module.WRITER_SERVICES[:2]
+        services = TrackingServices(active=service_names)
+        original_update = workspace_module.update_rotation
+
+        def fail_prepared(journal_path, journal, phase, **extra):
+            if phase == "PREPARED":
+                raise OSError("injected PREPARED fsync failure")
+            return original_update(journal_path, journal, phase, **extra)
+
+        with mock.patch.object(
+            workspace_module, "update_rotation", side_effect=fail_prepared,
+        ):
+            with self.assertRaisesRegex(OSError, "PREPARED fsync failure"):
+                workspace_module.rotate_workspace(
+                    self.source, self.workspace, services=services,
+                    process_checker=lambda _path: [],
+                )
+        self.assertEqual(set(service_names), services.active)
+        self.assertEqual(list(service_names), services.starts)
+        self.assertTrue(self.workspace.is_dir())
+
     def test_failed_rotation_restores_old_workspace_without_deletion(self):
         workspace_module.init_workspace(self.source, self.workspace)
         old_inventory = workspace_module.workspace_inventory(self.workspace)
@@ -443,6 +466,75 @@ class AgentWorkspaceTests(unittest.TestCase):
         journal = json.loads(journal_path.read_text())
         self.assertEqual("SERVICES_RECOVERY_REQUIRED", journal["phase"])
         self.assertFalse(journal["service_recovery"][service_name]["health_ok"])
+
+    def test_recovery_retries_after_health_failure_and_completes(self):
+        service_name = workspace_module.WRITER_SERVICES[0]
+        workspace_module.init_workspace(self.source, self.workspace)
+        services = TrackingServices(active=(service_name,), unhealthy=(service_name,))
+        with self.assertRaisesRegex(workspace_module.WorkspaceError, "health-check failed"):
+            workspace_module.rotate_workspace(
+                self.source, self.workspace, services=services,
+                process_checker=lambda _path: [],
+            )
+        journal_path = next(workspace_module.rotation_root(self.workspace).glob("*.json"))
+        journal = json.loads(journal_path.read_text())
+        services.unhealthy.clear()
+        result = workspace_module.recover_rotation(
+            self.workspace, journal["rotation_id"], complete=True,
+            services=services, process_checker=lambda _path: [],
+        )
+        self.assertEqual("COMPLETED", result["rotation"]["phase"])
+        self.assertTrue(result["rotation"]["service_recovery"][service_name]["health_ok"])
+
+    def test_active_systemd_service_with_failed_http_health_is_unhealthy(self):
+        services = workspace_module.UserServices()
+        service_name = "mikrofix-openwebui-gateway.service"
+        with (
+            mock.patch.object(services, "is_active", return_value=True),
+            mock.patch.object(
+                workspace_module.urllib.request, "urlopen",
+                side_effect=workspace_module.urllib.error.URLError("refused"),
+            ) as open_url,
+            mock.patch.object(workspace_module, "SERVICE_HEALTH_ATTEMPTS", 3),
+            mock.patch.object(workspace_module, "SERVICE_HEALTH_INTERVAL", 0),
+        ):
+            self.assertFalse(services.health(service_name))
+        self.assertEqual(3, open_url.call_count)
+
+    def test_concurrent_recovery_is_rejected_by_operation_lock(self):
+        entered = threading.Event()
+        release = threading.Event()
+        outcomes = []
+
+        def held_recovery(*_args, **_kwargs):
+            entered.set()
+            release.wait(timeout=5)
+            return {"status": "OK", "rotation": {}}
+
+        def first_recovery():
+            outcomes.append(workspace_module.recover_rotation(
+                self.workspace, "one", complete=True,
+            ))
+
+        with mock.patch.object(
+            workspace_module, "_recover_rotation", side_effect=held_recovery,
+        ):
+            thread = threading.Thread(target=first_recovery)
+            thread.start()
+            self.assertTrue(entered.wait(timeout=5))
+            try:
+                with self.assertRaisesRegex(
+                    workspace_module.WorkspaceError,
+                    "rotation operation is already active",
+                ):
+                    workspace_module.recover_rotation(
+                        self.workspace, "two", complete=True,
+                    )
+            finally:
+                release.set()
+                thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual("OK", outcomes[0]["status"])
 
     def test_journal_failure_at_services_restored_does_not_roll_back_files(self):
         self._assert_service_phase_write_failure("SERVICES_RESTORED")

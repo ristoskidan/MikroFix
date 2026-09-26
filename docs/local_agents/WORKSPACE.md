@@ -55,6 +55,11 @@ python3 tools/mikrofix_agent_workspace.py recover --rotation-id ID --rollback
 python3 tools/mikrofix_agent_workspace.py recover --rotation-id ID --complete
 ```
 
+Ukaza `rotate` in `recover` sta dodatno serializirana z ločeno ključavnico
+rotacijske operacije. Ta ključavnica prepreči dve sočasni obnovitvi, vendar ne
+nadomesti običajne shared/exclusive ključavnice, ki med premiki poti izključuje
+zapisovalce delujočega workspacea.
+
 Do trajne faze `SERVICES_ACTIVATING` je dovoljen preverjen povratek na stari
 workspace. Ta faza se zapiše pod ekskluzivno ključavnico, preden se zažene prva
 storitev. Po njej je novi preverjeni workspace avtoritativen in je dovoljen samo
@@ -62,6 +67,13 @@ forward recovery storitev; datotečni rollback ni več dovoljen. Dnevnik za vsak
 prej aktivno storitev zapiše začetek zagona, uspeh ukaza in rezultat preverjanja
 aktivnosti. `COMPLETED` oziroma `ROLLED_BACK` nastaneta šele po uspešni obnovi
 vseh zahtevanih storitev.
+
+Pri lokalnem spletnem vmesniku, Open WebUI gatewayu in stalnem executorju
+preverjanje storitve pomeni omejeno ponavljanje dejanskega HTTP health klica,
+ne samo systemd stanja. Bridge brez HTTP health poti se preveri s systemd
+stanjem. Odpoved health klica ostane trajno zapisana in jo je mogoče varno
+nadaljevati z istim `recover --complete` oziroma `recover --rollback`, skladno
+z že doseženo fazo.
 
 Po uspehu ali povratku se ponovno zaženejo samo storitve, ki so bile aktivne
 pred rotacijo. Neaktivni uporabniški vmesnik se ne zažene zaradi preverjanja.

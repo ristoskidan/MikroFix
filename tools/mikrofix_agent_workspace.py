@@ -9,6 +9,8 @@ ignored files, secrets, databases or the trusted supervisor control plane.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -19,6 +21,8 @@ import subprocess
 import tempfile
 import time
 from typing import Any
+import urllib.error
+import urllib.request
 import uuid
 
 try:
@@ -75,6 +79,13 @@ ROLLBACK_SERVICE_PHASES = {
     "ROLLBACK_SERVICES_ACTIVATING", "ROLLBACK_SERVICES_RECOVERY_REQUIRED",
     "ROLLBACK_SERVICES_RESTORED",
 }
+SERVICE_HEALTH_URLS = {
+    "mikrofix-local-web.service": "http://127.0.0.1:8765/api/health",
+    "mikrofix-openwebui-gateway.service": "http://172.17.0.1:8767/health",
+    "mikrofix-local-executor.service": "http://172.17.0.1:8766/health",
+}
+SERVICE_HEALTH_ATTEMPTS = 20
+SERVICE_HEALTH_INTERVAL = 0.25
 
 
 def run(args: list[str], *, cwd: Path | None = None) -> str:
@@ -181,7 +192,47 @@ class UserServices:
         run(["systemctl", "--user", "start", name])
 
     def health(self, name: str) -> bool:
-        return self.is_active(name)
+        if not self.is_active(name):
+            return False
+        url = SERVICE_HEALTH_URLS.get(name)
+        if url is None:
+            return True
+        for attempt in range(SERVICE_HEALTH_ATTEMPTS):
+            try:
+                with urllib.request.urlopen(url, timeout=1) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+                if response.status == 200 and (
+                    payload.get("status") == "ok" or payload.get("ok") is True
+                ):
+                    return True
+            except (OSError, urllib.error.URLError, json.JSONDecodeError):
+                pass
+            if attempt + 1 < SERVICE_HEALTH_ATTEMPTS:
+                time.sleep(SERVICE_HEALTH_INTERVAL)
+        return False
+
+
+def rotation_operation_lock_path(workspace: Path) -> Path:
+    workspace = workspace.expanduser().absolute()
+    return workspace.parent / f".{workspace.name}.rotation-operation.lock"
+
+
+@contextmanager
+def rotation_operation_lock(workspace: Path):
+    """Serialize rotate/recover without blocking normal shared workspace users."""
+    path = rotation_operation_lock_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise WorkspaceError(f"workspace rotation operation is already active: {workspace}") from None
+    try:
+        yield path
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
 
 
 def workspace_processes(workspace: Path) -> list[str]:
@@ -490,7 +541,7 @@ def verify_workspace(workspace: Path) -> dict[str, Any]:
     }
 
 
-def rotate_workspace(
+def _rotate_workspace(
     source: Path, workspace: Path, *, services: Any | None = None,
     process_checker: Any = workspace_processes,
 ) -> dict[str, Any]:
@@ -522,6 +573,7 @@ def rotate_workspace(
     journal_path = rotation_root(workspace) / f"{rotation_id}.json"
     journal: dict[str, Any] | None = None
     original_error: BaseException | None = None
+    workspace_paths_changed = False
     try:
         with workspace_lock(workspace, exclusive=True, blocking=False):
             processes = process_checker(workspace)
@@ -546,6 +598,7 @@ def rotate_workspace(
             update_rotation(journal_path, journal, "PREPARED")
             try:
                 os.replace(workspace, archive)
+                workspace_paths_changed = True
                 fsync_directory(workspace.parent)
                 update_rotation(journal_path, journal, "OLD_ARCHIVED")
                 init_workspace(source, workspace, failed_destination=failed)
@@ -568,11 +621,22 @@ def rotate_workspace(
                 rollback_paths_locked(
                     workspace, journal_path, journal, process_checker=process_checker,
                 )
-    except BaseException:
-        if journal is None:
+    except BaseException as exc:
+        if not workspace_paths_changed:
+            restore_errors = []
             for name, was_active in active.items():
-                if was_active:
-                    services.start(name)
+                if was_active and not services.is_active(name):
+                    try:
+                        services.start(name)
+                        if not service_health(services, name):
+                            raise WorkspaceError(f"service health-check failed: {name}")
+                    except BaseException as restore_exc:
+                        restore_errors.append(f"{name}: {restore_exc}")
+            if restore_errors:
+                raise WorkspaceError(
+                    f"rotation failed before path mutation ({exc}); service restoration failed: "
+                    + "; ".join(restore_errors)
+                ) from exc
         raise
 
     if original_error is not None:
@@ -593,6 +657,16 @@ def rotate_workspace(
         failure_phase="SERVICES_RECOVERY_REQUIRED",
     )
     return {"status": "OK", "rotation": journal}
+
+
+def rotate_workspace(
+    source: Path, workspace: Path, *, services: Any | None = None,
+    process_checker: Any = workspace_processes,
+) -> dict[str, Any]:
+    with rotation_operation_lock(workspace):
+        return _rotate_workspace(
+            source, workspace, services=services, process_checker=process_checker,
+        )
 
 
 def rollback_paths_locked(
@@ -632,7 +706,7 @@ def rollback_paths_locked(
     return restored
 
 
-def recover_rotation(
+def _recover_rotation(
     workspace: Path, rotation_id: str, *, complete: bool,
     services: Any | None = None, process_checker: Any = workspace_processes,
 ) -> dict[str, Any]:
@@ -718,6 +792,17 @@ def recover_rotation(
             failure_phase="ROLLBACK_SERVICES_RECOVERY_REQUIRED",
         )
     return {"status": "OK", "rotation": journal}
+
+
+def recover_rotation(
+    workspace: Path, rotation_id: str, *, complete: bool,
+    services: Any | None = None, process_checker: Any = workspace_processes,
+) -> dict[str, Any]:
+    with rotation_operation_lock(workspace):
+        return _recover_rotation(
+            workspace, rotation_id, complete=complete, services=services,
+            process_checker=process_checker,
+        )
 
 
 def verify_forward_topology(workspace: Path, journal: dict[str, Any]) -> None:
