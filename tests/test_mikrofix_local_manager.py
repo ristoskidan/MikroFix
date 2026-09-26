@@ -103,16 +103,65 @@ class LocalManagerTests(unittest.TestCase):
     def test_planner_worker_runs_directly_without_terminal_dependency(self):
         bridge = ["/trusted/python", "/trusted/bridge.py"]
         environment = {"MIKROFIX_BRIDGE_HOME": "/private/runtime"}
-        with mock.patch.object(manager, "command", return_value="") as called:
+        runtime = self.workspace / "runtime"
+        process = mock.Mock(returncode=0)
+        process.poll.side_effect = [None, 0, 0]
+        with (
+            mock.patch.object(manager.subprocess, "Popen", return_value=process) as called,
+            mock.patch.object(manager.time, "monotonic", side_effect=[0, 1]),
+            mock.patch.object(manager.time, "sleep"),
+        ):
             manager.run_bridge_monitor(
-                bridge, environment, self.workspace / "runtime", "MF-2026-0001"
+                bridge, environment, runtime, "MF-2026-0001"
             )
         called.assert_called_once_with(
             bridge + ["monitor", "--once"],
             cwd=manager.PROJECT_ROOT,
-            env=environment,
-            timeout=1800,
+            env=environment, stdin=subprocess.DEVNULL,
+            stdout=mock.ANY, stderr=subprocess.STDOUT, text=True,
         )
+
+    def test_bridge_monitor_progress_resets_idle_timeout_without_total_limit(self):
+        runtime = self.workspace / "runtime"
+        process = mock.Mock(returncode=0)
+        process.poll.side_effect = [None, None, 0, 0]
+        with (
+            mock.patch.object(manager.subprocess, "Popen", return_value=process),
+            mock.patch.object(manager, "forward_trace_events", side_effect=[10, 10, 10]),
+            mock.patch.object(manager.time, "monotonic", side_effect=[0, 899, 1700]),
+            mock.patch.object(manager.time, "sleep"),
+        ):
+            manager.run_bridge_monitor(
+                ["python", "bridge.py"], {}, runtime, "MF-2026-0001",
+                idle_timeout_seconds=900,
+            )
+        process.terminate.assert_not_called()
+
+    def test_bridge_monitor_idle_timeout_closes_inner_job(self):
+        runtime = self.workspace / "runtime"
+        job_dir = runtime / "jobs" / "MF-2026-0001"
+        job_dir.mkdir(parents=True)
+        (job_dir / "job.json").write_text(json.dumps({
+            "id": "MF-2026-0001", "status": "running",
+        }), encoding="utf-8")
+        process = mock.Mock(returncode=-15)
+        process.poll.side_effect = [None, 0]
+        with (
+            mock.patch.object(manager.subprocess, "Popen", return_value=process),
+            mock.patch.object(manager, "forward_trace_events", return_value=0),
+            mock.patch.object(manager.time, "monotonic", side_effect=[0, 901]),
+        ):
+            with self.assertRaisesRegex(
+                manager.ManagerError, "900 seconds without progress",
+            ):
+                manager.run_bridge_monitor(
+                    ["python", "bridge.py"], {}, runtime, "MF-2026-0001",
+                    idle_timeout_seconds=900,
+                )
+        persisted = json.loads((job_dir / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("BRIDGE_MONITOR_IDLE_TIMEOUT", persisted["error_code"])
+        self.assertIn("without progress", persisted["error"])
 
     def test_trace_forwarder_waits_for_complete_jsonl_records(self):
         trace = self.root / "trace.jsonl"
@@ -251,7 +300,7 @@ class LocalManagerTests(unittest.TestCase):
         self.assertNotIn('"project_apply_patch"', source)
         self.assertIn("MIKROFIX_EXECUTOR_READ_ONLY_CHECKS", source)
         self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
-        self.assertIn("timeout_seconds=900", source)
+        self.assertIn("idle_timeout_seconds=900", source)
 
     def test_plan_intent_keeps_root_request_and_excludes_discussion_from_task(self):
         conversation = {"turns": [

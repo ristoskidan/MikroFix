@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Any, Callable
 import urllib.parse
 import urllib.request
@@ -909,23 +910,19 @@ def gpt_validation_prompt(
 
 def run_bridge_monitor(
     bridge: list[str], bridge_env: dict[str, str], bridge_home: Path,
-    job_id: str, *, timeout_seconds: int = 1800,
+    job_id: str, *, idle_timeout_seconds: int = 900,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
-    """Run the planner worker directly; the owner UI reads its durable log."""
-    if progress_callback is None:
-        command(
-            bridge + ["monitor", "--once"],
-            cwd=PROJECT_ROOT,
-            env=bridge_env,
-            timeout=timeout_seconds,
-        )
-        return
+    """Run one worker with an inactivity limit but no total duration limit."""
+    if idle_timeout_seconds <= 0:
+        raise ValueError("idle_timeout_seconds must be positive")
+    callback = progress_callback or (lambda _event: None)
 
     trace_path = bridge_home / "jobs" / job_id / "trace.jsonl"
     output_path = bridge_home / "monitor-progress.log"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     offset = 0
-    deadline = time.monotonic() + timeout_seconds
+    last_activity = time.monotonic()
     with output_path.open("w+", encoding="utf-8") as output:
         process = subprocess.Popen(
             bridge + ["monitor", "--once"], cwd=PROJECT_ROOT,
@@ -934,19 +931,29 @@ def run_bridge_monitor(
         )
         try:
             while process.poll() is None:
-                offset = forward_trace_events(
-                    trace_path, offset, progress_callback,
-                )
-                if time.monotonic() >= deadline:
+                new_offset = forward_trace_events(trace_path, offset, callback)
+                current_time = time.monotonic()
+                if new_offset != offset:
+                    offset = new_offset
+                    last_activity = current_time
+                if current_time - last_activity >= idle_timeout_seconds:
                     process.terminate()
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=5)
-                    raise ManagerError("Bridge monitor timed out")
+                    reason = (
+                        "Bridge monitor timed out after "
+                        f"{idle_timeout_seconds} seconds without progress"
+                    )
+                    mark_bridge_job_interrupted(
+                        bridge_home, job_id, reason,
+                        error_code="BRIDGE_MONITOR_IDLE_TIMEOUT",
+                    )
+                    raise ManagerError(reason)
                 time.sleep(0.1)
-            offset = forward_trace_events(trace_path, offset, progress_callback)
+            offset = forward_trace_events(trace_path, offset, callback)
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -960,6 +967,40 @@ def run_bridge_monitor(
             raise ManagerError(
                 "Bridge monitor failed: " + output.read()[-4000:]
             )
+
+
+def mark_bridge_job_interrupted(
+    bridge_home: Path, job_id: str, reason: str, *, error_code: str,
+) -> None:
+    """Close a worker record after the manager has terminated its process."""
+    job_dir = bridge_home / "jobs" / job_id
+    job_path = job_dir / "job.json"
+    if not job_path.is_file():
+        return
+    try:
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if job.get("status") not in {"queued", "running"}:
+        return
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    job.update({
+        "status": "failed",
+        "finished_at": timestamp,
+        "error": reason,
+        "error_code": error_code,
+    })
+    atomic_write_json(job_path, job)
+    with (job_dir / "log.txt").open("a", encoding="utf-8") as handle:
+        handle.write(f"[{timestamp}] Naloga je bila prekinjena: {reason}\n")
+    with (job_dir / "trace.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "at": timestamp,
+            "type": "error",
+            "role": "manager",
+            "content": reason,
+            "error_code": error_code,
+        }, ensure_ascii=False) + "\n")
 
 
 def forward_trace_events(
@@ -1447,7 +1488,7 @@ def run_lead_conversation(
         ).splitlines()[-1]
         run_bridge_monitor(
             bridge, bridge_env, bridge_home, bridge_job_id,
-            timeout_seconds=900, progress_callback=progress_callback,
+            idle_timeout_seconds=900, progress_callback=progress_callback,
         )
         raw_response = command(
             bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
