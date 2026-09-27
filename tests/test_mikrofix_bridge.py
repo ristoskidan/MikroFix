@@ -557,6 +557,53 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual(3, len(progress))
         self.assertEqual(900, opened.call_args.kwargs["timeout"])
 
+    def test_streaming_chat_rejects_partial_eof_without_done_event(self):
+        lines = [
+            json.dumps({
+                "message": {"role": "assistant", "content": "delno"},
+                "done": False,
+            }).encode() + b"\n",
+        ]
+        with mock.patch.object(
+            self.bridge.urllib.request, "urlopen",
+            return_value=FakeHTTPResponse(lines),
+        ):
+            with self.assertRaises(self.bridge.BridgeTransportError) as raised:
+                self.bridge.request_json(
+                    "http://ollama.invalid/api/chat", method="POST",
+                    data={"stream": True}, timeout=900, stream_response=True,
+                )
+        self.assertEqual("OLLAMA_STREAM_TRUNCATED", raised.exception.error_code)
+
+    def test_streaming_chat_rejects_empty_stream(self):
+        with mock.patch.object(
+            self.bridge.urllib.request, "urlopen",
+            return_value=FakeHTTPResponse([]),
+        ):
+            with self.assertRaises(self.bridge.BridgeTransportError) as raised:
+                self.bridge.request_json(
+                    "http://ollama.invalid/api/chat", method="POST",
+                    data={"stream": True}, timeout=900, stream_response=True,
+                )
+        self.assertEqual("OLLAMA_STREAM_EMPTY", raised.exception.error_code)
+
+    def test_truncated_stream_error_is_persisted_fail_closed(self):
+        job = self.bridge.create_job("Persist truncated Ollama stream")
+        with mock.patch.object(
+            self.bridge, "call_qwen",
+            side_effect=self.bridge.BridgeTransportError(
+                "OLLAMA_STREAM_TRUNCATED", "missing done=true",
+            ),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("OLLAMA_STREAM_TRUNCATED", persisted["error_code"])
+        trace = (self.bridge.job_dir(job["id"]) / "trace.jsonl").read_text(
+            encoding="utf-8",
+        )
+        self.assertIn('"error_code": "OLLAMA_STREAM_TRUNCATED"', trace)
+
     def test_stream_silence_timeout_has_specific_error_code(self):
         class SilentResponse(FakeHTTPResponse):
             def __iter__(self):
@@ -613,6 +660,41 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual("completed", persisted["status"])
         self.assertEqual(1, persisted["truncated_model_responses"])
         self.assertIn("Kontekst je zdaj varno skrčen", seen_messages[2][-1]["content"])
+
+    def test_compacted_research_fits_16k_budget_and_preserves_request(self):
+        original_request = "Izvirna zahteva lastnika z vsemi potrjenimi pravili."
+        messages = [
+            {"role": "system", "content": "sistem"},
+            {"role": "user", "content": original_request},
+        ]
+        for index in range(20):
+            messages.extend([
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"function": {
+                        "name": "project_read",
+                        "arguments": {"path": f"file-{index}.py"},
+                    }}],
+                },
+                {"role": "tool", "content": "x" * 10000},
+            ])
+        retry_message = {
+            "role": "user",
+            "content": self.bridge.TRUNCATED_RESEARCH_RETRY_PROMPT,
+        }
+        budget = self.bridge.research_message_budget(
+            num_ctx=16384, num_predict=8192,
+        )
+        compacted = self.bridge.compact_research_messages(
+            messages,
+            budget=budget,
+            reserved_chars=self.bridge.serialized_size([retry_message]),
+        )
+        compacted.append(retry_message)
+        self.assertEqual(original_request, compacted[1]["content"])
+        self.assertLessEqual(self.bridge.serialized_size(compacted), budget)
+        self.assertLess(len(compacted), len(messages) + 1)
 
     def test_repeated_truncated_research_responses_fail_closed(self):
         job = self.bridge.create_job("Reject repeated truncated responses")

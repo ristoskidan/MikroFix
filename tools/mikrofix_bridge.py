@@ -99,6 +99,16 @@ Kjer dokaz manjka, to jasno povej. Vrni samo celoten neprazen odgovor lastniku
 kot navadno besedilo. JSON ovoj bo deterministično dodal bridge.
 """.strip()
 
+TRUNCATED_RESEARCH_RETRY_PROMPT = """\
+Prejšnji odgovor je dosegel izhodno mejo, preden je vrnil uporaben rezultat.
+Kontekst je zdaj varno skrčen. Ne ponavljaj dolgega premisleka. Nadaljuj z
+enim kratkim veljavnim strukturiranim klicem naslednjega potrebnega bralnega
+orodja; če so dokazi že zadostni, vrni neposreden neprazen odgovor lastniku.
+""".strip()
+
+CONSERVATIVE_CHARS_PER_TOKEN = 3
+RESEARCH_CONTEXT_FIXED_RESERVE_TOKENS = 1024
+
 if not 30 <= MODEL_SILENCE_TIMEOUT_SECONDS <= 3600:
     raise RuntimeError(
         "model_silence_timeout_seconds must be between 30 and 3600"
@@ -500,6 +510,7 @@ def request_json(
                 message = {"role": "assistant", "content": "", "thinking": ""}
                 metadata = {}
                 chunk_count = 0
+                done_received = False
                 byte_count = 0
                 last_progress_at = 0.0
                 for raw_line in r:
@@ -518,6 +529,8 @@ def request_json(
                             "OLLAMA_RESPONSE_ERROR", str(chunk["error"]),
                         )
                     chunk_count += 1
+                    if chunk.get("done") is True:
+                        done_received = True
                     part = chunk.get("message") or {}
                     if part.get("role"):
                         message["role"] = part["role"]
@@ -547,6 +560,12 @@ def request_json(
                     raise BridgeTransportError(
                         "OLLAMA_STREAM_EMPTY",
                         "Ollama je zaprla povezavo brez odgovora.",
+                    )
+                if not done_received:
+                    raise BridgeTransportError(
+                        "OLLAMA_STREAM_TRUNCATED",
+                        "Ollama je zaprla pretočno povezavo brez zaključnega "
+                        "dogodka done=true.",
                     )
                 return {"message": message, **metadata, "stream_chunks": chunk_count}
             raw = r.read()
@@ -877,10 +896,48 @@ def final_reply_messages(messages):
     return final_messages
 
 
-def compact_research_messages(messages, *, budget=72000):
+def serialized_size(value):
+    return len(json.dumps(value, ensure_ascii=False, default=str))
+
+
+def research_message_budget(*, num_ctx=None, num_predict=None, tools=None):
+    """Return a conservative character budget for model input messages."""
+    context_tokens = NUM_CTX if num_ctx is None else int(num_ctx)
+    configured_predict = (
+        RUNTIME_OPTIONS.get("num_predict")
+        if num_predict is None
+        else num_predict
+    )
+    if configured_predict is None:
+        output_tokens = max(2048, context_tokens // 4)
+    else:
+        output_tokens = max(1024, int(configured_predict))
+    tool_contract = TOOLS if tools is None else tools
+    tool_tokens = (
+        serialized_size(tool_contract) + CONSERVATIVE_CHARS_PER_TOKEN - 1
+    ) // CONSERVATIVE_CHARS_PER_TOKEN
+    available_tokens = (
+        context_tokens
+        - output_tokens
+        - tool_tokens
+        - RESEARCH_CONTEXT_FIXED_RESERVE_TOKENS
+    )
+    if available_tokens < 1024:
+        raise BridgeTransportError(
+            "RESEARCH_CONTEXT_BUDGET_INVALID",
+            "Aktivni num_ctx ne pušča dovolj prostora za zahtevo, orodja in "
+            "končni odgovor.",
+        )
+    return available_tokens * CONSERVATIVE_CHARS_PER_TOKEN
+
+
+def compact_research_messages(messages, *, budget=None, reserved_chars=0):
     """Keep the task and newest tool evidence while restoring output headroom."""
     if not messages:
         return []
+    if budget is None:
+        budget = research_message_budget()
+    target_budget = int(budget) - int(reserved_chars)
     compact = [{
         key: value for key, value in messages[0].items() if key != "thinking"
     }]
@@ -890,9 +947,14 @@ def compact_research_messages(messages, *, budget=72000):
     ]
     if remaining:
         task = remaining.pop(0)
-        if isinstance(task.get("content"), str) and len(task["content"]) > 18000:
-            task["content"] = task["content"][:18000] + "\n[skrajšano]"
         compact.append(task)
+
+    if serialized_size(compact) > target_budget:
+        raise BridgeTransportError(
+            "RESEARCH_CONTEXT_BUDGET_EXCEEDED",
+            "Izvirna zahteva in sistemski kontekst presegata varen aktivni "
+            "kontekstni proračun.",
+        )
 
     groups = []
     index = 0
@@ -917,11 +979,11 @@ def compact_research_messages(messages, *, budget=72000):
             normalized.append(cleaned)
         normalized_groups.append(normalized)
 
-    used = len(json.dumps(compact, ensure_ascii=False, default=str))
+    used = serialized_size(compact)
     selected = []
     for group in reversed(normalized_groups):
-        size = len(json.dumps(group, ensure_ascii=False, default=str))
-        if used + size > budget:
+        size = serialized_size(group)
+        if used + size > target_budget:
             continue
         selected.append(group)
         used += size
@@ -1268,18 +1330,15 @@ def process_job(job_id):
                             "Model je v isti nalogi dvakrat dosegel izhodno "
                             "omejitev brez uporabnega odgovora ali klica orodja.",
                         ) from exc
-                    messages = compact_research_messages(messages)
-                    messages.append({
+                    retry_message = {
                         "role": "user",
-                        "content": (
-                            "Prejšnji odgovor je dosegel izhodno mejo, preden je "
-                            "vrnil uporaben rezultat. Kontekst je zdaj varno skrčen. "
-                            "Ne ponavljaj dolgega premisleka. Nadaljuj z enim kratkim "
-                            "veljavnim strukturiranim klicem naslednjega potrebnega "
-                            "bralnega orodja; če so dokazi že zadostni, vrni neposreden "
-                            "neprazen odgovor lastniku."
-                        ),
-                    })
+                        "content": TRUNCATED_RESEARCH_RETRY_PROMPT,
+                    }
+                    messages = compact_research_messages(
+                        messages,
+                        reserved_chars=serialized_size([retry_message]),
+                    )
+                    messages.append(retry_message)
                     write_log(
                         job_id,
                         "Modelov odgovor je dosegel izhodno mejo; kontekst je "
