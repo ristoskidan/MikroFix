@@ -86,6 +86,9 @@ PLANNING_DRAFTER_MODEL = "qwen3:4b-thinking-2507-q8_0"
 PLAN_DRAFTER_SYSTEM = (
     PROJECT_ROOT / "docs/local_agents/roles/PLAN_DRAFTER_SYSTEM.md"
 )
+PLAN_PREPARER_SYSTEM = (
+    PROJECT_ROOT / "docs/local_agents/roles/PLAN_PREPARER_SYSTEM.md"
+)
 GPT_VALIDATOR_SYSTEM = (
     PROJECT_ROOT / "docs/local_agents/roles/PLAN_VALIDATOR_SYSTEM.md"
 )
@@ -105,7 +108,7 @@ def conversation_response_schema(*, planning_requested: bool = True) -> dict[str
     return {
         "type": "object", "additionalProperties": False,
         "required": [
-            "reply", "routing", "ready_task", "objective", "allowed_files",
+            "reply", "routing", "objective", "allowed_files",
             "atoms", "constraints", "acceptance_criteria",
             "objective_source_turns", "decision_source_turns",
             "discussion_only_turns",
@@ -116,7 +119,6 @@ def conversation_response_schema(*, planning_requested: bool = True) -> dict[str
                 "type": "string",
                 "enum": ["NEEDS_INFO", "READY_FOR_PROCESSING"],
             },
-            "ready_task": {"type": "string"},
             "objective": {"type": "string"},
             "allowed_files": {
                 "type": "array", "uniqueItems": True,
@@ -159,6 +161,38 @@ def conversation_response_schema(*, planning_requested: bool = True) -> dict[str
     }
 
 
+RESEARCH_ENVELOPE_RE = re.compile(
+    r"\A\s*\[OWNER_REQUEST\]\s*\n(?P<owner>.*?)\n\s*\[/OWNER_REQUEST\]"
+    r"\s*\n+\s*\[CODEX_RESEARCH_PROMPT\]\s*\n(?P<prompt>.*?)\n\s*"
+    r"\[/CODEX_RESEARCH_PROMPT\]\s*\Z",
+    flags=re.DOTALL,
+)
+EVIDENCE_BEARING_TOOLS = frozenset({"project_read", "project_search"})
+
+
+def parse_research_envelope(value: str) -> dict[str, str]:
+    """Parse the explicit owner/Codex boundary for one new research task."""
+    match = RESEARCH_ENVELOPE_RE.fullmatch(value.strip())
+    if not match:
+        raise ManagerError(
+            "Ukaz /research zahteva natanko razdelka [OWNER_REQUEST] ... "
+            "[/OWNER_REQUEST] in [CODEX_RESEARCH_PROMPT] ... "
+            "[/CODEX_RESEARCH_PROMPT]."
+        )
+    owner_request = match.group("owner").strip()
+    codex_prompt = match.group("prompt").strip()
+    if not owner_request or not codex_prompt:
+        raise ManagerError("Oba razdelka /research morata biti neprazna")
+    core = {
+        "schema_version": 1,
+        "owner_request": owner_request,
+        "owner_request_sha256": sha256_text(owner_request),
+        "codex_research_prompt": codex_prompt,
+        "codex_research_prompt_sha256": sha256_text(codex_prompt),
+    }
+    return {**core, "research_input_sha256": canonical_json_sha256(core)}
+
+
 def binding_owner_criterion(owner_request: str) -> str:
     """Keep every owner requirement inside the evidence-scored review gate."""
     request = owner_request.strip()
@@ -178,8 +212,143 @@ def canonical_json_sha256(value: object) -> str:
     return sha256_text(payload)
 
 
+def _relative_evidence_paths(tool: str, arguments: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    if tool in {"project_read", "project_list"}:
+        raw = arguments.get("path")
+        if isinstance(raw, str) and raw.strip():
+            values.append(raw.strip())
+    if tool == "project_search":
+        for field in ("path", "file_glob"):
+            raw = arguments.get(field)
+            if isinstance(raw, str) and raw.strip():
+                values.append(raw.strip())
+    return sorted(dict.fromkeys(values))
+
+
+def build_research_evidence_manifest(
+    *, trace_path: Path, bridge_job_id: str, report: str,
+    research_input: dict[str, Any], evidence: dict[str, str],
+) -> dict[str, Any]:
+    """Build a bounded manifest from real structured tool/result trace pairs."""
+    try:
+        lines = trace_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ManagerError("Research trace is missing") from exc
+    pending: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ManagerError("Research trace contains invalid JSON") from exc
+        if not isinstance(event, dict):
+            raise ManagerError("Research trace event must be an object")
+        if event.get("type") == "tool_call":
+            tool = str(event.get("tool") or "")
+            arguments = event.get("arguments")
+            pending.append({
+                "tool": tool,
+                "step": int(event.get("step") or 0),
+                "arguments": arguments if isinstance(arguments, dict) else {},
+            })
+        elif event.get("type") == "tool_result":
+            tool = str(event.get("tool") or "")
+            match_index = next(
+                (index for index, call in enumerate(pending)
+                 if call["tool"] == tool),
+                None,
+            )
+            if match_index is None:
+                raise ManagerError("Research trace has an unmatched tool result")
+            call = pending.pop(match_index)
+            if not event.get("ok") or event.get("counts_as_evidence") is False:
+                continue
+            result = event.get("result")
+            if tool == "project_search" and isinstance(result, dict):
+                if int(result.get("count") or 0) <= 0:
+                    continue
+            calls.append({
+                "tool": tool,
+                "step": call["step"],
+                "arguments": call["arguments"],
+                "arguments_sha256": canonical_json_sha256(call["arguments"]),
+                "relative_paths": _relative_evidence_paths(
+                    tool, call["arguments"],
+                ),
+                "result_sha256": canonical_json_sha256(result),
+            })
+    if not any(call["tool"] in EVIDENCE_BEARING_TOOLS for call in calls):
+        raise ManagerError(
+            "Research requires a successful project_read or non-empty "
+            "project_search; project_status alone is not evidence."
+        )
+    core = {
+        "schema_version": 1,
+        "bridge_job_id": bridge_job_id,
+        "research_input_sha256": research_input["research_input_sha256"],
+        "owner_request_sha256": research_input["owner_request_sha256"],
+        "codex_research_prompt_sha256": (
+            research_input["codex_research_prompt_sha256"]
+        ),
+        "report": report,
+        "report_sha256": sha256_text(report),
+        "prompt_sha256": evidence.get("prompt_hash", ""),
+        "model": evidence.get("model", ""),
+        "model_digest": evidence.get("model_digest", ""),
+        "profile_snapshot_hash": evidence.get("profile_snapshot_hash", ""),
+        "trace_sha256": hashlib.sha256(trace_path.read_bytes()).hexdigest(),
+        "successful_evidence_calls": calls,
+    }
+    return {**core, "manifest_sha256": canonical_json_sha256(core)}
+
+
+def load_research_input(job_dir: Path) -> dict[str, Any]:
+    path = job_dir / "research-input.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManagerError("Immutable research input is missing or invalid") from exc
+    if not isinstance(value, dict):
+        raise ManagerError("Immutable research input must be an object")
+    core = dict(value)
+    stored = core.pop("research_input_sha256", None)
+    if stored != canonical_json_sha256(core):
+        raise ManagerError("Immutable research input hash mismatch")
+    return value
+
+
+def load_research_manifests(
+    job_dir: Path, conversation: dict[str, Any],
+) -> list[dict[str, Any]]:
+    pointers = conversation.get("research_manifests")
+    if not isinstance(pointers, list) or not pointers:
+        raise ManagerError("Planning requires immutable research evidence")
+    manifests: list[dict[str, Any]] = []
+    for pointer in pointers:
+        if not isinstance(pointer, dict) or set(pointer) != {"path", "sha256"}:
+            raise ManagerError("Research manifest pointer is invalid")
+        path = (job_dir / str(pointer["path"])).resolve()
+        try:
+            path.relative_to(job_dir.resolve())
+        except ValueError as exc:
+            raise ManagerError("Research manifest escapes its job") from exc
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ManagerError("Research manifest is missing or invalid") from exc
+        core = dict(manifest)
+        stored = core.pop("manifest_sha256", None)
+        expected = canonical_json_sha256(core)
+        if stored != expected or pointer["sha256"] != expected:
+            raise ManagerError("Research manifest hash mismatch")
+        manifests.append(manifest)
+    return manifests
+
+
 def build_plan_intent(
     conversation: dict[str, Any], *, repository: Path,
+    job_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Freeze the exact conversation evidence used by one planning request."""
     raw_turns = conversation.get("turns")
@@ -217,12 +386,23 @@ def build_plan_intent(
         turn for turn in owner_turns if turn["kind"] == "goal_replacement"
     ]
     root_turn = replacements[-1] if replacements else owner_turns[0]
+    research_binding: dict[str, Any] = {}
+    if job_dir is not None:
+        research_input = load_research_input(job_dir)
+        manifests = load_research_manifests(job_dir, conversation)
+        research_binding = {
+            "research_input_sha256": research_input["research_input_sha256"],
+            "research_manifest_sha256s": [
+                manifest["manifest_sha256"] for manifest in manifests
+            ],
+        }
     core = {
         "schema_version": 1,
         "root_turn_id": root_turn["turn_id"],
         "root_request": root_turn["content"],
         "checkpoint": checkpoint,
         "turns": turns,
+        **research_binding,
     }
     return {**core, "intent_sha256": canonical_json_sha256(core)}
 
@@ -1555,6 +1735,204 @@ def run_lead_conversation(
         log.close()
 
 
+def plan_preparer_snapshot(research_snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Derive a separate immutable role identity while keeping owner runtime."""
+    roles = json.loads(ROLE_REGISTRY.read_text(encoding="utf-8"))["roles"]
+    role = roles["plan_preparer"]
+    profile = {
+        "profile_id": "plan_preparer",
+        "version": role["version"],
+        "model": research_snapshot["model"],
+        "role": "plan_preparer",
+        "display_name": role["display_name"],
+        "num_ctx": research_snapshot["num_ctx"],
+        "conversation_num_ctx": research_snapshot.get(
+            "conversation_num_ctx", research_snapshot["num_ctx"],
+        ),
+        "think": research_snapshot["think"],
+        "system_prompt": role["system_prompt"],
+        "keep_alive": research_snapshot["keep_alive"],
+        "conversation_keep_alive": research_snapshot.get(
+            "conversation_keep_alive", research_snapshot["keep_alive"],
+        ),
+        "runtime_options": research_snapshot.get("runtime_options") or {},
+    }
+    return build_profile_snapshot(
+        profile, project_root=PROJECT_ROOT,
+        model_digest=str(research_snapshot["model_digest"]),
+    )
+
+
+def plan_preparer_prompt(
+    *, plan_intent: dict[str, Any], research_input: dict[str, Any],
+    manifests: list[dict[str, Any]], repository_snapshot: str,
+) -> str:
+    reports = [
+        {
+            "manifest_sha256": manifest["manifest_sha256"],
+            "report": manifest["report"],
+            "report_sha256": manifest["report_sha256"],
+            "successful_evidence_calls": manifest["successful_evidence_calls"],
+        }
+        for manifest in manifests
+    ]
+    return (
+        "Pripravi samo prikazni kandidat izvedbenega načrta iz spodnjih "
+        "eksplicitnih artefaktov. Nimaš dostopa do spomina raziskovalca in ne "
+        "smeš klicati orodij.\n\n"
+        "TRENUTNI REPOZITORIJ:\n" + repository_snapshot + "\n\n"
+        "IZVIRNA ZAHTEVA LASTNIKA:\n" + research_input["owner_request"]
+        + "\n\nCODEXOV RAZISKOVALNI PROMPT:\n"
+        + research_input["codex_research_prompt"]
+        + "\n\nZAMRZNJENI PLAN INTENT:\n"
+        + json.dumps(plan_intent, ensure_ascii=False, sort_keys=True)
+        + "\n\nRAZISKOVALNA POROČILA IN DOKAZNI MANIFESTI:\n"
+        + json.dumps(reports, ensure_ascii=False, sort_keys=True)
+        + "\n\nVrni samo objekt po zahtevani strukturirani shemi."
+    )
+
+
+def run_plan_preparer(
+    _message: str, *, job_dir: Path, repository: Path,
+    turns: list[dict[str, str]], lead_profile: str = "conversation_lead",
+    lead_snapshot: dict[str, Any] | None = None,
+    planning_requested: bool = True,
+    plan_intent: dict[str, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Run a tool-less planner in a fresh role/session over immutable evidence."""
+    del turns, lead_profile
+    if not planning_requested or plan_intent is None:
+        raise ManagerError("plan_preparer requires a frozen planning request")
+    research_snapshot = lead_snapshot or read_profile_snapshot(job_dir)
+    snapshot = plan_preparer_snapshot(research_snapshot)
+    research_input = load_research_input(job_dir)
+    conversation = json.loads((job_dir / "conversation.json").read_text(encoding="utf-8"))
+    manifests = load_research_manifests(job_dir, conversation)
+    if plan_intent.get("research_input_sha256") != research_input["research_input_sha256"]:
+        raise ManagerError("Plan intent is not bound to the research input")
+    if plan_intent.get("research_manifest_sha256s") != [
+        manifest["manifest_sha256"] for manifest in manifests
+    ]:
+        raise ManagerError("Plan intent is not bound to the research manifests")
+
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    intent_hash = str(plan_intent["intent_sha256"])
+    turn_dir = (
+        job_dir / "planning-runtime" / intent_hash / f"attempt-{time.time_ns()}"
+    )
+    bridge_home = turn_dir / "bridge"
+    executor_config = turn_dir / "executor-config"
+    executor_state = turn_dir / "executor-state"
+    for path in (bridge_home, executor_config, executor_state):
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    snapshot_path = turn_dir / "plan-preparer-profile-snapshot.json"
+    if not snapshot_path.exists():
+        atomic_write_immutable_json(snapshot_path, snapshot)
+    elif json.loads(snapshot_path.read_text(encoding="utf-8")) != snapshot:
+        raise ManagerError("Stored plan_preparer snapshot differs")
+
+    port = free_local_port()
+    token_file = executor_config / "token"
+    executor_url = f"http://127.0.0.1:{port}"
+    config_path = bridge_home / "config.json"
+    num_ctx, keep_alive = conversation_runtime_settings(snapshot)
+    bridge_config = {
+        "ollama_url": template["ollama_url"],
+        "model": snapshot["model"],
+        "executor_url": executor_url,
+        "token_file": str(token_file),
+        "project": str(repository),
+        "system_prompt": str(PLAN_PREPARER_SYSTEM),
+        "num_ctx": num_ctx,
+        "max_steps": 4,
+        "keep_alive": keep_alive,
+        "think": snapshot["think"],
+        "require_tool_use": False,
+        "model_silence_timeout_seconds": 900,
+        "minimum_successful_tool_calls": 1,
+        "allowed_tools": [],
+        "max_toolless_responses": 2,
+        "deterministic_reply_wrapper": False,
+        "completion_policy": "supervisor_only",
+        "response_format": conversation_response_schema(planning_requested=True),
+        "agent_role": "Pripravljavec izvedbenega načrta",
+    }
+    for field in RUNTIME_OPTION_FIELDS:
+        value = (snapshot.get("runtime_options") or {}).get(field)
+        if value is not None:
+            bridge_config[field] = value
+    if not config_path.exists():
+        atomic_write_immutable_json(config_path, bridge_config)
+    elif json.loads(config_path.read_text(encoding="utf-8")) != bridge_config:
+        raise ManagerError("Stored plan_preparer runtime differs")
+    executor_env = {
+        "MIKROFIX_EXECUTOR_ROOT": str(repository),
+        "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config),
+        "MIKROFIX_EXECUTOR_STATE_DIR": str(executor_state),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    log = (turn_dir / "executor.log").open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        [str(PROJECT_ROOT / ".venv-server/bin/python"), "-m", "uvicorn",
+         "tools.local_executor.server:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=PROJECT_ROOT, env={**os.environ, **executor_env},
+        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, text=True,
+    )
+    bridge = [str(PROJECT_ROOT / ".venv-server/bin/python"),
+              str(PROJECT_ROOT / "tools/mikrofix_bridge.py")]
+    bridge_env = {
+        "MIKROFIX_BRIDGE_HOME": str(bridge_home),
+        "MIKROFIX_BRIDGE_CONFIG": str(config_path),
+        "CODEX_THREAD_ID": "",
+        "MIKROFIX_WORKSPACE": str(job_dir.parent.parent),
+    }
+    prompt = plan_preparer_prompt(
+        plan_intent=plan_intent, research_input=research_input,
+        manifests=manifests, repository_snapshot=repository_orientation(repository),
+    )
+    try:
+        wait_for_executor(executor_url, token_file, process)
+        bridge_job_id = command(
+            bridge + ["dispatch", "--name", "Ločeni pripravljavec načrta",
+                      "--task", prompt],
+            cwd=PROJECT_ROOT, env=bridge_env, timeout=30,
+        ).splitlines()[-1]
+        run_bridge_monitor(
+            bridge, bridge_env, bridge_home, bridge_job_id,
+            idle_timeout_seconds=1200, progress_callback=progress_callback,
+        )
+        raw = command(
+            bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
+            env=bridge_env, timeout=30,
+        ).strip()
+        decision = json.loads(raw)
+        required = set(conversation_response_schema(planning_requested=True)["required"])
+        if not isinstance(decision, dict) or set(decision) != required:
+            raise ManagerError("plan_preparer did not return the exact planning schema")
+        return decision, {
+            "bridge_job_id": bridge_job_id,
+            "session_id": f"PLAN-{intent_hash[:16]}",
+            "memory_sha256": "",
+            "trace_root": str(bridge_home / "jobs"),
+            "lead_profile": "plan_preparer",
+            "model": str(snapshot["model"]),
+            "model_digest": str(snapshot["model_digest"]),
+            "profile_snapshot_hash": str(snapshot["profile_snapshot_hash"]),
+            "prompt_hash": sha256_text(prompt),
+        }
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ManagerError("plan_preparer returned invalid JSON") from exc
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        log.close()
+
+
 def talk(
     message: str, *, parent_run_id: str,
     workspace: Path = DEFAULT_WORKSPACE,
@@ -1563,6 +1941,7 @@ def talk(
     planning_requested: bool = False,
     plan_intent: dict[str, Any] | None = None,
     plan_candidate_path: Path | None = None,
+    owner_content: str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Append one direct owner/lead turn without creating a new manager job."""
@@ -1624,6 +2003,29 @@ def talk(
         reported_routing = str(decision.get("routing", "NEEDS_INFO"))
         routing = reported_routing if planning_requested else "NEEDS_INFO"
         reply = str(decision["reply"]).strip()
+        research_manifests = conversation.get("research_manifests")
+        if not isinstance(research_manifests, list):
+            research_manifests = []
+        if not planning_requested and (job_dir / "research-input.json").is_file():
+            research_input = load_research_input(job_dir)
+            bridge_job_id = str(evidence.get("bridge_job_id") or "")
+            trace_root = Path(str(evidence.get("trace_root") or ""))
+            if not bridge_job_id or not trace_root:
+                raise ManagerError("Research response has no durable bridge trace")
+            manifest = build_research_evidence_manifest(
+                trace_path=trace_root / bridge_job_id / "trace.jsonl",
+                bridge_job_id=bridge_job_id,
+                report=reply,
+                research_input=research_input,
+                evidence=evidence,
+            )
+            research_dir = job_dir / "research"
+            manifest_path = research_dir / f"manifest-{len(research_manifests) + 1:04d}.json"
+            atomic_write_immutable_json(manifest_path, manifest)
+            research_manifests.append({
+                "path": str(manifest_path.relative_to(job_dir)),
+                "sha256": manifest["manifest_sha256"],
+            })
         if not planning_requested and reported_routing == "READY_FOR_PROCESSING":
             reply += (
                 "\n\nIzvedbeni načrt ni bil ustvarjen. Ko želiš zaključiti pogovor "
@@ -1640,7 +2042,6 @@ def talk(
         if routing == "READY_FOR_PROCESSING":
             assert plan_intent is not None
             source_trace = validate_plan_sources(decision, plan_intent)
-            ready_task = trusted_plan_task(plan_intent, source_trace)
             proposal = {
                 key: decision[key]
                 for key in (
@@ -1690,7 +2091,9 @@ def talk(
             )
             record_task_event(
                 job_dir, snapshot=snapshot, event_type="LEAD_PROPOSED_PLAN",
-                actor_type="lead", actor_id=lead_profile, **event_hashes,
+                actor_type="lead", actor_id=str(
+                    evidence.get("lead_profile") or "plan_preparer"
+                ), **event_hashes,
                 details={
                     "intent_sha256": plan_intent["intent_sha256"],
                     "candidate_sha256": candidate_record["candidate_sha256"],
@@ -1708,9 +2111,12 @@ def talk(
                 },
             )
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        owner_turn = {"role": "owner", "content": clean_message, "at": stamp}
+        owner_turn = {
+            "role": "owner", "content": (owner_content or clean_message).strip(),
+            "at": stamp,
+        }
         lead_turn = {"role": "lead", "content": reply, "at": stamp,
-             "lead_profile": lead_profile,
+             "lead_profile": str(evidence.get("lead_profile") or lead_profile),
              "routing": routing, "routed_run_id": routed_run_id,
              "bridge_job_id": evidence.get("bridge_job_id", "")}
         if planning_requested:
@@ -1731,6 +2137,10 @@ def talk(
             "active_run_id": routed_run_id or conversation.get("active_run_id", ""),
             "latest_plan_candidate": latest_plan_candidate,
             "rejected_run_ids": conversation.get("rejected_run_ids", []),
+            "research_input_sha256": conversation.get(
+                "research_input_sha256", "",
+            ),
+            "research_manifests": research_manifests,
             "updated_at": stamp,
         }
         atomic_write_json(conversation_file, conversation)
@@ -1783,7 +2193,7 @@ def replace_conversation_goal(
 
 def prepare_plan(
     parent_run_id: str, *, workspace: Path = DEFAULT_WORKSPACE,
-    responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
+    responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_plan_preparer,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Prepare and display one reviewable plan revision without dispatching it."""
@@ -1804,7 +2214,15 @@ def prepare_plan(
         )
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()
-    plan_intent = build_plan_intent(conversation, repository=repository)
+    if responder is run_plan_preparer and not (job_dir / "research-input.json").is_file():
+        raise ManagerError(
+            "Ta pogovor nima nespremenljivega /research vhoda. Začni novo "
+            "nalogo z /research."
+        )
+    plan_intent = build_plan_intent(
+        conversation, repository=repository,
+        job_dir=job_dir if (job_dir / "research-input.json").is_file() else None,
+    )
     planning_dir = job_dir / "planning"
     intent_hash = str(plan_intent["intent_sha256"])
     intent_path = planning_dir / f"intent-{intent_hash}.json"
@@ -1878,7 +2296,10 @@ def dispatch_plan(
             (workspace / "workspace.json").read_text(encoding="utf-8")
         )
         repository = Path(config["repository"]).resolve()
-        plan_intent = build_plan_intent(conversation, repository=repository)
+        plan_intent = build_plan_intent(
+            conversation, repository=repository,
+            job_dir=job_dir if (job_dir / "research-input.json").is_file() else None,
+        )
         pointer = conversation.get("latest_plan_candidate")
         if not isinstance(pointer, dict) or set(pointer) != {
             "intent_sha256", "candidate_sha256", "path",
@@ -1914,6 +2335,16 @@ def dispatch_plan(
         decision = candidate.get("decision")
         if not isinstance(decision, dict):
             raise ManagerError("Stored plan decision is invalid")
+        candidate_evidence = candidate.get("evidence")
+        if not isinstance(candidate_evidence, dict):
+            raise ManagerError("Stored plan evidence is invalid")
+        if (
+            (job_dir / "research-input.json").is_file()
+            and candidate_evidence.get("lead_profile") != "plan_preparer"
+        ):
+            raise ManagerError(
+                "Research plan candidate was not produced by plan_preparer"
+            )
         source_trace = validate_plan_sources(decision, plan_intent)
         proposal = {
             key: decision[key]
@@ -2069,12 +2500,24 @@ def start_conversation(
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    research_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one owner-visible conversation root, then ask only its chosen lead."""
     workspace = workspace.expanduser().resolve()
     clean_message = message.strip()
     if not clean_message:
         raise ManagerError("Conversation message must not be empty")
+    canonical_research_input = None
+    if research_input is not None:
+        canonical_research_input = parse_research_envelope(
+            "[OWNER_REQUEST]\n"
+            + str(research_input.get("owner_request") or "")
+            + "\n[/OWNER_REQUEST]\n\n[CODEX_RESEARCH_PROMPT]\n"
+            + str(research_input.get("codex_research_prompt") or "")
+            + "\n[/CODEX_RESEARCH_PROMPT]"
+        )
+        if research_input != canonical_research_input:
+            raise ManagerError("Research input is not canonical")
     # Validate the workspace before creating a durable root.
     workspace_config = json.loads(
         (workspace / "workspace.json").read_text(encoding="utf-8")
@@ -2101,6 +2544,10 @@ def start_conversation(
         "model_digest": snapshot["model_digest"],
         "profile_snapshot_hash": snapshot["profile_snapshot_hash"],
     })
+    if canonical_research_input is not None:
+        atomic_write_immutable_json(
+            job_dir / "research-input.json", canonical_research_input,
+        )
     write_profile_snapshot(job_dir, snapshot)
     write_system_prompt_snapshot(
         job_dir, project_root=PROJECT_ROOT, snapshot=snapshot,
@@ -2117,12 +2564,28 @@ def start_conversation(
         "schema_version": 1, "parent_run_id": run_id,
         "lead_profile": lead_profile, "model_tag": snapshot["model_tag"],
         "turns": [], "active_run_id": "",
+        "research_input_sha256": (
+            canonical_research_input["research_input_sha256"]
+            if canonical_research_input else ""
+        ),
+        "research_manifests": [],
         "updated_at": stamp,
     })
     try:
+        research_message = clean_message
+        owner_content = None
+        if canonical_research_input is not None:
+            research_message = (
+                "IZVIRNA ZAHTEVA LASTNIKA:\n"
+                + canonical_research_input["owner_request"]
+                + "\n\nRAZISKOVALNI PROMPT CODEXA:\n"
+                + canonical_research_input["codex_research_prompt"]
+            )
+            owner_content = canonical_research_input["owner_request"]
         return talk(
-            clean_message, parent_run_id=run_id, workspace=workspace,
+            research_message, parent_run_id=run_id, workspace=workspace,
             lead_profile=lead_profile, responder=responder,
+            owner_content=owner_content,
             progress_callback=progress_callback,
         )
     except BaseException as exc:
@@ -2140,6 +2603,22 @@ def start_conversation(
             "lead_profile": lead_profile, "exact_reason": str(exc),
         })
         raise
+
+
+def start_research(
+    envelope: str, *, workspace: Path = DEFAULT_WORKSPACE,
+    lead_profile: str = "conversation_lead", model_tag: str | None = None,
+    runtime_overrides: dict[str, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Start the only supported new-task path from an explicit envelope."""
+    research_input = parse_research_envelope(envelope)
+    return start_conversation(
+        research_input["owner_request"], workspace=workspace,
+        lead_profile=lead_profile, model_tag=model_tag,
+        runtime_overrides=runtime_overrides, research_input=research_input,
+        progress_callback=progress_callback,
+    )
 
 
 def new_run_id(workspace: Path) -> str:
@@ -2352,6 +2831,13 @@ def parse_args() -> argparse.Namespace:
         default="conversation_lead",
     )
     start_parser.add_argument("--model")
+    research_parser = sub.add_parser("research")
+    research_parser.add_argument("--envelope", required=True)
+    research_parser.add_argument(
+        "--profile", choices=tuple(enabled_role_profiles()),
+        default="conversation_lead",
+    )
+    research_parser.add_argument("--model", required=True)
     talk_parser = sub.add_parser("talk")
     talk_parser.add_argument("--message", required=True)
     talk_parser.add_argument("--parent", required=True)
@@ -2396,6 +2882,11 @@ def _main(args: argparse.Namespace) -> int:
             result = talk(
                 args.message, parent_run_id=args.parent,
                 workspace=args.workspace, lead_profile=args.profile,
+            )
+        elif args.command_name == "research":
+            result = start_research(
+                args.envelope, workspace=args.workspace,
+                lead_profile=args.profile, model_tag=args.model,
             )
         elif args.command_name == "prepare-plan":
             result = prepare_plan(args.run_id, workspace=args.workspace)

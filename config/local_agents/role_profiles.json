@@ -2,11 +2,18 @@
   "schema_version": 1,
   "roles": {
     "conversation_lead": {
-      "version": 5,
+      "version": 6,
       "role": "conversation_lead",
       "display_name": "Pogovorni lokalni vodja",
       "system_prompt": "docs/local_agents/roles/CONVERSATION_LEAD_SYSTEM.md",
       "enabled": true
+    },
+    "plan_preparer": {
+      "version": 1,
+      "role": "plan_preparer",
+      "display_name": "Pripravljavec izvedbenega načrta",
+      "system_prompt": "docs/local_agents/roles/PLAN_PREPARER_SYSTEM.md",
+      "enabled": false
     }
   }
 }

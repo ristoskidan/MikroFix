@@ -8,6 +8,11 @@ from tools import mikrofix_openwebui_gateway as gateway
 
 
 class OpenWebUIGatewayTests(unittest.TestCase):
+    RESEARCH = (
+        "/research\n[OWNER_REQUEST]\nPreveri napako\n[/OWNER_REQUEST]\n\n"
+        "[CODEX_RESEARCH_PROMPT]\nPreberi relevantno kodo in teste."
+        "\n[/CODEX_RESEARCH_PROMPT]"
+    )
     def test_extracts_latest_user_message_and_visible_run_marker(self):
         message, run_id, model_tag, runtime = gateway.extract_request([
             {"role": "user", "content": "Prva zahteva"},
@@ -29,14 +34,20 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         }
         with mock.patch.object(
             gateway, "start_conversation", return_value=conversation,
-        ) as start:
+        ) as start, mock.patch.object(
+            gateway, "installed_ollama_models", return_value=["deepseek-r1:14b"],
+        ):
             result = gateway.route_message(
-                "Preveri napako", "", "conversation_lead", "deepseek-r1:14b",
+                self.RESEARCH, "", "conversation_lead", "deepseek-r1:14b",
             )
         self.assertIn("Ugotovitev", result)
         self.assertIn("MF-LOCAL-2", result)
         self.assertEqual("conversation_lead", start.call_args.kwargs["lead_profile"])
         self.assertEqual("deepseek-r1:14b", start.call_args.kwargs["model_tag"])
+        self.assertEqual(
+            "Preveri napako",
+            start.call_args.kwargs["research_input"]["owner_request"],
+        )
 
     def test_new_conversation_passes_selected_runtime_to_manager(self):
         conversation = {
@@ -45,9 +56,12 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         }
         with mock.patch.object(
             gateway, "start_conversation", return_value=conversation,
-        ) as start:
+        ) as start, mock.patch.object(
+            gateway, "installed_ollama_models",
+            return_value=["qwen3:4b-thinking-2507-q8_0"],
+        ):
             gateway.route_message(
-                "Preveri napako", "", "conversation_lead",
+                self.RESEARCH, "", "conversation_lead",
                 "qwen3:4b-thinking-2507-q8_0",
                 selected_runtime={"num_ctx": 49152, "num_predict": 12288},
             )
@@ -212,10 +226,27 @@ class OpenWebUIGatewayTests(unittest.TestCase):
                 )
 
     def test_new_task_requires_explicit_model_choice(self):
-        with self.assertRaisesRegex(ValueError, "Najprej izberi"):
+        with self.assertRaisesRegex(ValueError, "Pred /research izberi"):
             gateway.route_message(
-                "Preveri napako", "", "conversation_lead", "",
+                self.RESEARCH, "", "conversation_lead", "",
             )
+
+    def test_plain_new_message_cannot_create_task(self):
+        with mock.patch.object(gateway, "start_conversation") as start:
+            with self.assertRaisesRegex(ValueError, "samo z izrecnim /research"):
+                gateway.route_message(
+                    "Add Details", "", "conversation_lead", "gpt-oss:20b",
+                )
+        start.assert_not_called()
+
+    def test_malformed_research_envelope_fails_before_task_creation(self):
+        with mock.patch.object(gateway, "start_conversation") as start:
+            with self.assertRaisesRegex(Exception, "zahteva natanko razdelka"):
+                gateway.route_message(
+                    "/research samo besedilo", "", "conversation_lead",
+                    "gpt-oss:20b",
+                )
+        start.assert_not_called()
 
     def test_stream_finishes_cleanly_when_manager_operation_fails(self):
         def fail() -> str:

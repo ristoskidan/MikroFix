@@ -21,8 +21,11 @@ Ob neskladju velja:
 ## 2. Vloge so ločene od modelov
 
 - **Lastnik** poda cilj, dopolnitve in poslovne odločitve ter odobri izvedbo.
-- **`conversation_lead`** vodi naravni pogovor, z bralnimi orodji preverja
-  trenutno kodo in ob `/prepare-plan` prikaže revizijo načrta v istem pogovoru.
+- **`conversation_lead`** se zažene samo z `/research`, z bralnimi orodji
+  preverja trenutno kodo in nespremenljivo shrani poročilo ter dokazni manifest.
+- **`plan_preparer`** je ločena seja brez skritega spomina raziskovalca. Ob
+  `/prepare-plan` iz shranjene zahteve, Codexovega prompta, poročila in manifesta
+  pripravi prikazno revizijo načrta.
 - **`plan_validator`** po `/plan-dispatch` neodvisno preveri prikazano revizijo
   in pripravi omejen kandidat načrta ali natančen `BLOCKED`.
 - **Deterministični manager** preveri izvor zahtev, poti, shemo, Git checkpoint
@@ -41,9 +44,11 @@ imena vloge ali prompta. Zamenjava modela ne preimenuje vloge ali dokumentov.
 ## 3. Uradni tok
 
 ```text
-lastnik
-  -> conversation_lead
+lastnik -> Codexov omejeni raziskovalni prompt
+  -> /research -> conversation_lead (read-only)
+  -> nespremenljivo poročilo in dokazni manifest
   -> /prepare-plan
+  -> plan_preparer (ločena seja)
   -> pogovor in popravki prikazane revizije
   -> /prepare-plan (nova dokončna revizija)
   -> /plan-dispatch
@@ -56,6 +61,8 @@ lastnik
   -> local_reviewer
   -> READY_FOR_CODEX_REVIEW ali BLOCKED
   -> Codex APPROVE / REVISE / REJECT
+  -> Codex prenese isti preverjeni kandidat in ustvari commit
+  -> /codex-approved <SHA> preveri poti in končne blob hashe
   -> APPLIED samo po potrjenem prenosu
 ```
 
@@ -65,8 +72,10 @@ fail-closed zahteva nov `/prepare-plan`.
 
 ## 4. Kontekst po vlogah
 
-- Pogovorni vodja dobi kratek prompt, zgodovino trenutnega pogovora in bralna
-  orodja. Poslovne ali kodne podatke pridobi ciljno.
+- Pogovorni raziskovalec dobi kratek prompt, zgodovino trenutnega pogovora in
+  bralna orodja. Poslovne ali kodne podatke pridobi ciljno.
+- Pripravljavec načrta dobi samo eksplicitno shranjene in hashirane artefakte.
+  Ne podeduje spomina ali seje raziskovalca in nima projektnih orodij.
 - Validator dobi zamrznjeni PlanIntent, prikazano revizijo, osnovni poslovni
   kanon in konkretne poti trenutne naloge.
 - Izvajalec dobi samo atom, dovoljene datoteke, sprejemna merila, relevantne

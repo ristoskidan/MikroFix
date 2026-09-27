@@ -162,6 +162,20 @@ class BridgeCompletionTests(unittest.TestCase):
         self.assertEqual(schema, calls[0]["format"])
         self.assertNotIn("tools", calls[0])
 
+    def test_toolless_role_omits_tools_before_structured_finalization(self):
+        calls = []
+
+        def fake_request(_url, **kwargs):
+            calls.append(kwargs["data"])
+            return {"message": {"content": "plan"}}
+
+        with (
+            mock.patch.object(self.bridge, "TOOLS", []),
+            mock.patch.object(self.bridge, "request_json", side_effect=fake_request),
+        ):
+            self.bridge.call_qwen([{"role": "user", "content": "prepare"}])
+        self.assertNotIn("tools", calls[0])
+
     def test_final_reply_mode_is_compact_toolless_and_low_thinking(self):
         calls = []
         messages = [

@@ -43,6 +43,7 @@ REQUIRED_ARGUMENT = frozenset({
     "/codex-rejected",
     "/codex-approved",
     "/replace-goal",
+    "/research",
 })
 OPTIONAL_ARGUMENT = frozenset({"/codex-opinion", "/reject-plan"})
 COMMAND_NAMES = NO_ARGUMENT | REQUIRED_ARGUMENT | OPTIONAL_ARGUMENT
@@ -68,6 +69,7 @@ def parse_owner_command(message: str) -> OwnerCommand | None:
             "/codex-rejected": "razlog zavrnitve",
             "/codex-approved": "commit SHA",
             "/replace-goal": "nov potrjeni cilj",
+            "/research": "ločena razdelka [OWNER_REQUEST] in [CODEX_RESEARCH_PROMPT]",
         }[name]
         raise OwnerCommandError(f"Po ukazu {name} napiši {description}.")
     return OwnerCommand(name=name, argument=argument)
@@ -76,6 +78,7 @@ def parse_owner_command(message: str) -> OwnerCommand | None:
 def help_text() -> str:
     return "\n".join((
         "Razpoložljivi ukazi:",
+        "/research <ovojnica> — začne novo, izrecno read-only raziskavo",
         "/prepare-plan — pripravi izvedbeni načrt iz pogovora",
         "/plan-dispatch — pošlje naprej zadnjo prikazano revizijo načrta",
         "/replace-goal <nov cilj> — izrecno zamenja glavni cilj pogovora",
@@ -83,7 +86,7 @@ def help_text() -> str:
         "/reject-plan [razlog] — zavrne kandidata in vrne isti pogovor v dopolnitev",
         "/prepare-review — pripravi nespremenljiv paket za Codex",
         "/codex-rejected <razlog> — zabeleži zavrnitev",
-        "/codex-approved <commit SHA> — zabeleži odobritev in uporabo commita",
+        "/codex-approved <commit SHA> — preveri poti/blobe in zabeleži že uporabljeni commit",
         "/codex-opinion [vprašanje] — pripravi vprašanje za Codex brez sprememb",
         "/status — pokaže stanje in trenutno dovoljene ukaze",
         "/help — pokaže ta seznam",

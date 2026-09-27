@@ -145,14 +145,17 @@ testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
 
 ## Lokalna agentska veriga
 
-Aktivna veriga ločuje vlogo od izbranega modela. `conversation_lead` je
-naravni pogovorni in raziskovalni vodja z bralnimi orodji. `/prepare-plan`
-prikaže načrt v istem pogovoru in ga je mogoče popraviti; šele
+Aktivna veriga ločuje vlogo od izbranega modela. `/research` zažene
+`conversation_lead` kot read-only raziskovalca in zamrzne njegovo poročilo ter
+dokazni manifest. `/prepare-plan` zažene ločeno sejo `plan_preparer`, ki nima
+skritega spomina raziskovalca in načrt izdela samo iz shranjenih artefaktov.
+Načrt se prikaže v istem uporabniškem pogovoru in ga je mogoče popraviti; šele
 `/plan-dispatch` ga pošlje v `plan_validator`, lastnikov `/approve-plan` pa
 dovoli izvedbo. Nato `executor` dela v omejenem izoliranem worktreeju,
 deterministični gate preveri dovoljene poti in teste, `local_reviewer` pa
 neodvisno pregleda dejanski diff. Rezultat se vrne lastniku in ostane kandidat,
-dokler ga Codex ne pregleda in odobri.
+dokler ga Codex ne pregleda, isti preverjeni kandidat prenese v zaščiteni
+repozitorij in `/codex-approved` ne potrdi enakih poti ter končnih blob hashov.
 
 Vloge niso vezane na Qwen, GPT-OSS ali drug model. Izvajalna pravica pripada
 omejeni vlogi `executor`, ne modelu kot takemu. Modeli ne določajo poslovnih

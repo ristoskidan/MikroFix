@@ -607,12 +607,13 @@ class LocalWebHandler(BaseHTTPRequestHandler):
                     raise ValueError("Izberi nameščen lokalni model")
                 parsed_command = parse_owner_command(message)
                 if self.path == "/api/start":
-                    if parsed_command is not None:
+                    if parsed_command is None or parsed_command.name != "/research":
                         raise ValueError(
-                            "Pred uporabo ukaza izberi obstoječi pogovor."
+                            "Nova naloga se začne samo z veljavnim /research."
                         )
                     arguments = [
-                        "start", "--message", message.strip(), "--profile", profile,
+                        "research", "--envelope", parsed_command.argument,
+                        "--profile", profile,
                         "--model", model,
                     ]
                 else:

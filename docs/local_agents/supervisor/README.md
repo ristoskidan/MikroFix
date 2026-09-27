@@ -162,23 +162,27 @@ signature. Only `num_ctx`, `num_predict`, `temperature`, `top_k`, `top_p`,
 contract controls such as GPU layers, threads, batching, stop sequences and
 output format remain manager-owned.
 
-Ordinary messages create or continue a conversation locked to the selected
-role and previously chosen model. The role determines the prompt and contract;
+Only an explicit `/research` envelope creates a new local task. It contains
+separate owner-request and Codex-research-prompt sections. Ordinary messages
+may continue an existing conversation locked to the selected role and model,
+but cannot create an unrelated task. The role determines the prompt and contract;
 the model runtime registry determines technical defaults and safe per-model
 caps. The first ordinary message expands the signed selection into the
 immutable profile snapshot. Effective generation options participate in the
 snapshot hash and are copied into every bridge turn; later chat controls cannot
 silently change them.
-The assistant
-response contains the immutable `MF-LOCAL-...` id, which the gateway reads from
+The assistant response contains the immutable `MF-LOCAL-...` id, which the gateway reads from
 subsequent chat history. A silent role or model change in the same conversation
 fails closed. Owner slash commands are parsed by trusted Python code before
-routing. `/prepare-plan` asks the selected conversation model for a structured
-proposal, stores an immutable revision and renders that exact revision in the
-same conversation. It does not invoke the validator. The owner may discuss
-changes and repeat `/prepare-plan`; `/plan-dispatch` alone sends the latest
-displayed revision to the fixed validator and deterministic manager. Roles
-after `/approve-plan` remain preconfigured in the supervisor flow.
+routing. The research session exposes only the `reply` contract and read-only
+tools. Its final report and tool evidence are stored as immutable hashed
+manifests. `/prepare-plan` starts a separate tool-less `plan_preparer` session
+from the stored owner request, Codex prompt, report and evidence manifests. It
+stores and renders the exact plan revision but does not invoke the validator.
+The owner may discuss changes and repeat `/prepare-plan`; `/plan-dispatch`
+alone sends the latest displayed revision to the fixed validator and
+deterministic manager. Roles after `/approve-plan` remain preconfigured in the
+supervisor flow.
 
 Autonomous downstream roles currently use separately bounded defaults on the
 local 12 GiB GPU. The plan validator uses `num_ctx=32768`, `num_predict=4096` and
@@ -191,11 +195,12 @@ copied into each new run's immutable bridge configuration, so changing the
 template never mutates an already dispatched run.
 
 At `/prepare-plan`, the manager freezes an immutable, hashed `PlanIntent` with
-stable turn ids, the root owner request and the Git checkpoint. The selected
-lead must cite owner turn ids for the objective and later decisions, while
+stable turn ids, the root owner request, research-manifest hashes and Git
+checkpoint. The separate `plan_preparer` must cite owner turn ids for the
+objective and later decisions, while
 explanatory questions are marked discussion-only. The manager derives the
 validator task from those cited owner turns instead of trusting model-authored
-`ready_task` prose. Empty plan sections, missing root provenance and source
+prose. Empty plan sections, missing root provenance and source
 overlap fail closed after deterministic normalization: the owner root is always
 restored, lead turns cannot authorize execution, and otherwise unclassified
 owner turns default to discussion-only. A

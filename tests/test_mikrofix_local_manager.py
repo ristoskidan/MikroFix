@@ -77,6 +77,122 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn("docs/kanon/03_SPREJEMNI_TESTI.md", selected)
         self.assertNotIn("docs/kanon/05_ZGODOVINA_ODLOCITEV.md", selected)
 
+    def test_research_envelope_is_strict_and_hashes_both_inputs(self):
+        envelope = (
+            "[OWNER_REQUEST]\nNapaka v računu\n[/OWNER_REQUEST]\n\n"
+            "[CODEX_RESEARCH_PROMPT]\nPreberi samo parser."
+            "\n[/CODEX_RESEARCH_PROMPT]"
+        )
+        parsed = manager.parse_research_envelope(envelope)
+        self.assertEqual("Napaka v računu", parsed["owner_request"])
+        self.assertEqual("Preberi samo parser.", parsed["codex_research_prompt"])
+        self.assertEqual(64, len(parsed["research_input_sha256"]))
+        with self.assertRaisesRegex(manager.ManagerError, "natanko razdelka"):
+            manager.parse_research_envelope("samo prompt")
+
+    def test_research_manifest_requires_content_evidence_not_status(self):
+        research_input = manager.parse_research_envelope(
+            "[OWNER_REQUEST]\nNapaka\n[/OWNER_REQUEST]\n\n"
+            "[CODEX_RESEARCH_PROMPT]\nPreveri kodo\n[/CODEX_RESEARCH_PROMPT]"
+        )
+        trace = self.root / "trace.jsonl"
+        trace.write_text(
+            json.dumps({"type": "tool_call", "step": 1,
+                        "tool": "project_status", "arguments": {}}) + "\n" +
+            json.dumps({"type": "tool_result", "step": 1,
+                        "tool": "project_status", "ok": True,
+                        "result": {"clean": True}}) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(manager.ManagerError, "project_status alone"):
+            manager.build_research_evidence_manifest(
+                trace_path=trace, bridge_job_id="MF-BRIDGE", report="Poročilo",
+                research_input=research_input, evidence={},
+            )
+        with trace.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "type": "tool_call", "step": 2, "tool": "project_read",
+                "arguments": {"path": "app.py", "start_line": 1, "end_line": 5},
+            }) + "\n")
+            handle.write(json.dumps({
+                "type": "tool_result", "step": 2, "tool": "project_read",
+                "ok": True, "result": {"content": "baseline"},
+            }) + "\n")
+        manifest = manager.build_research_evidence_manifest(
+            trace_path=trace, bridge_job_id="MF-BRIDGE", report="Poročilo",
+            research_input=research_input,
+            evidence={"model": "test", "model_digest": "a" * 64},
+        )
+        self.assertEqual("app.py", manifest["successful_evidence_calls"][-1]["relative_paths"][0])
+        self.assertEqual(64, len(manifest["manifest_sha256"]))
+
+    def test_plan_preparer_has_separate_role_and_no_research_memory(self):
+        research = self.profile_snapshot("conversation_lead")
+        planner = manager.plan_preparer_snapshot(research)
+        self.assertEqual("plan_preparer", planner["profile_id"])
+        self.assertEqual(research["model"], planner["model"])
+        self.assertNotEqual(
+            research["profile_snapshot_hash"], planner["profile_snapshot_hash"],
+        )
+        source = inspect.getsource(manager.run_plan_preparer)
+        self.assertNotIn("ensure_conversation_session", source)
+        self.assertNotIn("project_memory", source)
+        self.assertIn('"allowed_tools": []', source)
+
+    def test_research_start_persists_input_and_evidence_manifest(self):
+        research_input = manager.parse_research_envelope(
+            "[OWNER_REQUEST]\nNapaka\n[/OWNER_REQUEST]\n\n"
+            "[CODEX_RESEARCH_PROMPT]\nPreberi app.py\n"
+            "[/CODEX_RESEARCH_PROMPT]"
+        )
+
+        def responder(_message, *, job_dir, **_kwargs):
+            trace_root = job_dir / "fake-bridge"
+            trace_dir = trace_root / "BRIDGE-1"
+            trace_dir.mkdir(parents=True)
+            (trace_dir / "trace.jsonl").write_text(
+                json.dumps({
+                    "type": "tool_call", "step": 1,
+                    "tool": "project_read", "arguments": {"path": "app.py"},
+                }) + "\n" + json.dumps({
+                    "type": "tool_result", "step": 1,
+                    "tool": "project_read", "ok": True,
+                    "result": {"content": "baseline"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            return {"reply": "Dokazano poročilo"}, {
+                "bridge_job_id": "BRIDGE-1", "trace_root": str(trace_root),
+                "lead_profile": "conversation_lead", "model": "gpt-oss:20b",
+                "model_digest": "a" * 64,
+                "profile_snapshot_hash": "b" * 64, "prompt_hash": "c" * 64,
+            }
+
+        conversation = manager.start_conversation(
+            research_input["owner_request"], workspace=self.workspace,
+            lead_profile="conversation_lead", model_tag="gpt-oss:20b",
+            responder=responder, snapshot_factory=self.profile_snapshot,
+            research_input=research_input,
+        )
+        job_dir = self.workspace / "jobs" / conversation["parent_run_id"]
+        self.assertEqual(
+            research_input,
+            json.loads((job_dir / "research-input.json").read_text()),
+        )
+        manifests = manager.load_research_manifests(job_dir, conversation)
+        self.assertEqual("Dokazano poročilo", manifests[0]["report"])
+        self.assertEqual(
+            "app.py",
+            manifests[0]["successful_evidence_calls"][0]["relative_paths"][0],
+        )
+        manifest_path = job_dir / conversation["research_manifests"][0]["path"]
+        tampered = json.loads(manifest_path.read_text())
+        tampered["report"] = "spremenjeno"
+        manifest_path.chmod(0o600)
+        manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with self.assertRaisesRegex(manager.ManagerError, "hash mismatch"):
+            manager.load_research_manifests(job_dir, conversation)
+
     def profile_snapshot(self, profile_id, *, model_tag=None):
         return manager.snapshot_for_new_task(
             profile_id, model_tag=model_tag or "gpt-oss:20b",
@@ -491,7 +607,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=resolver,
         )
         self.assertEqual(first["profile_id"], second["profile_id"])
-        self.assertEqual(5, first["profile_version"])
+        self.assertEqual(6, first["profile_version"])
         self.assertEqual(first["role"], second["role"])
         self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
         self.assertNotEqual(first["model_tag"], second["model_tag"])

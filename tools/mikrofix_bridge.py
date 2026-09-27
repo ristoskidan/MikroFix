@@ -414,11 +414,14 @@ if _configured_allowed_tools is None:
 else:
     if (
         not isinstance(_configured_allowed_tools, list)
-        or not _configured_allowed_tools
         or any(not isinstance(name, str) for name in _configured_allowed_tools)
         or len(set(_configured_allowed_tools)) != len(_configured_allowed_tools)
     ):
-        raise RuntimeError("allowed_tools must be a non-empty unique string list")
+        raise RuntimeError("allowed_tools must be a unique string list")
+    if not _configured_allowed_tools and REQUIRE_TOOL_USE:
+        raise RuntimeError(
+            "allowed_tools may be empty only when require_tool_use is false"
+        )
     known_tool_names = {
         tool["function"]["name"] for tool in TOOLS
     }
@@ -1018,7 +1021,7 @@ def call_qwen(
             payload["think"] = THINK
         if structured and RESPONSE_FORMAT is not None:
             payload["format"] = RESPONSE_FORMAT
-        else:
+        elif TOOLS:
             payload["tools"] = TOOLS
     response = request_json(
         OLLAMA,

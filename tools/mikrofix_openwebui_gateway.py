@@ -24,7 +24,8 @@ try:
     from tools.mikrofix_local_manager import (
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
         model_runtime_settings, normalize_runtime_selection,
-        prepare_plan, resolve_runtime_selection, start_conversation, talk,
+        parse_research_envelope, prepare_plan, resolve_runtime_selection,
+        start_conversation, talk,
     )
     from tools.mikrofix_local_manager_ui import DEFAULT_WORKSPACE
     from tools.mikrofix_local_web import dispatch_owner_command
@@ -35,7 +36,8 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from mikrofix_local_manager import (  # type: ignore
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
         model_runtime_settings, normalize_runtime_selection,
-        prepare_plan, resolve_runtime_selection, start_conversation, talk,
+        parse_research_envelope, prepare_plan, resolve_runtime_selection,
+        start_conversation, talk,
     )
     from mikrofix_local_manager_ui import DEFAULT_WORKSPACE  # type: ignore
     from mikrofix_local_web import dispatch_owner_command  # type: ignore
@@ -359,6 +361,30 @@ def route_message(
         return model_response
     command = parse_owner_command(message)
     if command is not None:
+        if command.name == "/research":
+            if run_id:
+                raise ValueError(
+                    "/research začne novo nalogo. V obstoječem MikroFIX "
+                    "pogovoru napiši navadno dopolnilo."
+                )
+            if not selected_model:
+                raise ValueError("Pred /research izberi model z /llm <tag>.")
+            if selected_model not in installed_ollama_models():
+                raise ValueError(f"Izbrani model ni več nameščen: {selected_model}")
+            research_input = parse_research_envelope(command.argument)
+            conversation = start_conversation(
+                research_input["owner_request"], workspace=WORKSPACE,
+                lead_profile=role_id, model_tag=selected_model,
+                runtime_overrides=selected_runtime,
+                research_input=research_input,
+                progress_callback=progress_callback,
+            )
+            reply, actual_run_id = _latest_reply(conversation)
+            return (
+                f"{reply}\n\nMikroFIX pogovor: {actual_run_id}"
+                f"\nVloga: {role_id}\nModel: {selected_model}"
+                f"\nMikroFIX izbrani model: {selected_model}"
+            )
         if command.name != "/help" and not run_id:
             raise ValueError(
                 f"Ukaz {command.name} potrebuje obstoječi MikroFIX pogovor."
@@ -398,18 +424,10 @@ def route_message(
             lead_profile=role_id, progress_callback=progress_callback,
         )
     else:
-        model_tag = selected_model
-        if not model_tag:
-            raise ValueError(
-                "Najprej izberi lokalni model z /llm <tag>. "
-                "Seznam dobiš z /llms."
-            )
-        if model_tag not in installed_ollama_models():
-            raise ValueError(f"Izbrani model ni več nameščen: {model_tag}")
-        conversation = start_conversation(
-            message, workspace=WORKSPACE, lead_profile=role_id,
-            model_tag=model_tag, runtime_overrides=selected_runtime,
-            progress_callback=progress_callback,
+        raise ValueError(
+            "Nova MikroFIX naloga se začne samo z izrecnim /research in "
+            "razdelkoma [OWNER_REQUEST] ter [CODEX_RESEARCH_PROMPT]. "
+            "Navadna dopolnila so dovoljena po nastanku MikroFIX pogovora."
         )
     reply, actual_run_id = _latest_reply(conversation)
     return (
