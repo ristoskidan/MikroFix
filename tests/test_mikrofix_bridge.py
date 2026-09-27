@@ -617,6 +617,54 @@ class BridgeCompletionTests(unittest.TestCase):
             json.loads(persisted["result"]),
         )
 
+    def test_malformed_ollama_tool_call_gets_one_guided_retry(self):
+        job = self.bridge.create_job("Recover one malformed tool call")
+        responses = iter([
+            self.bridge.BridgeTransportError(
+                "OLLAMA_RESPONSE_ERROR",
+                "error parsing tool call: invalid character",
+            ),
+            {"message": {"tool_calls": [{
+                "function": {"name": "project_status", "arguments": {}},
+            }]}},
+            {"message": {"content": "Preverjen odgovor."}},
+        ])
+        seen_messages = []
+
+        def answer(messages, **_kwargs):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            response = next(responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with (
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(1, persisted["malformed_tool_responses"])
+        guidance = seen_messages[1][-1]["content"]
+        self.assertIn("ni bil veljaven JSON", guidance)
+        self.assertIn("available_tools", guidance)
+
+    def test_repeated_malformed_ollama_tool_calls_fail_closed(self):
+        job = self.bridge.create_job("Reject repeated malformed calls")
+
+        def malformed(_messages, **_kwargs):
+            raise self.bridge.BridgeTransportError(
+                "OLLAMA_RESPONSE_ERROR", "error parsing tool call: invalid JSON",
+            )
+
+        with mock.patch.object(self.bridge, "call_qwen", side_effect=malformed):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual("MALFORMED_TOOL_CALL_RESPONSE", persisted["error_code"])
+        self.assertEqual(2, persisted["malformed_tool_responses"])
+
     def test_failed_tool_call_does_not_satisfy_required_project_inspection(self):
         job = self.bridge.create_job("Verify with a successful tool")
         responses = iter([

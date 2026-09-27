@@ -1155,6 +1155,7 @@ def process_job(job_id):
     tool_result_cache = {}
     suspicious_empty_searches = 0
     suspicious_search_blocks = 0
+    malformed_tool_response_count = 0
     job.setdefault("tool_feedback_events", 0)
     job.setdefault("duplicate_tool_calls", 0)
     job.setdefault("blocked_tool_calls", 0)
@@ -1177,19 +1178,63 @@ def process_job(job_id):
                 if final_reply_requested
                 else messages
             )
-            response = call_qwen(
-                request_messages,
-                structured=finalization_requested,
-                final_reply=final_reply_requested,
-                progress_callback=lambda progress, current_step=step: write_trace(
-                    job_id, {
-                        "type": "model_progress",
+            try:
+                response = call_qwen(
+                    request_messages,
+                    structured=finalization_requested,
+                    final_reply=final_reply_requested,
+                    progress_callback=lambda progress, current_step=step: write_trace(
+                        job_id, {
+                            "type": "model_progress",
+                            "role": AGENT_ROLE,
+                            "step": current_step,
+                            **progress,
+                        },
+                    ),
+                )
+            except BridgeTransportError as exc:
+                if (
+                    exc.error_code == "OLLAMA_RESPONSE_ERROR"
+                    and "error parsing tool call" in str(exc).lower()
+                    and not final_reply_requested
+                ):
+                    malformed_tool_response_count += 1
+                    job["malformed_tool_responses"] = malformed_tool_response_count
+                    save_job(job)
+                    write_trace(job_id, {
+                        "type": "model_format_error",
                         "role": AGENT_ROLE,
-                        "step": current_step,
-                        **progress,
-                    },
-                ),
-            )
+                        "step": step,
+                        "error_code": "MALFORMED_TOOL_CALL_RESPONSE",
+                        "content": str(exc),
+                        "attempt": malformed_tool_response_count,
+                    })
+                    if malformed_tool_response_count >= 2:
+                        raise BridgeTransportError(
+                            "MALFORMED_TOOL_CALL_RESPONSE",
+                            "Model je v isti nalogi dvakrat vrnil neveljaven "
+                            "strukturirani tool_call.",
+                        ) from exc
+                    write_log(
+                        job_id,
+                        "Model je vrnil neveljaven tool_call JSON; pošiljam "
+                        "shemo in dovoljujem en popravljalni poskus.",
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Prejšnji strukturirani klic orodja ni bil veljaven JSON. "
+                            "Ne zapisuj tool_call kot navadno besedilo in ne dodajaj "
+                            "odvečnih narekovajev. Vrni en veljaven strukturirani "
+                            "tool_calls odgovor po tej dovoljeni shemi:\n"
+                            + json.dumps(
+                                available_tool_guidance(),
+                                ensure_ascii=False, separators=(",", ":"),
+                            )
+                        ),
+                    })
+                    continue
+                raise
 
             message = response.get("message", {})
             tool_calls = message.get("tool_calls") or []
