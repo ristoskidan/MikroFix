@@ -581,6 +581,56 @@ class BridgeCompletionTests(unittest.TestCase):
                 self.bridge.call_qwen([{"role": "user", "content": "inspect"}])
         self.assertEqual("MODEL_OUTPUT_TRUNCATED", raised.exception.error_code)
 
+    def test_truncated_research_response_gets_one_compact_retry(self):
+        job = self.bridge.create_job("Recover one truncated research response")
+        responses = iter([
+            {"message": {"tool_calls": [{
+                "function": {
+                    "name": "project_read",
+                    "arguments": {"path": "AGENTS.md"},
+                },
+            }]}},
+            self.bridge.BridgeTransportError(
+                "MODEL_OUTPUT_TRUNCATED", "output limit",
+            ),
+            {"message": {"content": "Dokazljiv končni odgovor."}},
+        ])
+        seen_messages = []
+
+        def answer(messages, **_kwargs):
+            seen_messages.append(json.loads(json.dumps(messages)))
+            response = next(responses)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        with (
+            mock.patch.object(self.bridge, "call_qwen", side_effect=answer),
+            mock.patch.object(self.bridge, "execute_tool", return_value={"ok": True}),
+        ):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("completed", persisted["status"])
+        self.assertEqual(1, persisted["truncated_model_responses"])
+        self.assertIn("Kontekst je zdaj varno skrčen", seen_messages[2][-1]["content"])
+
+    def test_repeated_truncated_research_responses_fail_closed(self):
+        job = self.bridge.create_job("Reject repeated truncated responses")
+
+        def truncated(_messages, **_kwargs):
+            raise self.bridge.BridgeTransportError(
+                "MODEL_OUTPUT_TRUNCATED", "output limit",
+            )
+
+        with mock.patch.object(self.bridge, "call_qwen", side_effect=truncated):
+            self.bridge.process_job(job["id"])
+        persisted = self.bridge.load_job(job["id"])
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual(
+            "MODEL_OUTPUT_TRUNCATED_REPEATED", persisted["error_code"],
+        )
+        self.assertEqual(2, persisted["truncated_model_responses"])
+
     def test_research_step_limit_forces_toolless_evidence_finalizer(self):
         job = self.bridge.create_job("Inspect broadly, then answer")
         responses = iter([

@@ -877,6 +877,59 @@ def final_reply_messages(messages):
     return final_messages
 
 
+def compact_research_messages(messages, *, budget=72000):
+    """Keep the task and newest tool evidence while restoring output headroom."""
+    if not messages:
+        return []
+    compact = [{
+        key: value for key, value in messages[0].items() if key != "thinking"
+    }]
+    remaining = [
+        {key: value for key, value in message.items() if key != "thinking"}
+        for message in messages[1:]
+    ]
+    if remaining:
+        task = remaining.pop(0)
+        if isinstance(task.get("content"), str) and len(task["content"]) > 18000:
+            task["content"] = task["content"][:18000] + "\n[skrajšano]"
+        compact.append(task)
+
+    groups = []
+    index = 0
+    while index < len(remaining):
+        group = [remaining[index]]
+        index += 1
+        if group[0].get("role") == "assistant":
+            while index < len(remaining) and remaining[index].get("role") == "tool":
+                group.append(remaining[index])
+                index += 1
+        groups.append(group)
+
+    normalized_groups = []
+    for group in groups:
+        normalized = []
+        for message in group:
+            cleaned = dict(message)
+            content = cleaned.get("content")
+            limit = 6000 if cleaned.get("role") == "tool" else 2500
+            if isinstance(content, str) and len(content) > limit:
+                cleaned["content"] = content[:limit] + "\n[skrajšano]"
+            normalized.append(cleaned)
+        normalized_groups.append(normalized)
+
+    used = len(json.dumps(compact, ensure_ascii=False, default=str))
+    selected = []
+    for group in reversed(normalized_groups):
+        size = len(json.dumps(group, ensure_ascii=False, default=str))
+        if used + size > budget:
+            continue
+        selected.append(group)
+        used += size
+    for group in reversed(selected):
+        compact.extend(group)
+    return compact
+
+
 def call_qwen(
     messages, *, structured=False, final_reply=False, progress_callback=None,
 ):
@@ -1156,6 +1209,7 @@ def process_job(job_id):
     suspicious_empty_searches = 0
     suspicious_search_blocks = 0
     malformed_tool_response_count = 0
+    truncated_model_response_count = 0
     job.setdefault("tool_feedback_events", 0)
     job.setdefault("duplicate_tool_calls", 0)
     job.setdefault("blocked_tool_calls", 0)
@@ -1193,6 +1247,45 @@ def process_job(job_id):
                     ),
                 )
             except BridgeTransportError as exc:
+                if (
+                    exc.error_code == "MODEL_OUTPUT_TRUNCATED"
+                    and not final_reply_requested
+                ):
+                    truncated_model_response_count += 1
+                    job["truncated_model_responses"] = truncated_model_response_count
+                    save_job(job)
+                    write_trace(job_id, {
+                        "type": "model_format_error",
+                        "role": AGENT_ROLE,
+                        "step": step,
+                        "error_code": "MODEL_OUTPUT_TRUNCATED",
+                        "content": str(exc),
+                        "attempt": truncated_model_response_count,
+                    })
+                    if truncated_model_response_count >= 2:
+                        raise BridgeTransportError(
+                            "MODEL_OUTPUT_TRUNCATED_REPEATED",
+                            "Model je v isti nalogi dvakrat dosegel izhodno "
+                            "omejitev brez uporabnega odgovora ali klica orodja.",
+                        ) from exc
+                    messages = compact_research_messages(messages)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Prejšnji odgovor je dosegel izhodno mejo, preden je "
+                            "vrnil uporaben rezultat. Kontekst je zdaj varno skrčen. "
+                            "Ne ponavljaj dolgega premisleka. Nadaljuj z enim kratkim "
+                            "veljavnim strukturiranim klicem naslednjega potrebnega "
+                            "bralnega orodja; če so dokazi že zadostni, vrni neposreden "
+                            "neprazen odgovor lastniku."
+                        ),
+                    })
+                    write_log(
+                        job_id,
+                        "Modelov odgovor je dosegel izhodno mejo; kontekst je "
+                        "skrčen in dovoljen je en popravljalni poskus.",
+                    )
+                    continue
                 if (
                     exc.error_code == "OLLAMA_RESPONSE_ERROR"
                     and "error parsing tool call" in str(exc).lower()
