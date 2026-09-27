@@ -113,6 +113,15 @@ def _candidate_checkpoint(action: Path) -> tuple[Path, dict[str, Any], dict[str,
         raise ReviewError("Candidate patch hash differs from checkpoint manifest")
     if manifest.get("run_id") != action.name:
         raise ReviewError("Checkpoint manifest belongs to another run")
+    candidate_files = manifest.get("candidate_files")
+    if not isinstance(candidate_files, list) or not candidate_files:
+        raise ReviewError("Checkpoint manifest has no candidate file identity")
+    expected_identity = hashlib.sha256(json.dumps(
+        candidate_files, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    if manifest.get("candidate_files_sha256") != expected_identity:
+        raise ReviewError("Checkpoint candidate file identity hash differs")
     return manifest_path, manifest, supervisor
 
 
@@ -135,6 +144,49 @@ def _evidence_sources(
         if not path.is_file():
             raise ReviewError(f"Required review evidence is missing: {path}")
         paths.append((name, path))
+    research_input = root / "research-input.json"
+    if research_input.is_file():
+        paths.append(("research-input.json", research_input))
+    conversation = read_json(root / "conversation.json")
+    manifests = conversation.get("research_manifests")
+    if isinstance(manifests, list):
+        for index, pointer in enumerate(manifests, 1):
+            if not isinstance(pointer, dict) or not isinstance(pointer.get("path"), str):
+                raise ReviewError("Research manifest pointer is invalid")
+            source = (root / pointer["path"]).resolve()
+            try:
+                source.relative_to(root.resolve())
+            except ValueError as exc:
+                raise ReviewError("Research manifest escapes its task") from exc
+            manifest = read_json(source)
+            manifest_core = dict(manifest)
+            stored_hash = manifest_core.pop("manifest_sha256", None)
+            expected_hash = sha256_value(manifest_core)
+            if stored_hash != expected_hash or pointer.get("sha256") != expected_hash:
+                raise ReviewError("Research manifest hash differs")
+            paths.append((f"research-manifest-{index:04d}.json", source))
+    latest = conversation.get("latest_plan_candidate")
+    if isinstance(latest, dict) and isinstance(latest.get("path"), str):
+        candidate = (root / latest["path"]).resolve()
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError as exc:
+            raise ReviewError("Plan candidate escapes its task") from exc
+        paths.append(("lead-candidate.json", candidate))
+        candidate_value = read_json(candidate)
+        expected_candidate_hash = sha256_value({
+            "intent_sha256": candidate_value.get("intent_sha256"),
+            "decision": candidate_value.get("decision"),
+        })
+        if (
+            candidate_value.get("candidate_sha256") != expected_candidate_hash
+            or latest.get("candidate_sha256") != expected_candidate_hash
+        ):
+            raise ReviewError("Visible plan candidate hash differs")
+        intent_hash = candidate_value.get("intent_sha256")
+        if not isinstance(intent_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", intent_hash):
+            raise ReviewError("Plan candidate has no valid intent hash")
+        paths.append(("plan-intent.json", root / "planning" / f"intent-{intent_hash}.json"))
     for index, path in enumerate(sorted((root / "audit" / "events").glob("*.json")), 1):
         paths.append((f"audit-{index:08d}.json", path))
     if not any(name.startswith("audit-") for name, _path in paths):
@@ -162,6 +214,24 @@ def _load_review_state(root: Path) -> dict[str, Any]:
     return read_json(path) if path.is_file() else {}
 
 
+def _verify_protected_repository(repository: Path, base_checkpoint: str) -> None:
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=30, check=False,
+    )
+    if head.returncode != 0 or head.stdout.strip().lower() != base_checkpoint.lower():
+        raise ReviewError("Protected repository is not at the candidate base checkpoint")
+    status = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain=v1",
+         "--untracked-files=all"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, timeout=30, check=False,
+    )
+    if status.returncode != 0 or status.stdout.strip():
+        raise ReviewError("Protected repository must be clean before review packaging")
+
+
 def prepare_review(workspace: Path, run_id: str) -> dict[str, Any]:
     root, action, context = resolve_jobs(workspace, run_id)
     with review_lock(root):
@@ -179,7 +249,30 @@ def prepare_review(workspace: Path, run_id: str) -> dict[str, Any]:
             _require_prepared_review(root, action)
             return current
         manifest_path, manifest, _supervisor = _candidate_checkpoint(action)
+        _verify_protected_repository(
+            context["repository"], str(manifest["base_checkpoint"]),
+        )
         sources = _evidence_sources(root, action, manifest_path, manifest)
+        research_input = (
+            read_json(root / "research-input.json")
+            if (root / "research-input.json").is_file() else {}
+        )
+        if research_input:
+            research_core = dict(research_input)
+            stored_research_hash = research_core.pop("research_input_sha256", None)
+            if stored_research_hash != sha256_value(research_core):
+                raise ReviewError("Research input hash differs")
+        root_conversation = read_json(root / "conversation.json")
+        research_manifest_hashes = [
+            str(pointer.get("sha256"))
+            for pointer in root_conversation.get("research_manifests", [])
+            if isinstance(pointer, dict)
+        ]
+        latest_candidate = root_conversation.get("latest_plan_candidate")
+        plan_candidate_hash = (
+            str(latest_candidate.get("candidate_sha256"))
+            if isinstance(latest_candidate, dict) else ""
+        )
         # Audit and task-state files are evidence, not candidate identity: preparing
         # the review appends an audit event and must not manufacture a new review.
         fingerprint = sha256_value({
@@ -188,6 +281,9 @@ def prepare_review(workspace: Path, run_id: str) -> dict[str, Any]:
             "profile_snapshot_hash": snapshot["profile_snapshot_hash"],
             "base_checkpoint": manifest["base_checkpoint"],
             "patch_sha256": manifest["patch_sha256"],
+            "candidate_files_sha256": manifest["candidate_files_sha256"],
+            "research_manifest_sha256s": research_manifest_hashes,
+            "plan_candidate_sha256": plan_candidate_hash,
         })
         review_id = f"RV-{action.name}-{fingerprint[:12]}"
         reviews = root / "codex-reviews"
@@ -230,8 +326,28 @@ def prepare_review(workspace: Path, run_id: str) -> dict[str, Any]:
                     "profile_snapshot_hash": snapshot["profile_snapshot_hash"],
                     "model": snapshot["model"],
                     "model_digest": snapshot["model_digest"],
+                    "owner_request": research_input.get("owner_request", ""),
+                    "owner_request_sha256": research_input.get(
+                        "owner_request_sha256", "",
+                    ),
+                    "codex_research_prompt": research_input.get(
+                        "codex_research_prompt", "",
+                    ),
+                    "codex_research_prompt_sha256": research_input.get(
+                        "codex_research_prompt_sha256", "",
+                    ),
+                    "research_manifest_sha256s": research_manifest_hashes,
+                    "plan_candidate_sha256": plan_candidate_hash,
                     "base_checkpoint": manifest["base_checkpoint"],
                     "patch_sha256": manifest["patch_sha256"],
+                    "candidate_files": manifest["candidate_files"],
+                    "candidate_files_sha256": manifest["candidate_files_sha256"],
+                    "protected_repository_unchanged": True,
+                    "protected_repository_head": manifest["base_checkpoint"],
+                    "test_evidence": manifest.get("test_evidence", []),
+                    "local_reviewer_verdict": manifest.get(
+                        "local_reviewer_verdict", "",
+                    ),
                     "evidence": entries,
                     "instructions": (
                         "Review every evidence file and candidate.patch. If rejected, "
@@ -352,6 +468,53 @@ def _resolve_commit(repository: Path, commit: str) -> str:
     return resolved
 
 
+def _commit_candidate_files(
+    repository: Path, base_checkpoint: str, commit: str,
+) -> list[dict[str, Any]]:
+    changed = subprocess.run(
+        ["git", "-C", str(repository), "diff", "--no-renames", "--name-only",
+         "-z", base_checkpoint, commit, "--"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=30, check=False,
+    )
+    if changed.returncode != 0:
+        raise ReviewError("Cannot determine approved commit paths")
+    paths = sorted(
+        item.decode("utf-8", errors="strict")
+        for item in changed.stdout.split(b"\0") if item
+    )
+    result: list[dict[str, Any]] = []
+    for path in paths:
+        tree = subprocess.run(
+            ["git", "-C", str(repository), "ls-tree", commit, "--", path],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, timeout=30, check=False,
+        )
+        if tree.returncode != 0:
+            raise ReviewError(f"Cannot inspect approved path: {path}")
+        line = tree.stdout.strip()
+        if not line:
+            result.append({
+                "path": path, "state": "deleted", "sha256": None, "mode": None,
+            })
+            continue
+        mode = line.split(None, 1)[0]
+        blob = subprocess.run(
+            ["git", "-C", str(repository), "show", f"{commit}:{path}"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=30, check=False,
+        )
+        if blob.returncode != 0:
+            raise ReviewError(f"Cannot read approved path: {path}")
+        result.append({
+            "path": path,
+            "state": "present",
+            "sha256": hashlib.sha256(blob.stdout).hexdigest(),
+            "mode": int(mode[-3:], 8),
+        })
+    return result
+
+
 def record_codex_approved(workspace: Path, run_id: str, commit: str) -> dict[str, Any]:
     root, action, context = resolve_jobs(workspace, run_id)
     with review_lock(root):
@@ -369,6 +532,14 @@ def record_codex_approved(workspace: Path, run_id: str, commit: str) -> dict[str
         )
         if ancestor.returncode != 0:
             raise ReviewError("Approved commit does not descend from the candidate base")
+        actual_files = _commit_candidate_files(
+            context["repository"], str(package["base_checkpoint"]), resolved,
+        )
+        if actual_files != package.get("candidate_files"):
+            raise ReviewError(
+                "Approved commit paths or final blob hashes differ from the "
+                "reviewed candidate"
+            )
         approval_path = Path(review["package_path"]).parent / "codex-approval.json"
         approval = {
             "schema_version": 1,
@@ -376,6 +547,7 @@ def record_codex_approved(workspace: Path, run_id: str, commit: str) -> dict[str
             "recorded_at": utc_timestamp(),
             "commit": resolved,
             "commit_hash": sha256_text(resolved),
+            "candidate_files_sha256": package["candidate_files_sha256"],
         }
         atomic_write_immutable_json(approval_path, approval)
         transition_task(

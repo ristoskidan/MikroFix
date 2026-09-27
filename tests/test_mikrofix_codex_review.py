@@ -10,7 +10,8 @@ from tools.mikrofix_codex_review import (
 from tools.mikrofix_supervisor import atomic_write_json
 from tools.mikrofix_task_lifecycle import (
     TaskState, build_profile_snapshot, initialize_task_lifecycle,
-    load_profile_registry, read_task_state, transition_task,
+    load_profile_registry, read_task_state, sha256_text, sha256_value,
+    transition_task,
     write_profile_snapshot, write_system_prompt_snapshot,
 )
 
@@ -50,6 +51,9 @@ class CodexReviewTests(unittest.TestCase):
                 "enabled": True,
             }},
         }), encoding="utf-8")
+        self.git("add", "docs/lead.md", "profiles.json")
+        self.git("commit", "-qm", "test review fixtures")
+        self.base_checkpoint = self.git("rev-parse", "HEAD")
         profile = load_profile_registry(registry, self.repository)["lead"]
         self.snapshot = build_profile_snapshot(
             profile, project_root=self.repository, model_digest="a" * 64,
@@ -79,8 +83,55 @@ class CodexReviewTests(unittest.TestCase):
         (self.root / "request.json").write_text(json.dumps({
             "run_id": "MF-ROOT", "task": "Owner request",
         }), encoding="utf-8")
+        research_core = {
+            "schema_version": 1,
+            "owner_request": "Owner request",
+            "owner_request_sha256": sha256_text("Owner request"),
+            "codex_research_prompt": "Inspect app.py",
+            "codex_research_prompt_sha256": sha256_text("Inspect app.py"),
+        }
+        research_input = {
+            **research_core, "research_input_sha256": sha256_value(research_core),
+        }
+        (self.root / "research-input.json").write_text(
+            json.dumps(research_input), encoding="utf-8",
+        )
+        research_dir = self.root / "research"
+        research_dir.mkdir()
+        manifest_core = {
+            "schema_version": 1, "report": "Verified report",
+            "report_sha256": sha256_text("Verified report"),
+        }
+        research_manifest = {
+            **manifest_core, "manifest_sha256": sha256_value(manifest_core),
+        }
+        (research_dir / "manifest-0001.json").write_text(
+            json.dumps(research_manifest), encoding="utf-8",
+        )
+        planning = self.root / "planning"
+        planning.mkdir()
+        intent_hash = "b" * 64
+        decision = {"objective": "Apply verified candidate"}
+        candidate_hash = sha256_value({
+            "intent_sha256": intent_hash, "decision": decision,
+        })
+        (planning / f"intent-{intent_hash}.json").write_text(
+            json.dumps({"intent_sha256": intent_hash}), encoding="utf-8",
+        )
+        (planning / f"lead-candidate-{intent_hash}.json").write_text(json.dumps({
+            "intent_sha256": intent_hash, "decision": decision,
+            "candidate_sha256": candidate_hash,
+        }), encoding="utf-8")
         (self.root / "conversation.json").write_text(json.dumps({
             "active_run_id": "MF-ACTION", "turns": [],
+            "research_manifests": [{
+                "path": "research/manifest-0001.json",
+                "sha256": research_manifest["manifest_sha256"],
+            }],
+            "latest_plan_candidate": {
+                "path": f"planning/lead-candidate-{intent_hash}.json",
+                "candidate_sha256": candidate_hash,
+            },
         }), encoding="utf-8")
         (self.action / "request.json").write_text(json.dumps({
             "run_id": "MF-ACTION", "parent_run_id": "MF-ROOT",
@@ -95,10 +146,22 @@ class CodexReviewTests(unittest.TestCase):
         self.patch.write_text("candidate patch\n", encoding="utf-8")
         import hashlib
         patch_hash = hashlib.sha256(self.patch.read_bytes()).hexdigest()
+        candidate_files = [{
+            "path": "app.py", "state": "present",
+            "sha256": hashlib.sha256(b"after\n").hexdigest(), "mode": 0o644,
+        }]
+        candidate_files_hash = hashlib.sha256(json.dumps(
+            candidate_files, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
         self.manifest = artifacts / "manifest.json"
         self.manifest.write_text(json.dumps({
             "run_id": "MF-ACTION", "base_checkpoint": self.base_checkpoint,
             "patch_sha256": patch_hash, "patch": str(self.patch),
+            "candidate_files": candidate_files,
+            "candidate_files_sha256": candidate_files_hash,
+            "test_evidence": [{"command": "tests", "exit_code": 0}],
+            "local_reviewer_verdict": "APPROVE",
         }), encoding="utf-8")
         supervisor = {
             "stage": "AWAIT_CODEX_REVIEW", "checkpoint": str(self.manifest),
@@ -188,6 +251,30 @@ class CodexReviewTests(unittest.TestCase):
         self.assertEqual("APPLIED", result["status"])
         self.assertEqual(commit, result["commit"])
         self.assertEqual(TaskState.APPLIED.value, read_task_state(self.root)["state"])
+
+    def test_approval_rejects_unrelated_descendant_commit(self):
+        prepare_review(self.workspace, "MF-ACTION")
+        (self.repository / "other.py").write_text("unrelated\n", encoding="utf-8")
+        self.git("add", "other.py")
+        self.git("commit", "-qm", "unrelated descendant")
+        commit = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(
+            ReviewError, "paths or final blob hashes differ",
+        ):
+            record_codex_approved(self.workspace, "MF-ACTION", commit)
+
+    def test_prepare_review_requires_clean_repository_at_exact_base(self):
+        (self.repository / "app.py").write_text("dirty\n", encoding="utf-8")
+        with self.assertRaisesRegex(ReviewError, "must be clean"):
+            prepare_review(self.workspace, "MF-ACTION")
+
+    def test_prepare_review_rejects_tampered_research_manifest(self):
+        path = self.root / "research" / "manifest-0001.json"
+        value = json.loads(path.read_text())
+        value["report"] = "tampered"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        with self.assertRaisesRegex(ReviewError, "Research manifest hash differs"):
+            prepare_review(self.workspace, "MF-ACTION")
 
 
 if __name__ == "__main__":

@@ -1668,9 +1668,37 @@ class LocalAdapter:
         manifest_path = artifact_dir / "manifest.json"
         atomic_write_text(patch_path, diff)
         digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+        current = self.snapshot()
+        changed = sorted(changed_paths(run["initial_snapshot"], current))
+        candidate_files = []
+        for path in changed:
+            full_path = self.project_root / path
+            if full_path.is_file():
+                candidate_files.append({
+                    "path": path,
+                    "state": "present",
+                    "sha256": hashlib.sha256(full_path.read_bytes()).hexdigest(),
+                    "mode": full_path.stat().st_mode & 0o777,
+                })
+            elif not full_path.exists():
+                candidate_files.append({
+                    "path": path, "state": "deleted", "sha256": None,
+                    "mode": None,
+                })
+            else:
+                raise RuntimeError(
+                    f"Candidate path is not a regular file: {path}"
+                )
         manifest = {
             "run_id": run_id, "base_checkpoint": run["plan"]["base_checkpoint"],
             "patch_sha256": digest, "patch": str(patch_path),
+            "candidate_files": candidate_files,
+            "candidate_files_sha256": hashlib.sha256(json.dumps(
+                candidate_files, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+            "test_evidence": run.get("completed_atoms", []),
+            "local_reviewer_verdict": "APPROVE",
             "completed_atoms": run["completed_atoms"], "created_at": utc_timestamp(),
             "disposition": "AWAIT_CODEX_REVIEW",
             "not_performed": ["merge", "push", "deploy"],
