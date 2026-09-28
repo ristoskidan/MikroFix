@@ -79,21 +79,28 @@ class LocalManagerTests(unittest.TestCase):
 
     def test_research_envelope_is_strict_and_hashes_both_inputs(self):
         envelope = (
+            "worker_model=worker:test\n"
             "[OWNER_REQUEST]\nNapaka v računu\n[/OWNER_REQUEST]\n\n"
             "[CODEX_RESEARCH_PROMPT]\nPreberi samo parser."
-            "\n[/CODEX_RESEARCH_PROMPT]"
+            "\n[/CODEX_RESEARCH_PROMPT]\n\n"
+            "[REQUIRED_QUESTIONS]\nQ1: Kje se vrednost zapiše?"
+            "\n[/REQUIRED_QUESTIONS]"
         )
         parsed = manager.parse_research_envelope(envelope)
         self.assertEqual("Napaka v računu", parsed["owner_request"])
         self.assertEqual("Preberi samo parser.", parsed["codex_research_prompt"])
+        self.assertEqual("worker:test", parsed["worker_model"])
+        self.assertEqual("Q1", parsed["required_questions"][0]["id"])
         self.assertEqual(64, len(parsed["research_input_sha256"]))
-        with self.assertRaisesRegex(manager.ManagerError, "natanko razdelka"):
+        with self.assertRaisesRegex(manager.ManagerError, "natanko razdelke"):
             manager.parse_research_envelope("samo prompt")
 
     def test_research_manifest_requires_content_evidence_not_status(self):
         research_input = manager.parse_research_envelope(
+            "worker_model=worker:test\n"
             "[OWNER_REQUEST]\nNapaka\n[/OWNER_REQUEST]\n\n"
-            "[CODEX_RESEARCH_PROMPT]\nPreveri kodo\n[/CODEX_RESEARCH_PROMPT]"
+            "[CODEX_RESEARCH_PROMPT]\nPreveri kodo\n[/CODEX_RESEARCH_PROMPT]\n\n"
+            "[REQUIRED_QUESTIONS]\nQ1: Kje?\n[/REQUIRED_QUESTIONS]"
         )
         trace = self.root / "trace.jsonl"
         trace.write_text(
@@ -141,9 +148,11 @@ class LocalManagerTests(unittest.TestCase):
 
     def test_research_start_persists_input_and_evidence_manifest(self):
         research_input = manager.parse_research_envelope(
+            "worker_model=worker:test\n"
             "[OWNER_REQUEST]\nNapaka\n[/OWNER_REQUEST]\n\n"
             "[CODEX_RESEARCH_PROMPT]\nPreberi app.py\n"
-            "[/CODEX_RESEARCH_PROMPT]"
+            "[/CODEX_RESEARCH_PROMPT]\n\n"
+            "[REQUIRED_QUESTIONS]\nQ1: Kaj dela app.py?\n[/REQUIRED_QUESTIONS]"
         )
 
         def responder(_message, *, job_dir, **_kwargs):
@@ -172,12 +181,27 @@ class LocalManagerTests(unittest.TestCase):
             research_input["owner_request"], workspace=self.workspace,
             lead_profile="conversation_lead", model_tag="gpt-oss:20b",
             responder=responder, snapshot_factory=self.profile_snapshot,
+            worker_snapshot_factory=self.profile_snapshot,
             research_input=research_input,
         )
         job_dir = self.workspace / "jobs" / conversation["parent_run_id"]
         self.assertEqual(
             research_input,
             json.loads((job_dir / "research-input.json").read_text()),
+        )
+        lead_snapshot = json.loads(
+            (job_dir / "lead-profile-snapshot.json").read_text()
+        )
+        worker_snapshot = json.loads(
+            (job_dir / "worker-profile-snapshot.json").read_text()
+        )
+        self.assertEqual("gpt-oss:20b", lead_snapshot["model_tag"])
+        self.assertEqual("worker:test", worker_snapshot["model_tag"])
+        self.assertEqual("conversation_lead", lead_snapshot["profile_id"])
+        self.assertEqual("research_worker", worker_snapshot["profile_id"])
+        self.assertNotEqual(
+            lead_snapshot["profile_snapshot_hash"],
+            worker_snapshot["profile_snapshot_hash"],
         )
         manifests = manager.load_research_manifests(job_dir, conversation)
         self.assertEqual("Dokazano poročilo", manifests[0]["report"])
@@ -205,10 +229,11 @@ class LocalManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(manager.ManagerError, "hash mismatch"):
             manager.load_research_manifests(job_dir, conversation)
 
-    def profile_snapshot(self, profile_id, *, model_tag=None):
+    def profile_snapshot(self, profile_id, *, model_tag=None, allow_disabled=False):
         return manager.snapshot_for_new_task(
             profile_id, model_tag=model_tag or "gpt-oss:20b",
             digest_resolver=lambda _url, _model: "a" * 64,
+            allow_disabled=allow_disabled,
         )
 
     def test_normalize_overrides_all_trusted_fields(self):

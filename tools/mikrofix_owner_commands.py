@@ -69,7 +69,7 @@ def parse_owner_command(message: str) -> OwnerCommand | None:
             "/codex-rejected": "razlog zavrnitve",
             "/codex-approved": "commit SHA",
             "/replace-goal": "nov potrjeni cilj",
-            "/research": "ločena razdelka [OWNER_REQUEST] in [CODEX_RESEARCH_PROMPT]",
+            "/research": "worker_model=<tag> ter razdelki OWNER_REQUEST, CODEX_RESEARCH_PROMPT in REQUIRED_QUESTIONS",
         }[name]
         raise OwnerCommandError(f"Po ukazu {name} napiši {description}.")
     return OwnerCommand(name=name, argument=argument)

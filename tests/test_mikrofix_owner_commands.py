@@ -42,7 +42,7 @@ class OwnerCommandParserTests(unittest.TestCase):
             parse_owner_command("/codex-approved")
         with self.assertRaisesRegex(OwnerCommandError, "nov potrjeni cilj"):
             parse_owner_command("/replace-goal")
-        with self.assertRaisesRegex(OwnerCommandError, "ločena razdelka"):
+        with self.assertRaisesRegex(OwnerCommandError, "worker_model"):
             parse_owner_command("/research")
 
     def test_help_describes_only_implemented_semantics(self):

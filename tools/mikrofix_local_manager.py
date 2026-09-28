@@ -38,6 +38,10 @@ try:
         write_system_prompt_snapshot,
     )
     from tools.mikrofix_workspace_lock import workspace_lock
+    from tools.mikrofix_research import (
+        MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
+        ResearchError, validate_questions,
+    )
 except ModuleNotFoundError:
     from mikrofix_codex_review import (  # type: ignore[no-redef]
         prepare_review, record_codex_approved, record_codex_rejected,
@@ -57,6 +61,10 @@ except ModuleNotFoundError:
         write_system_prompt_snapshot,
     )
     from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
+    from mikrofix_research import (  # type: ignore[no-redef]
+        MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
+        ResearchError, validate_questions,
+    )
 
 
 DEFAULT_WORKSPACE = Path.home() / "MikroFIX_Agent_Workspace"
@@ -162,33 +170,58 @@ def conversation_response_schema(*, planning_requested: bool = True) -> dict[str
 
 
 RESEARCH_ENVELOPE_RE = re.compile(
-    r"\A\s*\[OWNER_REQUEST\]\s*\n(?P<owner>.*?)\n\s*\[/OWNER_REQUEST\]"
+    r"\A\s*worker_model=(?P<worker>[^\s]+)\s*\n+"
+    r"\[OWNER_REQUEST\]\s*\n(?P<owner>.*?)\n\s*\[/OWNER_REQUEST\]"
     r"\s*\n+\s*\[CODEX_RESEARCH_PROMPT\]\s*\n(?P<prompt>.*?)\n\s*"
-    r"\[/CODEX_RESEARCH_PROMPT\]\s*\Z",
+    r"\[/CODEX_RESEARCH_PROMPT\]\s*\n+\s*"
+    r"\[REQUIRED_QUESTIONS\]\s*\n(?P<questions>.*?)\n\s*"
+    r"\[/REQUIRED_QUESTIONS\]\s*\Z",
     flags=re.DOTALL,
 )
 EVIDENCE_BEARING_TOOLS = frozenset({"project_read", "project_search"})
 
 
-def parse_research_envelope(value: str) -> dict[str, str]:
+def parse_research_envelope(value: str) -> dict[str, Any]:
     """Parse the explicit owner/Codex boundary for one new research task."""
     match = RESEARCH_ENVELOPE_RE.fullmatch(value.strip())
     if not match:
         raise ManagerError(
-            "Ukaz /research zahteva natanko razdelka [OWNER_REQUEST] ... "
-            "[/OWNER_REQUEST] in [CODEX_RESEARCH_PROMPT] ... "
-            "[/CODEX_RESEARCH_PROMPT]."
+            "Ukaz /research zahteva worker_model=<tag> ter natanko razdelke "
+            "[OWNER_REQUEST], [CODEX_RESEARCH_PROMPT] in [REQUIRED_QUESTIONS]."
         )
+    worker_model = match.group("worker").strip()
     owner_request = match.group("owner").strip()
     codex_prompt = match.group("prompt").strip()
-    if not owner_request or not codex_prompt:
-        raise ManagerError("Oba razdelka /research morata biti neprazna")
+    if not worker_model or not owner_request or not codex_prompt:
+        raise ManagerError("Model in vsi razdelki /research morajo biti neprazni")
+    if len(owner_request) > MAX_OWNER_REQUEST_CHARS:
+        raise ManagerError("OWNER_REQUEST je predolg")
+    if len(codex_prompt) > MAX_RESEARCH_PROMPT_CHARS:
+        raise ManagerError("CODEX_RESEARCH_PROMPT je predolg")
+    questions = []
+    for raw_line in match.group("questions").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        question_match = re.fullmatch(r"(Q[1-9][0-9]{0,2}):\s*(.+)", line)
+        if not question_match:
+            raise ManagerError("Vsako obvezno vprašanje mora imeti obliko Q1: besedilo")
+        questions.append({
+            "id": question_match.group(1), "question": question_match.group(2),
+        })
+    try:
+        questions = validate_questions(questions)
+    except ResearchError as exc:
+        raise ManagerError(str(exc)) from exc
     core = {
         "schema_version": 1,
+        "worker_model": worker_model,
         "owner_request": owner_request,
         "owner_request_sha256": sha256_text(owner_request),
         "codex_research_prompt": codex_prompt,
         "codex_research_prompt_sha256": sha256_text(codex_prompt),
+        "required_questions": questions,
+        "required_questions_sha256": canonical_json_sha256(questions),
     }
     return {**core, "research_input_sha256": canonical_json_sha256(core)}
 
@@ -612,8 +645,8 @@ def enabled_lead_profiles() -> dict[str, dict[str, Any]]:
     }
 
 
-def enabled_role_profiles() -> dict[str, dict[str, Any]]:
-    """Load model-independent owner-selectable roles."""
+def role_profiles(*, include_disabled: bool = False) -> dict[str, dict[str, Any]]:
+    """Load strictly validated model-independent roles."""
     try:
         raw = json.loads(ROLE_REGISTRY.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -645,11 +678,16 @@ def enabled_role_profiles() -> dict[str, dict[str, Any]]:
             raise ManagerError(f"Role {role_id} prompt escapes project") from exc
         if not prompt.is_file():
             raise ManagerError(f"Role {role_id} prompt does not exist")
-        if role["enabled"]:
+        if include_disabled or role["enabled"]:
             roles[role_id] = {"profile_id": role_id, **role}
     if not roles:
         raise ManagerError("Role registry has no enabled roles")
     return roles
+
+
+def enabled_role_profiles() -> dict[str, dict[str, Any]]:
+    """Load owner-selectable roles only."""
+    return role_profiles()
 
 
 def _model_runtime_registry() -> dict[str, Any]:
@@ -796,8 +834,9 @@ def snapshot_for_new_task(
     lead_profile: str, *, model_tag: str | None = None,
     runtime_overrides: dict[str, Any] | None = None,
     digest_resolver: Callable[[str, str], str] = resolve_ollama_digest,
+    allow_disabled: bool = False,
 ) -> dict[str, Any]:
-    roles = enabled_role_profiles()
+    roles = role_profiles(include_disabled=allow_disabled)
     if lead_profile not in roles:
         raise ManagerError(f"Unknown or disabled role profile: {lead_profile}")
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
@@ -819,7 +858,7 @@ def snapshot_for_new_task(
         "role": role["role"],
         "display_name": role["display_name"],
         "system_prompt": role["system_prompt"],
-        "enabled": True,
+        "enabled": role["enabled"],
         "runtime_options": {
             field: selected_runtime.get(field) for field in RUNTIME_OPTION_FIELDS
         },
@@ -2516,6 +2555,7 @@ def start_conversation(
     runtime_overrides: dict[str, Any] | None = None,
     responder: Callable[..., tuple[dict[str, Any], dict[str, str]]] = run_lead_conversation,
     snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
+    worker_snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     research_input: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -2527,11 +2567,17 @@ def start_conversation(
     canonical_research_input = None
     if research_input is not None:
         canonical_research_input = parse_research_envelope(
-            "[OWNER_REQUEST]\n"
+            "worker_model=" + str(research_input.get("worker_model") or "")
+            + "\n[OWNER_REQUEST]\n"
             + str(research_input.get("owner_request") or "")
             + "\n[/OWNER_REQUEST]\n\n[CODEX_RESEARCH_PROMPT]\n"
             + str(research_input.get("codex_research_prompt") or "")
-            + "\n[/CODEX_RESEARCH_PROMPT]"
+            + "\n[/CODEX_RESEARCH_PROMPT]\n\n[REQUIRED_QUESTIONS]\n"
+            + "\n".join(
+                f"{item.get('id')}: {item.get('question')}"
+                for item in (research_input.get("required_questions") or [])
+            )
+            + "\n[/REQUIRED_QUESTIONS]"
         )
         if research_input != canonical_research_input:
             raise ManagerError("Research input is not canonical")
@@ -2549,6 +2595,15 @@ def start_conversation(
     snapshot = snapshot_factory(lead_profile, **snapshot_kwargs)
     if snapshot.get("profile_id") != lead_profile:
         raise ManagerError("Snapshot factory returned a different lead profile")
+    worker_snapshot = None
+    if canonical_research_input is not None:
+        worker_snapshot = worker_snapshot_factory(
+            "research_worker",
+            model_tag=canonical_research_input["worker_model"],
+            allow_disabled=True,
+        )
+        if worker_snapshot.get("profile_id") != "research_worker":
+            raise ManagerError("Worker snapshot factory returned a different role")
     run_id = new_run_id(workspace)
     job_dir = workspace / "jobs" / run_id
     job_dir.mkdir(parents=True, mode=0o700)
@@ -2564,6 +2619,10 @@ def start_conversation(
     if canonical_research_input is not None:
         atomic_write_immutable_json(
             job_dir / "research-input.json", canonical_research_input,
+        )
+        assert worker_snapshot is not None
+        atomic_write_immutable_json(
+            job_dir / "worker-profile-snapshot.json", worker_snapshot,
         )
     write_profile_snapshot(job_dir, snapshot)
     write_system_prompt_snapshot(

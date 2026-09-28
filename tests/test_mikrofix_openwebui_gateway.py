@@ -9,9 +9,11 @@ from tools import mikrofix_openwebui_gateway as gateway
 
 class OpenWebUIGatewayTests(unittest.TestCase):
     RESEARCH = (
-        "/research\n[OWNER_REQUEST]\nPreveri napako\n[/OWNER_REQUEST]\n\n"
+        "/research\nworker_model=deepseek-r1:14b\n"
+        "[OWNER_REQUEST]\nPreveri napako\n[/OWNER_REQUEST]\n\n"
         "[CODEX_RESEARCH_PROMPT]\nPreberi relevantno kodo in teste."
-        "\n[/CODEX_RESEARCH_PROMPT]"
+        "\n[/CODEX_RESEARCH_PROMPT]\n\n"
+        "[REQUIRED_QUESTIONS]\nQ1: Kje je napaka?\n[/REQUIRED_QUESTIONS]"
     )
     def test_extracts_latest_user_message_and_visible_run_marker(self):
         message, run_id, model_tag, runtime = gateway.extract_request([
@@ -58,7 +60,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             gateway, "start_conversation", return_value=conversation,
         ) as start, mock.patch.object(
             gateway, "installed_ollama_models",
-            return_value=["qwen3:4b-thinking-2507-q8_0"],
+            return_value=["qwen3:4b-thinking-2507-q8_0", "deepseek-r1:14b"],
         ):
             gateway.route_message(
                 self.RESEARCH, "", "conversation_lead",
@@ -241,7 +243,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
 
     def test_malformed_research_envelope_fails_before_task_creation(self):
         with mock.patch.object(gateway, "start_conversation") as start:
-            with self.assertRaisesRegex(Exception, "zahteva natanko razdelka"):
+            with self.assertRaisesRegex(Exception, "zahteva .* natanko razdelke"):
                 gateway.route_message(
                     "/research samo besedilo", "", "conversation_lead",
                     "gpt-oss:20b",

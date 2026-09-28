@@ -372,6 +372,9 @@ def route_message(
             if selected_model not in installed_ollama_models():
                 raise ValueError(f"Izbrani model ni več nameščen: {selected_model}")
             research_input = parse_research_envelope(command.argument)
+            worker_model = str(research_input["worker_model"])
+            if worker_model not in installed_ollama_models():
+                raise ValueError(f"Izbrani worker model ni nameščen: {worker_model}")
             conversation = start_conversation(
                 research_input["owner_request"], workspace=WORKSPACE,
                 lead_profile=role_id, model_tag=selected_model,
