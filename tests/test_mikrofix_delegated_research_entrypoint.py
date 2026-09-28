@@ -298,6 +298,42 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
                 responder=lambda *_a, **_k: None,
             )
 
+    def test_queued_revision_rejects_dossier_replaced_before_execution(self):
+        conversation = self.run_research()
+        old_hash = conversation["research_dossier_sha256"]
+
+        def revised_synthesis(_accepted, cards, **_kwargs):
+            return {"synthesis": [{
+                "claim": "Popravljeno",
+                "evidence_ids": [cards[-1]["evidence_id"]],
+            }], "unresolved": []}
+
+        first = manager.record_research_review(
+            conversation["parent_run_id"], dossier_sha256=old_hash,
+            verdict="REVISE", research_task_id="R1", reason="Prva revizija",
+            workspace=self.workspace, revision_worker_runner=self.worker,
+            revision_review_runner=self.accept,
+            revision_synthesis_runner=revised_synthesis,
+            model_releaser=lambda _model: None,
+            model_identity_checker=lambda _lead, _worker: None,
+        )
+        self.assertNotEqual(
+            old_hash, first["new_dossier"]["dossier_sha256"],
+        )
+        with self.assertRaisesRegex(
+            manager.ManagerError, "does not match the current dossier",
+        ):
+            manager.record_research_review(
+                conversation["parent_run_id"], dossier_sha256=old_hash,
+                verdict="REVISE", research_task_id="R1",
+                reason="Zakasnjena revizija", workspace=self.workspace,
+                revision_worker_runner=self.worker,
+                revision_review_runner=self.accept,
+                revision_synthesis_runner=revised_synthesis,
+                model_releaser=lambda _model: None,
+                model_identity_checker=lambda _lead, _worker: None,
+            )
+
     def test_scope_expansion_is_validated_and_used_by_next_attempt(self):
         seen_scopes = []
 

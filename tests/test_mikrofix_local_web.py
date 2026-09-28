@@ -231,7 +231,6 @@ class LocalWebPayloadTests(unittest.TestCase):
         with (
             mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
             mock.patch.object(web, "spawn_manager") as spawn,
-            mock.patch.object(web, "record_research_review") as record,
         ):
             result = web.dispatch_owner_command(
                 self.workspace, "MF-ROOT",
@@ -241,11 +240,6 @@ class LocalWebPayloadTests(unittest.TestCase):
             "research-revise", "MF-ROOT", "--dossier", dossier,
             "--task", "R1", "--reason", "Preveri manjkajoči dokaz",
         ])
-        record.assert_called_once_with(
-            "MF-ROOT", workspace=self.workspace, dossier_sha256=dossier,
-            verdict="REVISE", research_task_id="R1",
-            reason="Preveri manjkajoči dokaz", execute_revision=False,
-        )
         self.assertTrue(result["accepted"])
 
     def test_codex_opinion_only_prepares_clipboard_text(self):

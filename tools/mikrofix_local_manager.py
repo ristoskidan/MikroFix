@@ -2804,7 +2804,7 @@ def continue_research_revision(
     return dossier
 
 
-def record_research_review(
+def _record_research_review_locked(
     parent_run_id: str, *, dossier_sha256: str, verdict: str,
     research_task_id: str | None = None, reason: str = "",
     workspace: Path = DEFAULT_WORKSPACE,
@@ -2815,9 +2815,8 @@ def record_research_review(
     model_identity_checker: Callable[[dict[str, Any], dict[str, Any]], None] = (
         assert_frozen_research_models
     ),
-    execute_revision: bool = True,
 ) -> dict[str, Any]:
-    """Record a Codex semantic verdict for exactly the current dossier."""
+    """Record a verdict while the caller holds research-review.lock."""
     workspace = workspace.expanduser().resolve()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
         raise ManagerError("Unsafe parent run id")
@@ -2847,7 +2846,7 @@ def record_research_review(
     manager["research_dossier_sha256"] = dossier_sha256
     manager["research_verdict_sha256"] = verdict_record["verdict_sha256"]
     atomic_write_json(manager_file, manager)
-    if verdict == "REVISE" and execute_revision:
+    if verdict == "REVISE":
         try:
             dossier = continue_research_revision(
                 parent_run_id, research_task_id=str(research_task_id), reason=reason,
@@ -2865,6 +2864,37 @@ def record_research_review(
             raise
         verdict_record = {**verdict_record, "new_dossier": dossier}
     return verdict_record
+
+
+def record_research_review(
+    parent_run_id: str, *, dossier_sha256: str, verdict: str,
+    research_task_id: str | None = None, reason: str = "",
+    workspace: Path = DEFAULT_WORKSPACE,
+    revision_worker_runner: Callable[..., tuple[dict[str, Any], Any]] | None = None,
+    revision_review_runner: Callable[..., dict[str, Any]] | None = None,
+    revision_synthesis_runner: Callable[..., dict[str, Any]] | None = None,
+    model_releaser: Callable[[str], None] = release_ollama_model,
+    model_identity_checker: Callable[[dict[str, Any], dict[str, Any]], None] = (
+        assert_frozen_research_models
+    ),
+) -> dict[str, Any]:
+    """Atomically bind and execute a verdict for one exact dossier revision."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    job_dir = workspace / "jobs" / parent_run_id
+    lock_path = job_dir / "research-review.lock"
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return _record_research_review_locked(
+            parent_run_id, dossier_sha256=dossier_sha256, verdict=verdict,
+            research_task_id=research_task_id, reason=reason,
+            workspace=workspace, revision_worker_runner=revision_worker_runner,
+            revision_review_runner=revision_review_runner,
+            revision_synthesis_runner=revision_synthesis_runner,
+            model_releaser=model_releaser,
+            model_identity_checker=model_identity_checker,
+        )
 
 
 def dispatch_plan(
@@ -3808,8 +3838,9 @@ def _main(args: argparse.Namespace) -> int:
                 lead_profile=args.profile, model_tag=args.model,
             )
         elif args.command_name == "research-revise":
-            result = continue_research_revision(
+            result = record_research_review(
                 args.run_id, workspace=args.workspace,
+                dossier_sha256=args.dossier, verdict="REVISE",
                 research_task_id=args.task, reason=args.reason,
             )
         elif args.command_name == "prepare-plan":

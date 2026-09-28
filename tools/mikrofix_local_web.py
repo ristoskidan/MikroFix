@@ -222,11 +222,6 @@ def dispatch_owner_command(
                 raise ValueError("/research-rejected zahteva SHA-256 in razlog")
             verdict, task_id, reason = "REJECT", None, command.argument.split(None, 1)[1]
         if verdict == "REVISE":
-            record_research_review(
-                job["run_id"], workspace=workspace, dossier_sha256=dossier_sha,
-                verdict=verdict, research_task_id=task_id, reason=reason,
-                execute_revision=False,
-            )
             spawn_manager(workspace, [
                 "research-revise", job["run_id"], "--dossier", dossier_sha,
                 "--task", str(task_id), "--reason", reason,
