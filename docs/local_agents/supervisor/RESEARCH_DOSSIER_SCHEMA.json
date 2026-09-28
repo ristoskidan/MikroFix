@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "dossier_revision", "previous_dossier_sha256", "research_identity", "required_questions", "accepted_tasks", "evidence_cards", "lead_decisions", "synthesis", "unresolved", "dossier_sha256"],
+  "required": ["schema_version", "dossier_revision", "previous_dossier_sha256", "research_identity", "required_questions", "accepted_tasks", "evidence_cards", "lead_decisions", "worker_results", "synthesis", "unresolved", "dossier_sha256"],
   "properties": {
     "schema_version": {"const": 1},
     "dossier_revision": {"type": "integer", "minimum": 1, "maximum": 20},
@@ -12,6 +12,7 @@
     "accepted_tasks": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "maxProperties": 12}},
     "evidence_cards": {"type": "array", "maxItems": 384, "items": {"type": "object", "maxProperties": 20}},
     "lead_decisions": {"type": "array", "maxItems": 9, "items": {"type": "object", "maxProperties": 12}},
+    "worker_results": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"type": "object", "maxProperties": 12}},
     "synthesis": {"type": "array", "maxItems": 64, "items": {"type": "object", "maxProperties": 5}},
     "unresolved": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 4000}},
     "dossier_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
