@@ -2815,6 +2815,7 @@ def record_research_review(
     model_identity_checker: Callable[[dict[str, Any], dict[str, Any]], None] = (
         assert_frozen_research_models
     ),
+    execute_revision: bool = True,
 ) -> dict[str, Any]:
     """Record a Codex semantic verdict for exactly the current dossier."""
     workspace = workspace.expanduser().resolve()
@@ -2846,7 +2847,7 @@ def record_research_review(
     manager["research_dossier_sha256"] = dossier_sha256
     manager["research_verdict_sha256"] = verdict_record["verdict_sha256"]
     atomic_write_json(manager_file, manager)
-    if verdict == "REVISE":
+    if verdict == "REVISE" and execute_revision:
         try:
             dossier = continue_research_revision(
                 parent_run_id, research_task_id=str(research_task_id), reason=reason,
@@ -3751,6 +3752,11 @@ def parse_args() -> argparse.Namespace:
         default="conversation_lead",
     )
     research_parser.add_argument("--model", required=True)
+    revise_research_parser = sub.add_parser("research-revise")
+    revise_research_parser.add_argument("run_id")
+    revise_research_parser.add_argument("--dossier", required=True)
+    revise_research_parser.add_argument("--task", choices=("R1", "R2", "R3"), required=True)
+    revise_research_parser.add_argument("--reason", required=True)
     talk_parser = sub.add_parser("talk")
     talk_parser.add_argument("--message", required=True)
     talk_parser.add_argument("--parent", required=True)
@@ -3800,6 +3806,11 @@ def _main(args: argparse.Namespace) -> int:
             result = start_research(
                 args.envelope, workspace=args.workspace,
                 lead_profile=args.profile, model_tag=args.model,
+            )
+        elif args.command_name == "research-revise":
+            result = continue_research_revision(
+                args.run_id, workspace=args.workspace,
+                research_task_id=args.task, reason=args.reason,
             )
         elif args.command_name == "prepare-plan":
             result = prepare_plan(args.run_id, workspace=args.workspace)

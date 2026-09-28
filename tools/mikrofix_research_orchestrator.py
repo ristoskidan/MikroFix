@@ -91,8 +91,11 @@ def validate_worker_result(
             raise ResearchError("worker answer question identity is invalid")
         seen_questions.add(question_id)
         evidence_ids = answer["evidence_ids"]
-        if not isinstance(evidence_ids, list) or len(evidence_ids) > MAX_EVIDENCE_IDS_PER_CLAIM:
-            raise ResearchError("worker answer evidence list is invalid")
+        if (
+            not isinstance(evidence_ids, list)
+            or not 1 <= len(evidence_ids) <= MAX_EVIDENCE_IDS_PER_CLAIM
+        ):
+            raise ResearchError("Every worker answer must cite bounded evidence")
         normalized_answers.append({
             "question_id": question_id,
             "answer": _bounded_string(answer["answer"], "answer", maximum=6_000),

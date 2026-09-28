@@ -2,7 +2,7 @@
   "schema_version": 1,
   "roles": {
     "conversation_lead": {
-      "version": 6,
+      "version": 7,
       "role": "conversation_lead",
       "display_name": "Pogovorni lokalni vodja",
       "system_prompt": "docs/local_agents/roles/CONVERSATION_LEAD_SYSTEM.md",

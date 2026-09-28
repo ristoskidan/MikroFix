@@ -143,6 +143,16 @@ class ResearchOrchestratorTests(unittest.TestCase):
                 **self.task, "original_task_sha256": "b" * 64,
             }, attempt=1)
 
+    def test_complete_answer_requires_at_least_one_evidence_id(self):
+        result = self.complete()
+        result["answers"][0]["evidence_ids"] = []
+        with self.assertRaisesRegex(
+            orchestrator.ResearchError, "answer must cite bounded evidence",
+        ):
+            orchestrator.validate_worker_result(result, task={
+                **self.task, "original_task_sha256": "b" * 64,
+            }, attempt=1)
+
 
 if __name__ == "__main__":
     unittest.main()

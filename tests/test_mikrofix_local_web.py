@@ -222,6 +222,32 @@ class LocalWebPayloadTests(unittest.TestCase):
         self.assertTrue(result["accepted"])
         spawn.assert_not_called()
 
+    def test_research_revise_is_spawned_outside_web_request(self):
+        job = {
+            "run_id": "MF-ROOT", "action_run_id": "",
+            "state": "CONVERSATION", "state_label": "Pogovor", "review": {},
+        }
+        dossier = "a" * 64
+        with (
+            mock.patch.object(web, "jobs_payload", return_value={"jobs": [job]}),
+            mock.patch.object(web, "spawn_manager") as spawn,
+            mock.patch.object(web, "record_research_review") as record,
+        ):
+            result = web.dispatch_owner_command(
+                self.workspace, "MF-ROOT",
+                f"/research-revise {dossier} R1 Preveri manjkajoči dokaz",
+            )
+        spawn.assert_called_once_with(self.workspace, [
+            "research-revise", "MF-ROOT", "--dossier", dossier,
+            "--task", "R1", "--reason", "Preveri manjkajoči dokaz",
+        ])
+        record.assert_called_once_with(
+            "MF-ROOT", workspace=self.workspace, dossier_sha256=dossier,
+            verdict="REVISE", research_task_id="R1",
+            reason="Preveri manjkajoči dokaz", execute_revision=False,
+        )
+        self.assertTrue(result["accepted"])
+
     def test_codex_opinion_only_prepares_clipboard_text(self):
         job = {
             "run_id": "MF-ROOT", "action_run_id": "MF-CHILD",

@@ -644,7 +644,7 @@ class LocalManagerTests(unittest.TestCase):
             digest_resolver=resolver,
         )
         self.assertEqual(first["profile_id"], second["profile_id"])
-        self.assertEqual(6, first["profile_version"])
+        self.assertEqual(7, first["profile_version"])
         self.assertEqual(first["role"], second["role"])
         self.assertEqual(first["system_prompt_hash"], second["system_prompt_hash"])
         self.assertNotEqual(first["model_tag"], second["model_tag"])
