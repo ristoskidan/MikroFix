@@ -176,6 +176,27 @@ class BridgeCompletionTests(unittest.TestCase):
             self.bridge.call_qwen([{"role": "user", "content": "prepare"}])
         self.assertNotIn("tools", calls[0])
 
+    def test_toolless_session_accepts_zero_successful_tool_calls(self):
+        self.bridge.validate_minimum_successful_tool_calls(
+            require_tool_use=False, minimum=0, max_steps=4,
+        )
+
+    def test_tool_required_session_rejects_zero_successful_tool_calls(self):
+        with self.assertRaisesRegex(RuntimeError, "between 1 and max_steps"):
+            self.bridge.validate_minimum_successful_tool_calls(
+                require_tool_use=True, minimum=0, max_steps=4,
+            )
+
+    def test_tool_call_minimum_rejects_negative_and_above_max_steps(self):
+        for require_tool_use, minimum in ((False, -1), (True, -1), (False, 5), (True, 5)):
+            with self.subTest(
+                require_tool_use=require_tool_use, minimum=minimum,
+            ), self.assertRaisesRegex(RuntimeError, "max_steps"):
+                self.bridge.validate_minimum_successful_tool_calls(
+                    require_tool_use=require_tool_use, minimum=minimum,
+                    max_steps=4,
+                )
+
     def test_final_reply_mode_is_compact_toolless_and_low_thinking(self):
         calls = []
         messages = [

@@ -501,6 +501,37 @@ class LocalManagerTests(unittest.TestCase):
         self.assertIn('"deterministic_reply_wrapper": not planning_requested', source)
         self.assertIn("idle_timeout_seconds=1200", source)
 
+    def test_lead_decomposition_runtime_is_toolless_with_zero_minimum(self):
+        job_dir = self.workspace / "jobs" / "MF-LEAD-DECOMPOSITION-CONFIG"
+        job_dir.mkdir(parents=True)
+        snapshot = self.profile_snapshot("conversation_lead")
+        process = mock.Mock()
+        process.wait.return_value = 0
+        with (
+            mock.patch.object(manager.subprocess, "Popen", return_value=process),
+            mock.patch.object(
+                manager, "wait_for_executor",
+                side_effect=RuntimeError("captured before bridge start"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "captured before bridge start"),
+        ):
+            manager.run_structured_research_session(
+                "Razdeli nalogo", job_dir=job_dir,
+                repository=self.repository, snapshot=snapshot,
+                session_kind="LEAD_DECOMPOSITION",
+                response_format=manager.research_decomposition_schema(),
+                allowed_tools=[], max_steps=4,
+            )
+        configs = list(
+            (job_dir / "delegated-research-runtime" / "LEAD_DECOMPOSITION")
+            .glob("session-*/bridge/config.json")
+        )
+        self.assertEqual(1, len(configs))
+        config = json.loads(configs[0].read_text(encoding="utf-8"))
+        self.assertFalse(config["require_tool_use"])
+        self.assertEqual(0, config["minimum_successful_tool_calls"])
+        self.assertEqual([], config["allowed_tools"])
+
     def test_plan_intent_keeps_root_request_and_excludes_discussion_from_task(self):
         conversation = {"turns": [
             {"role": "owner", "content": "Fix decimal_value", "at": "first"},

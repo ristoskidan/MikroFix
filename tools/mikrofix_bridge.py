@@ -113,10 +113,24 @@ if not 30 <= MODEL_SILENCE_TIMEOUT_SECONDS <= 3600:
     raise RuntimeError(
         "model_silence_timeout_seconds must be between 30 and 3600"
     )
-if not 1 <= MINIMUM_SUCCESSFUL_TOOL_CALLS <= MAX_STEPS:
-    raise RuntimeError(
-        "minimum_successful_tool_calls must be between 1 and max_steps"
-    )
+def validate_minimum_successful_tool_calls(
+    *, require_tool_use: bool, minimum: int, max_steps: int,
+) -> None:
+    """Validate the tool-call floor without weakening tool-required sessions."""
+    lower_bound = 1 if require_tool_use else 0
+    if not lower_bound <= minimum <= max_steps:
+        raise RuntimeError(
+            "minimum_successful_tool_calls must be between "
+            f"{lower_bound} and max_steps when require_tool_use is "
+            f"{str(require_tool_use).lower()}"
+        )
+
+
+validate_minimum_successful_tool_calls(
+    require_tool_use=REQUIRE_TOOL_USE,
+    minimum=MINIMUM_SUCCESSFUL_TOOL_CALLS,
+    max_steps=MAX_STEPS,
+)
 if not 1 <= MAX_TOOLLESS_RESPONSES <= MAX_STEPS:
     raise RuntimeError("max_toolless_responses must be between 1 and max_steps")
 
