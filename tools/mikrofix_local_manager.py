@@ -40,10 +40,15 @@ try:
     from tools.mikrofix_workspace_lock import workspace_lock
     from tools.mikrofix_research import (
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
-        ResearchError, validate_questions,
+        ResearchError, assert_repository_identity, repository_identity,
+        validate_questions,
     )
     from tools.mikrofix_research_dossier import (
+        create_dossier_revision, evidence_cards_from_trace, evidence_gate,
         record_codex_research_verdict, require_current_codex_approval,
+    )
+    from tools.mikrofix_research_orchestrator import (
+        run_sequential_workers, validate_task_set,
     )
 except ModuleNotFoundError:
     from mikrofix_codex_review import (  # type: ignore[no-redef]
@@ -66,10 +71,15 @@ except ModuleNotFoundError:
     from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
     from mikrofix_research import (  # type: ignore[no-redef]
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
-        ResearchError, validate_questions,
+        ResearchError, assert_repository_identity, repository_identity,
+        validate_questions,
     )
     from mikrofix_research_dossier import (  # type: ignore[no-redef]
+        create_dossier_revision, evidence_cards_from_trace, evidence_gate,
         record_codex_research_verdict, require_current_codex_approval,
+    )
+    from mikrofix_research_orchestrator import (  # type: ignore[no-redef]
+        run_sequential_workers, validate_task_set,
     )
 
 
@@ -110,6 +120,82 @@ LEAD_CONVERSATION_SYSTEM = (
     PROJECT_ROOT / "docs/local_agents/roles/CONVERSATION_LEAD_SYSTEM.md"
 )
 MAX_CONVERSATION_TURNS = 40
+
+
+def research_decomposition_schema() -> dict[str, Any]:
+    task = json.loads(
+        (PROJECT_ROOT / "docs/local_agents/supervisor/RESEARCH_TASK_SCHEMA.json")
+        .read_text(encoding="utf-8")
+    )
+    # The manager adds immutable identity fields after validating model output.
+    properties = dict(task["properties"])
+    properties.pop("schema_version", None)
+    properties.pop("original_task_sha256", None)
+    required = [
+        item for item in task["required"]
+        if item not in {"schema_version", "original_task_sha256"}
+    ]
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["tasks"],
+        "properties": {"tasks": {
+            "type": "array", "minItems": 1, "maxItems": 3,
+            "items": {
+                "type": "object", "additionalProperties": False,
+                "required": required, "properties": properties,
+            },
+        }},
+    }
+
+
+def worker_result_schema() -> dict[str, Any]:
+    return json.loads(
+        (PROJECT_ROOT / "docs/local_agents/supervisor/WORKER_RESULT_SCHEMA.json")
+        .read_text(encoding="utf-8")
+    )
+
+
+def lead_review_schema() -> dict[str, Any]:
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["decision", "reason", "missing_evidence"],
+        "properties": {
+            "decision": {"enum": ["ACCEPT", "REVISE", "BLOCKED"]},
+            "reason": {"type": "string", "maxLength": 4000},
+            "missing_evidence": {
+                "type": "array", "maxItems": 12,
+                "items": {"type": "string", "maxLength": 500},
+            },
+        },
+    }
+
+
+def lead_synthesis_schema() -> dict[str, Any]:
+    return {
+        "type": "object", "additionalProperties": False,
+        "required": ["synthesis", "unresolved"],
+        "properties": {
+            "synthesis": {
+                "type": "array", "maxItems": 64,
+                "items": {
+                    "type": "object", "additionalProperties": False,
+                    "required": ["claim", "evidence_ids"],
+                    "properties": {
+                        "claim": {"type": "string", "minLength": 1, "maxLength": 4000},
+                        "evidence_ids": {
+                            "type": "array", "minItems": 1, "maxItems": 12,
+                            "uniqueItems": True,
+                            "items": {"type": "string", "maxLength": 100},
+                        },
+                    },
+                },
+            },
+            "unresolved": {
+                "type": "array", "maxItems": 64,
+                "items": {"type": "string", "maxLength": 4000},
+            },
+        },
+    }
 
 
 def conversation_response_schema(*, planning_requested: bool = True) -> dict[str, Any]:
@@ -1626,6 +1712,141 @@ def conversation_runtime_settings(snapshot: dict[str, Any]) -> tuple[int, str]:
     )
 
 
+def release_ollama_model(model_tag: str) -> None:
+    """Unload one exact model tag after a bounded worker session."""
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    url = urllib.parse.urljoin(str(template["ollama_url"]).rstrip("/") + "/", "api/generate")
+    request = urllib.request.Request(
+        url,
+        data=json.dumps({"model": model_tag, "keep_alive": 0}).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            if response.status != 200:
+                raise ManagerError(f"Ollama model release failed: HTTP {response.status}")
+            response.read()
+    except OSError as exc:
+        raise ManagerError(f"Ollama model release failed for {model_tag}") from exc
+
+
+def assert_frozen_research_models(
+    lead_snapshot: dict[str, Any], worker_snapshot: dict[str, Any],
+) -> None:
+    """Fail if either immutable model tag now resolves to another digest."""
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    ollama_url = str(template["ollama_url"])
+    for label, snapshot in (("lead", lead_snapshot), ("worker", worker_snapshot)):
+        current = resolve_ollama_digest(ollama_url, str(snapshot["model_tag"]))
+        if current != snapshot.get("model_digest"):
+            raise ResearchError(f"RESEARCH_{label.upper()}_MODEL_CHANGED")
+
+
+def run_structured_research_session(
+    prompt: str, *, job_dir: Path, repository: Path, snapshot: dict[str, Any],
+    session_kind: str, response_format: dict[str, Any],
+    allowed_tools: list[str], max_steps: int,
+    allowed_scope: list[dict[str, str]] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Run one fresh bounded session and return its JSON plus durable trace."""
+    template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
+    session_dir = (
+        job_dir / "delegated-research-runtime" / session_kind
+        / f"session-{time.time_ns()}"
+    )
+    bridge_home = session_dir / "bridge"
+    executor_config = session_dir / "executor-config"
+    executor_state = session_dir / "executor-state"
+    for path in (bridge_home, executor_config, executor_state):
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    scope_path = session_dir / "read-scope.json"
+    if allowed_scope is not None:
+        atomic_write_immutable_json(scope_path, {
+            "schema_version": 1, "allowed_scope": allowed_scope,
+        })
+    port = free_local_port()
+    token_file = executor_config / "token"
+    executor_url = f"http://127.0.0.1:{port}"
+    num_ctx, keep_alive = conversation_runtime_settings(snapshot)
+    config_path = bridge_home / "config.json"
+    bridge_config = {
+        "ollama_url": template["ollama_url"], "model": snapshot["model_tag"],
+        "executor_url": executor_url, "token_file": str(token_file),
+        "project": str(repository),
+        "system_prompt": str(PROJECT_ROOT / snapshot["system_prompt"]),
+        "num_ctx": num_ctx, "max_steps": max_steps, "keep_alive": keep_alive,
+        "think": snapshot["think"], "require_tool_use": bool(allowed_tools),
+        "model_silence_timeout_seconds": 900,
+        "minimum_successful_tool_calls": 1 if allowed_tools else 0,
+        "allowed_tools": allowed_tools, "max_toolless_responses": 2,
+        "deterministic_reply_wrapper": False,
+        "completion_policy": "supervisor_only", "response_format": response_format,
+        "agent_role": session_kind,
+    }
+    runtime_options = snapshot.get("runtime_options") or {}
+    for field in RUNTIME_OPTION_FIELDS:
+        if runtime_options.get(field) is not None:
+            bridge_config[field] = runtime_options[field]
+    atomic_write_immutable_json(config_path, bridge_config)
+    executor_env = {
+        "MIKROFIX_EXECUTOR_ROOT": str(repository),
+        "MIKROFIX_EXECUTOR_CONFIG_DIR": str(executor_config),
+        "MIKROFIX_EXECUTOR_STATE_DIR": str(executor_state),
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    if allowed_scope is not None:
+        executor_env["MIKROFIX_EXECUTOR_READ_SCOPE"] = str(scope_path)
+    log = (session_dir / "executor.log").open("w", encoding="utf-8")
+    process = subprocess.Popen(
+        [str(PROJECT_ROOT / ".venv-server/bin/python"), "-m", "uvicorn",
+         "tools.local_executor.server:app", "--host", "127.0.0.1", "--port", str(port)],
+        cwd=PROJECT_ROOT, env={**os.environ, **executor_env},
+        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, text=True,
+    )
+    bridge = [str(PROJECT_ROOT / ".venv-server/bin/python"),
+              str(PROJECT_ROOT / "tools/mikrofix_bridge.py")]
+    bridge_env = {
+        "MIKROFIX_BRIDGE_HOME": str(bridge_home),
+        "MIKROFIX_BRIDGE_CONFIG": str(config_path), "CODEX_THREAD_ID": "",
+        "MIKROFIX_WORKSPACE": str(job_dir.parent.parent),
+    }
+    try:
+        wait_for_executor(executor_url, token_file, process)
+        bridge_job_id = command(
+            bridge + ["dispatch", "--name", session_kind, "--task", prompt],
+            cwd=PROJECT_ROOT, env=bridge_env, timeout=30,
+        ).splitlines()[-1]
+        run_bridge_monitor(
+            bridge, bridge_env, bridge_home, bridge_job_id,
+            idle_timeout_seconds=1200, progress_callback=progress_callback,
+        )
+        raw = command(
+            bridge + ["result", bridge_job_id], cwd=PROJECT_ROOT,
+            env=bridge_env, timeout=30,
+        ).strip()
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ManagerError(f"{session_kind} returned invalid JSON") from exc
+        if not isinstance(result, dict):
+            raise ManagerError(f"{session_kind} returned a non-object result")
+        trace_path = bridge_home / "jobs" / bridge_job_id / "trace.jsonl"
+        events = [
+            json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        return result, events
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        log.close()
+
+
 def run_lead_conversation(
     message: str, *, job_dir: Path, repository: Path,
     turns: list[dict[str, str]], lead_profile: str = "conversation_lead",
@@ -2270,12 +2491,13 @@ def prepare_plan(
         )
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()
-    if responder is run_plan_preparer and not (job_dir / "research-input.json").is_file():
+    has_research_input = (job_dir / "research-input.json").is_file()
+    if responder is run_plan_preparer and not has_research_input:
         raise ManagerError(
             "Ta pogovor nima nespremenljivega /research vhoda. Začni novo "
             "nalogo z /research."
         )
-    if responder is run_plan_preparer:
+    if has_research_input:
         try:
             approved_dossier = require_current_codex_approval(job_dir)
         except ResearchError as exc:
@@ -2724,15 +2946,309 @@ def start_research(
     lead_profile: str = "conversation_lead", model_tag: str | None = None,
     runtime_overrides: dict[str, Any] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    snapshot_factory: Callable[..., dict[str, Any]] = snapshot_for_new_task,
+    decomposition_runner: Callable[..., dict[str, Any]] | None = None,
+    worker_runner: Callable[..., tuple[dict[str, Any], Any]] | None = None,
+    review_runner: Callable[..., dict[str, Any]] | None = None,
+    synthesis_runner: Callable[..., dict[str, Any]] | None = None,
+    model_releaser: Callable[[str], None] = release_ollama_model,
+    model_identity_checker: Callable[[dict[str, Any], dict[str, Any]], None] = (
+        assert_frozen_research_models
+    ),
 ) -> dict[str, Any]:
-    """Start the only supported new-task path from an explicit envelope."""
+    """Run the delegated research entrypoint through an immutable dossier."""
     research_input = parse_research_envelope(envelope)
-    return start_conversation(
-        research_input["owner_request"], workspace=workspace,
-        lead_profile=lead_profile, model_tag=model_tag,
-        runtime_overrides=runtime_overrides, research_input=research_input,
-        progress_callback=progress_callback,
+    workspace = workspace.expanduser().resolve()
+    config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    repository = Path(config["repository"]).resolve()
+    lead_kwargs: dict[str, Any] = {"model_tag": model_tag}
+    if runtime_overrides:
+        lead_kwargs["runtime_overrides"] = runtime_overrides
+    lead_snapshot = snapshot_factory(lead_profile, **lead_kwargs)
+    worker_snapshot = snapshot_factory(
+        "research_worker", model_tag=research_input["worker_model"],
+        allow_disabled=True,
     )
+    if lead_snapshot.get("profile_id") != "conversation_lead":
+        raise ManagerError("Delegated research requires conversation_lead")
+    if worker_snapshot.get("profile_id") != "research_worker":
+        raise ManagerError("Delegated research requires research_worker")
+    run_id = new_run_id(workspace)
+    job_dir = workspace / "jobs" / run_id
+    job_dir.mkdir(parents=True, mode=0o700)
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    project_map = repository / "docs/local_agents/MIKROFIX_PROJECT_MAP.md"
+    canon_paths = sorted((repository / "docs/kanon").glob("*.md"))
+    try:
+        identity = repository_identity(
+            repository, project_map=project_map, canon_paths=canon_paths,
+        )
+        identity.update({
+            "lead_profile_snapshot_hash": lead_snapshot["profile_snapshot_hash"],
+            "worker_profile_snapshot_hash": worker_snapshot["profile_snapshot_hash"],
+        })
+        identity["research_identity_sha256"] = canonical_json_sha256(identity)
+        atomic_write_immutable_json(job_dir / "request.json", {
+            "schema_version": 1, "run_id": run_id,
+            "task": research_input["owner_request"], "parent_run_id": None,
+            "created_at": stamp, "lead_profile": lead_profile,
+            "kind": "delegated_research", "model": lead_snapshot["model"],
+            "model_tag": lead_snapshot["model_tag"],
+            "model_digest": lead_snapshot["model_digest"],
+            "profile_snapshot_hash": lead_snapshot["profile_snapshot_hash"],
+        })
+        atomic_write_immutable_json(job_dir / "research-input.json", research_input)
+        atomic_write_immutable_json(job_dir / "worker-profile-snapshot.json", worker_snapshot)
+        atomic_write_immutable_json(job_dir / "research-identity.json", identity)
+        write_profile_snapshot(job_dir, lead_snapshot)
+        write_system_prompt_snapshot(
+            job_dir, project_root=PROJECT_ROOT, snapshot=lead_snapshot,
+        )
+        initialize_task_lifecycle(
+            job_dir, task_id=run_id, conversation_id=run_id,
+            snapshot=lead_snapshot, input_text=research_input["owner_request"],
+            checkpoint=identity["repository_checkpoint"],
+        )
+        atomic_write_json(job_dir / "manager.json", {
+            "schema_version": 1, "run_id": run_id, "state": "CONVERSATION",
+            "research_state": "LEAD_DECOMPOSITION", "lead_profile": lead_profile,
+        })
+
+        def assert_identity() -> None:
+            assert_repository_identity(
+                identity, repository, project_map=project_map,
+                canon_paths=canon_paths,
+            )
+            model_identity_checker(lead_snapshot, worker_snapshot)
+
+        project_map_text = project_map.read_text(encoding="utf-8")[:20_000]
+        canon_digest = "\n".join(
+            f"{path.relative_to(repository)} sha256={sha256_text(path.read_text(encoding='utf-8'))}"
+            for path in canon_paths
+        )
+        decomposition_prompt = (
+            "Razdeli raziskavo na 1 do največ 3 zaporedne podnaloge. Sam ne "
+            "raziskuj kode. Vsaka podnaloga mora pokriti navedena vprašanja, "
+            "imeti izrecni file/directory obseg in zahtevane dokaze. Vrni samo "
+            "zahtevani JSON.\n\nZAHTEVA:\n" + research_input["owner_request"]
+            + "\n\nCODEX PROMPT:\n" + research_input["codex_research_prompt"]
+            + "\n\nVPRAŠANJA:\n" + json.dumps(
+                research_input["required_questions"], ensure_ascii=False,
+            )
+            + "\n\nZEMLJEVID:\n" + project_map_text
+            + "\n\nKANON HASHI:\n" + canon_digest
+        )
+        assert_identity()
+        if decomposition_runner is None:
+            raw_decomposition, _ = run_structured_research_session(
+                decomposition_prompt, job_dir=job_dir, repository=repository,
+                snapshot=lead_snapshot, session_kind="LEAD_DECOMPOSITION",
+                response_format=research_decomposition_schema(), allowed_tools=[],
+                max_steps=4, progress_callback=progress_callback,
+            )
+        else:
+            raw_decomposition = decomposition_runner(
+                decomposition_prompt, job_dir=job_dir, repository=repository,
+                snapshot=lead_snapshot,
+            )
+        if not isinstance(raw_decomposition, dict) or set(raw_decomposition) != {"tasks"}:
+            raise ResearchError("LEAD_DECOMPOSITION returned an invalid schema")
+        tasks = validate_task_set(
+            raw_decomposition["tasks"], repository=repository,
+            required_question_ids={
+                item["id"] for item in research_input["required_questions"]
+            },
+        )
+        atomic_write_immutable_json(job_dir / "research-tasks.json", {
+            "schema_version": 1, "tasks": tasks,
+        })
+        manager_state = json.loads((job_dir / "manager.json").read_text(encoding="utf-8"))
+        manager_state["research_state"] = "WORKERS_RUNNING"
+        atomic_write_json(job_dir / "manager.json", manager_state)
+
+        def execute_worker(request: dict[str, Any]):
+            assert_identity()
+            task = request["research_task"]
+            prompt = (
+                "Opravi samo spodnjo read-only podnalogo z dovoljenimi orodji. "
+                "Vsako dokazno branje označi po vrstnem redu READ-1, READ-2 ...; "
+                "v evidence_ids citiraj te oznake. Če potrebuješ pot zunaj "
+                "obsega, vrni SCOPE_EXPANSION_REQUIRED. Vrni samo zahtevani JSON.\n\n"
+                + json.dumps(request, ensure_ascii=False, sort_keys=True)
+            )
+            if worker_runner is not None:
+                return worker_runner(
+                    request, prompt=prompt, job_dir=job_dir,
+                    repository=repository, snapshot=worker_snapshot,
+                )
+            return run_structured_research_session(
+                prompt, job_dir=job_dir, repository=repository,
+                snapshot=worker_snapshot,
+                session_kind=f"RESEARCH_WORKER_{task['research_task_id']}_A{request['attempt']}",
+                response_format=worker_result_schema(),
+                allowed_tools=["project_status", "project_read", "project_list", "project_search"],
+                max_steps=30, allowed_scope=task["allowed_scope"],
+                progress_callback=progress_callback,
+            )
+
+        def prepare_worker_result(
+            request: dict[str, Any], result: dict[str, Any], events: Any,
+        ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            if not isinstance(events, list):
+                raise ResearchError("Worker session has no durable tool-result trace")
+            cards = evidence_cards_from_trace(
+                events, task=request["research_task"], attempt=request["attempt"],
+            )
+            if not cards:
+                raise ResearchError("Worker produced no evidence cards")
+            mapping = {
+                f"READ-{index}": card["evidence_id"]
+                for index, card in enumerate(cards, start=1)
+            }
+            normalized = json.loads(json.dumps(result))
+            for answer in normalized.get("answers", []):
+                answer["evidence_ids"] = [
+                    mapping.get(item, item) for item in answer.get("evidence_ids", [])
+                ]
+            for claim in normalized.get("claims", []):
+                claim["evidence_ids"] = [
+                    mapping.get(item, item) for item in claim.get("evidence_ids", [])
+                ]
+            expansion = normalized.get("scope_expansion")
+            if isinstance(expansion, dict):
+                expansion["evidence_ids"] = [
+                    mapping.get(item, item) for item in expansion.get("evidence_ids", [])
+                ]
+            return normalized, cards
+
+        def review_worker(task: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+            assert_identity()
+            attempt_dir = (
+                job_dir / "research-workers" / task["research_task_id"]
+                / f"attempt-{result['attempt']}"
+            )
+            cards = json.loads((attempt_dir / "issued-evidence.json").read_text())[
+                "evidence_cards"
+            ] if (attempt_dir / "issued-evidence.json").is_file() else []
+            prompt = (
+                "Presodi samo popolnost worker rezultata proti podnalogi. "
+                "ACCEPT je dovoljen le, če so odgovorjena vsa vprašanja in vsaka "
+                "trditev citira obstoječi evidence_id. Semantične dvome označi "
+                "REVISE. Vrni samo zahtevani JSON.\n\n"
+                + json.dumps({"task": task, "result": result, "evidence_cards": cards},
+                             ensure_ascii=False, sort_keys=True)
+            )
+            if review_runner is not None:
+                return review_runner(
+                    task, result, prompt=prompt, job_dir=job_dir,
+                    snapshot=lead_snapshot,
+                )
+            decision, _ = run_structured_research_session(
+                prompt, job_dir=job_dir, repository=repository,
+                snapshot=lead_snapshot, session_kind="LEAD_WORKER_REVIEW",
+                response_format=lead_review_schema(), allowed_tools=[], max_steps=4,
+                progress_callback=progress_callback,
+            )
+            return decision
+
+        def prepare_and_persist(
+            request: dict[str, Any], result: dict[str, Any], events: Any,
+        ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+            normalized, cards = prepare_worker_result(request, result, events)
+            attempt_dir = (
+                job_dir / "research-workers" / request["research_task"]["research_task_id"]
+                / f"attempt-{request['attempt']}"
+            )
+            atomic_write_immutable_json(attempt_dir / "issued-evidence.json", {
+                "schema_version": 1, "evidence_cards": cards,
+            })
+            return normalized, cards
+
+        accepted = run_sequential_workers(
+            root=job_dir, repository=repository, tasks=tasks,
+            worker_snapshot=worker_snapshot, worker_runner=execute_worker,
+            review_result=review_worker, release_model=model_releaser,
+            prepare_result=prepare_and_persist,
+        )
+        cards = [card for item in accepted for card in item["evidence_cards"]]
+        assert_identity()
+        gate = evidence_gate(
+            identity=identity, repository=repository, project_map=project_map,
+            canon_paths=canon_paths, tasks=tasks, accepted_results=accepted,
+            evidence_cards=cards,
+            required_question_ids={
+                item["id"] for item in research_input["required_questions"]
+            },
+        )
+        atomic_write_immutable_json(job_dir / "evidence-gate.json", gate)
+        synthesis_prompt = (
+            "Sestavi samo strukturirano sintezo sprejetih rezultatov. Vsaka "
+            "trditev mora citirati obstoječi evidence_id. Vrni samo JSON.\n\n"
+            + json.dumps({"accepted_results": accepted, "evidence_cards": cards},
+                         ensure_ascii=False, sort_keys=True)
+        )
+        if synthesis_runner is None:
+            synthesis, _ = run_structured_research_session(
+                synthesis_prompt, job_dir=job_dir, repository=repository,
+                snapshot=lead_snapshot, session_kind="LEAD_SYNTHESIS",
+                response_format=lead_synthesis_schema(), allowed_tools=[], max_steps=4,
+                progress_callback=progress_callback,
+            )
+        else:
+            synthesis = synthesis_runner(
+                accepted, cards, prompt=synthesis_prompt, job_dir=job_dir,
+                snapshot=lead_snapshot,
+            )
+        if not isinstance(synthesis, dict) or set(synthesis) != {"synthesis", "unresolved"}:
+            raise ResearchError("LEAD_SYNTHESIS returned an invalid schema")
+        dossier = create_dossier_revision(
+            root=job_dir, identity=identity,
+            required_questions=research_input["required_questions"],
+            accepted_results=accepted, evidence_cards=cards,
+            synthesis=synthesis["synthesis"], unresolved=synthesis["unresolved"],
+        )
+        manager_state["research_state"] = "AWAITING_CODEX_RESEARCH_REVIEW"
+        manager_state["research_dossier_sha256"] = dossier["dossier_sha256"]
+        atomic_write_json(job_dir / "manager.json", manager_state)
+        reply = json.dumps({
+            "status": "DOSSIER_READY",
+            "dossier_revision": dossier["dossier_revision"],
+            "dossier_sha256": dossier["dossier_sha256"],
+            "synthesis": dossier["synthesis"], "unresolved": dossier["unresolved"],
+            "next_command": f"/research-approved {dossier['dossier_sha256']}",
+        }, ensure_ascii=False, indent=2)
+        conversation = {
+            "schema_version": 1, "parent_run_id": run_id,
+            "lead_profile": lead_profile, "model_tag": lead_snapshot["model_tag"],
+            "turns": [
+                {"role": "owner", "content": research_input["owner_request"], "at": stamp},
+                {"role": "lead", "content": reply, "at": stamp,
+                 "kind": "research_dossier"},
+            ],
+            "active_run_id": "", "latest_plan_candidate": None,
+            "research_input_sha256": research_input["research_input_sha256"],
+            "research_manifests": [], "research_dossier_sha256": dossier["dossier_sha256"],
+            "updated_at": stamp,
+        }
+        atomic_write_json(job_dir / "conversation.json", conversation)
+        return conversation
+    except BaseException as exc:
+        if (job_dir / "lead-profile-snapshot.json").is_file():
+            try:
+                if read_task_state(job_dir)["state"] != TaskState.BLOCKED.value:
+                    transition_task(
+                        job_dir, TaskState.BLOCKED, snapshot=lead_snapshot,
+                        actor_type="manager", actor_id="manager",
+                        event_type="TASK_BLOCKED", details={"reason": str(exc)},
+                    )
+            except BaseException:
+                pass
+        atomic_write_json(job_dir / "manager.json", {
+            "schema_version": 1, "run_id": run_id, "state": "BLOCKED",
+            "research_state": "BLOCKED", "lead_profile": lead_profile,
+            "exact_reason": str(exc),
+        })
+        raise
 
 
 def new_run_id(workspace: Path) -> str:

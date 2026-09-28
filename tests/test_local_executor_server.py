@@ -22,6 +22,28 @@ class LocalExecutorSecurityTests(unittest.TestCase):
             server.safe_path("certs/example.p12")
         self.assertEqual(certificate.exception.status_code, 403)
 
+    def test_research_read_scope_allows_only_explicit_file_or_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "allowed").mkdir()
+            (root / "allowed/file.py").write_text("ok\n", encoding="utf-8")
+            (root / "exact.py").write_text("ok\n", encoding="utf-8")
+            (root / "blocked.py").write_text("no\n", encoding="utf-8")
+            manifest = root / "scope.json"
+            manifest.write_text(json.dumps({"allowed_scope": [
+                {"kind": "directory", "path": "allowed"},
+                {"kind": "file", "path": "exact.py"},
+            ]}), encoding="utf-8")
+            with (
+                mock.patch.object(server, "PROJECT_ROOT", root),
+                mock.patch.object(server, "READ_SCOPE_MANIFEST", str(manifest)),
+            ):
+                self.assertEqual(root / "allowed/file.py", server.safe_path("allowed/file.py"))
+                self.assertEqual(root / "exact.py", server.safe_path("exact.py"))
+                with self.assertRaises(HTTPException) as blocked:
+                    server.safe_path("blocked.py")
+                self.assertEqual(403, blocked.exception.status_code)
+
     def test_patch_rejects_binary_and_deletion(self):
         with self.assertRaises(HTTPException):
             server.validate_patch("GIT binary patch\n")

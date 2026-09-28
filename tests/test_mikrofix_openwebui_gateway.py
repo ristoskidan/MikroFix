@@ -35,7 +35,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             "turns": [{"role": "lead", "content": "Ugotovitev"}],
         }
         with mock.patch.object(
-            gateway, "start_conversation", return_value=conversation,
+            gateway, "start_research", return_value=conversation,
         ) as start, mock.patch.object(
             gateway, "installed_ollama_models", return_value=["deepseek-r1:14b"],
         ):
@@ -46,10 +46,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         self.assertIn("MF-LOCAL-2", result)
         self.assertEqual("conversation_lead", start.call_args.kwargs["lead_profile"])
         self.assertEqual("deepseek-r1:14b", start.call_args.kwargs["model_tag"])
-        self.assertEqual(
-            "Preveri napako",
-            start.call_args.kwargs["research_input"]["owner_request"],
-        )
+        self.assertIn("[OWNER_REQUEST]\nPreveri napako", start.call_args.args[0])
 
     def test_new_conversation_passes_selected_runtime_to_manager(self):
         conversation = {
@@ -57,7 +54,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             "turns": [{"role": "lead", "content": "Ugotovitev"}],
         }
         with mock.patch.object(
-            gateway, "start_conversation", return_value=conversation,
+            gateway, "start_research", return_value=conversation,
         ) as start, mock.patch.object(
             gateway, "installed_ollama_models",
             return_value=["qwen3:4b-thinking-2507-q8_0", "deepseek-r1:14b"],
@@ -234,7 +231,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
             )
 
     def test_plain_new_message_cannot_create_task(self):
-        with mock.patch.object(gateway, "start_conversation") as start:
+        with mock.patch.object(gateway, "start_research") as start:
             with self.assertRaisesRegex(ValueError, "samo z izrecnim /research"):
                 gateway.route_message(
                     "Add Details", "", "conversation_lead", "gpt-oss:20b",
@@ -242,7 +239,7 @@ class OpenWebUIGatewayTests(unittest.TestCase):
         start.assert_not_called()
 
     def test_malformed_research_envelope_fails_before_task_creation(self):
-        with mock.patch.object(gateway, "start_conversation") as start:
+        with mock.patch.object(gateway, "start_research") as start:
             with self.assertRaisesRegex(Exception, "zahteva .* natanko razdelke"):
                 gateway.route_message(
                     "/research samo besedilo", "", "conversation_lead",

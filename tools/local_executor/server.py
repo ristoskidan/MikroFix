@@ -48,6 +48,7 @@ TOKEN_FILE = CONFIG_DIR / "token"
 LEASE_FILE = STATE_DIR / "executor-lease.json"
 AUDIT_FILE = STATE_DIR / "executor-audit.jsonl"
 ALLOWED_FILES_MANIFEST = os.environ.get("MIKROFIX_EXECUTOR_ALLOWED_FILES", "").strip()
+READ_SCOPE_MANIFEST = os.environ.get("MIKROFIX_EXECUTOR_READ_SCOPE", "").strip()
 EXPECTED_RUN_ID = os.environ.get("MIKROFIX_EXECUTOR_RUN_ID", "").strip()
 EXPECTED_PLAN_SHA256 = os.environ.get("MIKROFIX_EXECUTOR_PLAN_SHA256", "").strip()
 EXPECTED_ALLOWED_FILES_SHA256 = os.environ.get(
@@ -157,6 +158,26 @@ def safe_path(user_path: str, *, require_file: bool = False) -> Path:
         raise HTTPException(status_code=403, detail="Path is not available to the executor")
     if path.suffix.casefold() in BLOCKED_SUFFIXES:
         raise HTTPException(status_code=403, detail="Sensitive file type is blocked")
+    if READ_SCOPE_MANIFEST:
+        try:
+            scope = json.loads(Path(READ_SCOPE_MANIFEST).read_text(encoding="utf-8"))
+            entries = scope["allowed_scope"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise HTTPException(status_code=500, detail="Invalid research read scope") from exc
+        relative_posix = relative.as_posix()
+        allowed = any(
+            isinstance(item, dict)
+            and (
+                item.get("kind") == "file" and item.get("path") == relative_posix
+                or item.get("kind") == "directory" and (
+                    relative_posix == item.get("path")
+                    or relative_posix.startswith(str(item.get("path")) + "/")
+                )
+            )
+            for item in entries
+        )
+        if not allowed:
+            raise HTTPException(status_code=403, detail="Path is outside research scope")
     if require_file and (not path.is_file() or path.suffix.casefold() not in READABLE_SUFFIXES):
         raise HTTPException(status_code=404, detail="Readable project file not found")
     return path

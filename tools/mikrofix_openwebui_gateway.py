@@ -25,7 +25,7 @@ try:
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
         model_runtime_settings, normalize_runtime_selection,
         parse_research_envelope, prepare_plan, resolve_runtime_selection,
-        start_conversation, talk,
+        start_research, talk,
     )
     from tools.mikrofix_local_manager_ui import DEFAULT_WORKSPACE
     from tools.mikrofix_local_web import dispatch_owner_command
@@ -37,7 +37,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         ManagerError, enabled_role_profiles, installed_ollama_models, model_runtime_presets,
         model_runtime_settings, normalize_runtime_selection,
         parse_research_envelope, prepare_plan, resolve_runtime_selection,
-        start_conversation, talk,
+        start_research, talk,
     )
     from mikrofix_local_manager_ui import DEFAULT_WORKSPACE  # type: ignore
     from mikrofix_local_web import dispatch_owner_command  # type: ignore
@@ -375,11 +375,10 @@ def route_message(
             worker_model = str(research_input["worker_model"])
             if worker_model not in installed_ollama_models():
                 raise ValueError(f"Izbrani worker model ni nameščen: {worker_model}")
-            conversation = start_conversation(
-                research_input["owner_request"], workspace=WORKSPACE,
+            conversation = start_research(
+                command.argument, workspace=WORKSPACE,
                 lead_profile=role_id, model_tag=selected_model,
                 runtime_overrides=selected_runtime,
-                research_input=research_input,
                 progress_callback=progress_callback,
             )
             reply, actual_run_id = _latest_reply(conversation)

@@ -172,6 +172,9 @@ def run_sequential_workers(
     worker_runner: Callable[[dict[str, Any]], dict[str, Any]],
     review_result: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]],
     release_model: Callable[[str], None],
+    prepare_result: Callable[
+        [dict[str, Any], dict[str, Any], Any], tuple[dict[str, Any], list[dict[str, Any]]]
+    ] | None = None,
 ) -> list[dict[str, Any]]:
     """Run one worker at a time, in fresh sessions, with at most three attempts."""
     results: list[dict[str, Any]] = []
@@ -198,7 +201,23 @@ def run_sequential_workers(
             _atomic_json(attempt_dir / "request.json", request, immutable=True)
             started = time.monotonic()
             try:
-                raw_result = worker_runner(request)
+                runner_output = worker_runner(request)
+                evidence_cards: list[dict[str, Any]] = []
+                evidence_payload: Any = None
+                if (
+                    isinstance(runner_output, tuple)
+                    and len(runner_output) == 2
+                    and isinstance(runner_output[0], dict)
+                ):
+                    raw_result, evidence_payload = runner_output
+                else:
+                    raw_result = runner_output
+                if not isinstance(raw_result, dict):
+                    raise ResearchError("Worker runner returned an invalid result")
+                if prepare_result is not None:
+                    raw_result, evidence_cards = prepare_result(
+                        request, raw_result, evidence_payload,
+                    )
                 result = validate_worker_result(raw_result, task=task, attempt=attempt)
                 _atomic_json(attempt_dir / "result.json", result, immutable=True)
                 decision = review_result(task, result)
@@ -211,6 +230,7 @@ def run_sequential_workers(
                     accepted = {
                         "task": task, "attempt": attempt, "attempt_id": attempt_id,
                         "result": result, "lead_decision": decision,
+                        "evidence_cards": evidence_cards,
                     }
                     break
                 if decision["decision"] == "BLOCKED":
