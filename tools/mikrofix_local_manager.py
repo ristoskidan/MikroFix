@@ -2006,7 +2006,11 @@ def talk(
         research_manifests = conversation.get("research_manifests")
         if not isinstance(research_manifests, list):
             research_manifests = []
-        if not planning_requested and (job_dir / "research-input.json").is_file():
+        if (
+            not planning_requested
+            and (job_dir / "research-input.json").is_file()
+            and not conversation.get("research_invalidated_by_goal_replacement")
+        ):
             research_input = load_research_input(job_dir)
             bridge_job_id = str(evidence.get("bridge_job_id") or "")
             trace_root = Path(str(evidence.get("trace_root") or ""))
@@ -2180,6 +2184,14 @@ def replace_conversation_goal(
             "content": clean_goal, "at": stamp,
         })
         conversation["turns"] = turns
+        if (job_dir / "research-input.json").is_file():
+            conversation["research_manifests"] = []
+            conversation["research_input_sha256"] = ""
+            conversation["latest_plan_candidate"] = None
+            conversation["research_invalidated_by_goal_replacement"] = {
+                "at": stamp,
+                "turn_index": len(turns),
+            }
         conversation["updated_at"] = stamp
         atomic_write_json(conversation_file, conversation)
     record_task_event(
@@ -2211,6 +2223,11 @@ def prepare_plan(
     if lifecycle["state"] != TaskState.DRAFT.value:
         raise ManagerError(
             f"Plan can only be prepared from DRAFT, not {lifecycle['state']}"
+        )
+    if conversation.get("research_invalidated_by_goal_replacement"):
+        raise ManagerError(
+            "Zamenjava cilja je razveljavila stare raziskovalne dokaze. "
+            "Za novi cilj začni novo nalogo z /research."
         )
     config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
     repository = Path(config["repository"]).resolve()

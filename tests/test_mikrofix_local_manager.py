@@ -185,6 +185,18 @@ class LocalManagerTests(unittest.TestCase):
             "app.py",
             manifests[0]["successful_evidence_calls"][0]["relative_paths"][0],
         )
+        replaced = manager.replace_conversation_goal(
+            conversation["parent_run_id"], "Novi cilj", workspace=self.workspace,
+        )
+        self.assertEqual([], replaced["research_manifests"])
+        self.assertEqual("", replaced["research_input_sha256"])
+        self.assertIsNone(replaced["latest_plan_candidate"])
+        with self.assertRaisesRegex(
+            manager.ManagerError, "razveljavila stare raziskovalne dokaze",
+        ):
+            manager.prepare_plan(
+                conversation["parent_run_id"], workspace=self.workspace,
+            )
         manifest_path = job_dir / conversation["research_manifests"][0]["path"]
         tampered = json.loads(manifest_path.read_text())
         tampered["report"] = "spremenjeno"

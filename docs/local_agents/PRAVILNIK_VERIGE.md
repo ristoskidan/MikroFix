@@ -62,13 +62,17 @@ lastnik -> Codexov omejeni raziskovalni prompt
   -> READY_FOR_CODEX_REVIEW ali BLOCKED
   -> Codex APPROVE / REVISE / REJECT
   -> Codex prenese isti preverjeni kandidat in ustvari commit
-  -> /codex-approved <SHA> preveri poti in končne blob hashe
+  -> /codex-approved <SHA> preveri trenutni čisti HEAD, poti in končne blob hashe
   -> APPLIED samo po potrjenem prenosu
 ```
 
 `/prepare-plan` nikoli ne pošlje načrta naprej. `/plan-dispatch` pošlje samo
 zadnjo nespremenjeno prikazano revizijo; če se je pogovor vmes spremenil, ukaz
 fail-closed zahteva nov `/prepare-plan`.
+
+`/replace-goal` razveljavi povezavo do vseh dotedanjih raziskovalnih dokazov.
+Novi cilj mora začeti novo `/research` nalogo; starega poročila ali manifesta ni
+dovoljeno ponovno uporabiti.
 
 ## 4. Kontekst po vlogah
 

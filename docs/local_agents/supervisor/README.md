@@ -218,7 +218,9 @@ next dispatch.
 where the owner really wants to replace, rather than discuss, the original
 goal. It is handled by trusted code without an LLM, appended to the audit trail
 and becomes the new PlanIntent root. Earlier owner turns are then superseded and
-cannot be cited as objective or decision sources.
+cannot be cited as objective or decision sources. For a `/research` task, goal
+replacement also invalidates every prior research-manifest binding and requires
+a new explicit `/research` task before planning.
 
 Open WebUI keeps the streamed request open for the two asynchronous owner
 checkpoints. `/plan-dispatch` returns in the originating conversation only

@@ -263,6 +263,16 @@ class CodexReviewTests(unittest.TestCase):
         ):
             record_codex_approved(self.workspace, "MF-ACTION", commit)
 
+    def test_approval_rejects_matching_commit_that_is_not_checked_out(self):
+        prepare_review(self.workspace, "MF-ACTION")
+        (self.repository / "app.py").write_text("after\n", encoding="utf-8")
+        self.git("add", "app.py")
+        self.git("commit", "-qm", "candidate exists but is not applied")
+        candidate = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", self.base_checkpoint)
+        with self.assertRaisesRegex(ReviewError, "not at the required checkpoint"):
+            record_codex_approved(self.workspace, "MF-ACTION", candidate)
+
     def test_prepare_review_requires_clean_repository_at_exact_base(self):
         (self.repository / "app.py").write_text("dirty\n", encoding="utf-8")
         with self.assertRaisesRegex(ReviewError, "must be clean"):

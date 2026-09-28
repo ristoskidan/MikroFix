@@ -221,7 +221,7 @@ def _verify_protected_repository(repository: Path, base_checkpoint: str) -> None
         text=True, timeout=30, check=False,
     )
     if head.returncode != 0 or head.stdout.strip().lower() != base_checkpoint.lower():
-        raise ReviewError("Protected repository is not at the candidate base checkpoint")
+        raise ReviewError("Protected repository is not at the required checkpoint")
     status = subprocess.run(
         ["git", "-C", str(repository), "status", "--porcelain=v1",
          "--untracked-files=all"],
@@ -540,6 +540,10 @@ def record_codex_approved(workspace: Path, run_id: str, commit: str) -> dict[str
                 "Approved commit paths or final blob hashes differ from the "
                 "reviewed candidate"
             )
+        # /codex-approved records an application that Codex already performed;
+        # merely naming an equivalent commit elsewhere in the object database
+        # must never advance the lifecycle to APPLIED.
+        _verify_protected_repository(context["repository"], resolved)
         approval_path = Path(review["package_path"]).parent / "codex-approval.json"
         approval = {
             "schema_version": 1,
