@@ -143,10 +143,13 @@ testi in ločeno potrjene pravno-davčne točke iz zgodovine odločitev.
 
 ## Lokalna agentska veriga
 
-Aktivna veriga ločuje vlogo od izbranega modela. `/research` zažene
-`conversation_lead` kot read-only raziskovalca in zamrzne njegovo poročilo ter
-dokazni manifest. `/prepare-plan` zažene ločeno sejo `plan_preparer`, ki nima
-skritega spomina raziskovalca in načrt izdela samo iz shranjenih artefaktov.
+Aktivna veriga ločuje vlogo od izbranega modela. `/research` ločeno zamrzne
+model vodje in lastnikovo izbiro worker modela. `conversation_lead` brez
+projektnih orodij razdeli vprašanja na največ tri podnaloge, zaporedni
+`research_workerji` pa v svežih read-only sejah zbirajo dokaze. Manager iz
+dejanskih rezultatov orodij izda evidence kartice in sestavi verzioniran dosje.
+`/prepare-plan` je dovoljen šele po Codexovi potrditvi točno trenutnega hasha
+dosjeja in zažene ločeno sejo `plan_preparer`, ki nima skritega spomina.
 Načrt se prikaže v istem uporabniškem pogovoru in ga je mogoče popraviti; šele
 `/plan-dispatch` ga pošlje v `plan_validator`, lastnikov `/approve-plan` pa
 dovoli izvedbo. Nato `executor` dela v omejenem izoliranem worktreeju,

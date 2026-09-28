@@ -162,8 +162,9 @@ signature. Only `num_ctx`, `num_predict`, `temperature`, `top_k`, `top_p`,
 contract controls such as GPU layers, threads, batching, stop sequences and
 output format remain manager-owned.
 
-Only an explicit `/research` envelope creates a new local task. It contains
-separate owner-request and Codex-research-prompt sections. Ordinary messages
+Only an explicit `/research` envelope creates a new local task. It contains a
+mandatory worker model plus separate owner-request, Codex-research-prompt and
+required-question sections. Ordinary messages
 may continue an existing conversation locked to the selected role and model,
 but cannot create an unrelated task. The role determines the prompt and contract;
 the model runtime registry determines technical defaults and safe per-model
@@ -174,10 +175,11 @@ silently change them.
 The assistant response contains the immutable `MF-LOCAL-...` id, which the gateway reads from
 subsequent chat history. A silent role or model change in the same conversation
 fails closed. Owner slash commands are parsed by trusted Python code before
-routing. The research session exposes only the `reply` contract and read-only
-tools. Its final report and tool evidence are stored as immutable hashed
-manifests. `/prepare-plan` starts a separate tool-less `plan_preparer` session
-from the stored owner request, Codex prompt, report and evidence manifests. It
+routing. The lead has no ordinary project tools. It delegates one to three
+bounded tasks to sequential fresh read-only worker sessions. Manager-issued
+evidence cards and accepted results form an immutable versioned dossier.
+`/prepare-plan` starts a separate tool-less `plan_preparer` only after
+`/research-approved <dossier_sha256>` and consumes that exact dossier. It
 stores and renders the exact plan revision but does not invoke the validator.
 The owner may discuss changes and repeat `/prepare-plan`; `/plan-dispatch`
 alone sends the latest displayed revision to the fixed validator and

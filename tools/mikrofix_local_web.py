@@ -34,7 +34,7 @@ try:
     )
     from tools.mikrofix_local_manager import (
         dispatch_plan, enabled_role_profiles, execute_run, installed_ollama_models,
-        reject_plan, replace_conversation_goal,
+        record_research_review, reject_plan, replace_conversation_goal,
     )
     from tools.mikrofix_owner_commands import (
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -56,7 +56,7 @@ except ModuleNotFoundError:  # direct execution adds tools/, not the repo root
     )
     from mikrofix_local_manager import (  # type: ignore[no-redef]
         dispatch_plan, enabled_role_profiles, execute_run, installed_ollama_models,
-        reject_plan, replace_conversation_goal,
+        record_research_review, reject_plan, replace_conversation_goal,
     )
     from mikrofix_owner_commands import (  # type: ignore[no-redef]
         OwnerCommand, OwnerCommandError, help_text, parse_owner_command,
@@ -152,7 +152,10 @@ def allowed_owner_commands(job: dict[str, Any]) -> list[str]:
     allowed = ["/status", "/help", "/codex-opinion"]
     state = job["state"]
     if state == "CONVERSATION" and not job.get("action_run_id"):
-        allowed.extend(("/prepare-plan", "/plan-dispatch", "/replace-goal"))
+        allowed.extend((
+            "/prepare-plan", "/plan-dispatch", "/replace-goal",
+            "/research-approved", "/research-revise", "/research-rejected",
+        ))
     if state == "READY_FOR_OWNER_LEASE":
         allowed.extend(("/approve-plan", "/reject-plan"))
     if state == "READY_FOR_CODEX_REVIEW":
@@ -198,6 +201,37 @@ def dispatch_owner_command(
         return {
             "command": command.name, "accepted": True,
             "message": "Lokalni vodja pripravlja izvedbeni načrt.",
+        }
+    if command.name in {
+        "/research-approved", "/research-revise", "/research-rejected",
+    }:
+        parts = command.argument.split(None, 2)
+        dossier_sha = parts[0] if parts else ""
+        if not re.fullmatch(r"[0-9a-f]{64}", dossier_sha):
+            raise ValueError("Raziskovalni verdict zahteva veljaven SHA-256 dosjeja")
+        if command.name == "/research-approved":
+            if len(parts) != 1:
+                raise ValueError("/research-approved sprejme samo SHA-256 dosjeja")
+            verdict, task_id, reason = "APPROVE", None, ""
+        elif command.name == "/research-revise":
+            if len(parts) != 3 or parts[1] not in {"R1", "R2", "R3"}:
+                raise ValueError("/research-revise zahteva SHA-256, R1-R3 in razlog")
+            verdict, task_id, reason = "REVISE", parts[1], parts[2]
+        else:
+            if len(parts) < 2:
+                raise ValueError("/research-rejected zahteva SHA-256 in razlog")
+            verdict, task_id, reason = "REJECT", None, command.argument.split(None, 1)[1]
+        record_research_review(
+            job["run_id"], workspace=workspace, dossier_sha256=dossier_sha,
+            verdict=verdict, research_task_id=task_id, reason=reason,
+        )
+        return {
+            "command": command.name, "accepted": True,
+            "message": {
+                "APPROVE": "Trenutni raziskovalni dosje je Codex potrdil; /prepare-plan je dovoljen.",
+                "REVISE": "Zahtevana je nova ciljna revizija izbrane podnaloge.",
+                "REJECT": "Raziskava je zavrnjena in blokirana.",
+            }[verdict],
         }
     if command.name == "/plan-dispatch":
         if wait:

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import time
 from typing import Any
 
 try:
@@ -220,4 +221,72 @@ def create_dossier_revision(
         "schema_version": 1, "dossier_revision": revision,
         "dossier_sha256": dossier["dossier_sha256"], "path": relative,
     })
+    return dossier
+
+
+def record_codex_research_verdict(
+    *, root: Path, dossier_sha256: str, verdict: str,
+    research_task_id: str | None = None, reason: str = "",
+) -> dict[str, Any]:
+    """Bind an immutable Codex verdict to the current exact dossier revision."""
+    if verdict not in {"APPROVE", "REVISE", "REJECT"}:
+        raise ResearchError("Unknown Codex research verdict")
+    pointer_path = root / "research-dossiers/current.json"
+    if not pointer_path.is_file():
+        raise ResearchError("No current research dossier exists")
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    if pointer.get("dossier_sha256") != dossier_sha256:
+        raise ResearchError("Codex verdict does not match the current dossier")
+    if verdict == "REVISE" and (
+        research_task_id not in {"R1", "R2", "R3"} or not reason.strip()
+    ):
+        raise ResearchError("REVISE requires a task id and reason")
+    if verdict == "REJECT" and not reason.strip():
+        raise ResearchError("REJECT requires a reason")
+    if verdict == "APPROVE" and (research_task_id is not None or reason.strip()):
+        raise ResearchError("APPROVE accepts only the dossier hash")
+    core = {
+        "schema_version": 1, "dossier_sha256": dossier_sha256,
+        "verdict": verdict, "research_task_id": research_task_id,
+        "reason": reason.strip(),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    artifact = {**core, "verdict_sha256": sha256_value(core)}
+    verdict_path = (
+        root / "research-dossiers/verdicts"
+        / f"{dossier_sha256[:12]}-{artifact['verdict_sha256'][:12]}.json"
+    )
+    _immutable_json(verdict_path, artifact)
+    _atomic_json(root / "research-dossiers/current-verdict.json", {
+        "schema_version": 1,
+        "dossier_sha256": dossier_sha256,
+        "verdict": verdict,
+        "verdict_sha256": artifact["verdict_sha256"],
+        "path": str(verdict_path.relative_to(root / "research-dossiers")),
+    })
+    return artifact
+
+
+def require_current_codex_approval(root: Path) -> dict[str, Any]:
+    dossier_pointer = root / "research-dossiers/current.json"
+    verdict_pointer = root / "research-dossiers/current-verdict.json"
+    if not dossier_pointer.is_file() or not verdict_pointer.is_file():
+        raise ResearchError("/prepare-plan requires a Codex-approved research dossier")
+    pointer = json.loads(dossier_pointer.read_text(encoding="utf-8"))
+    dossier_path = (root / "research-dossiers" / str(pointer.get("path") or "")).resolve()
+    try:
+        dossier_path.relative_to((root / "research-dossiers").resolve())
+    except ValueError as exc:
+        raise ResearchError("Research dossier pointer escapes its root") from exc
+    dossier = json.loads(dossier_path.read_text(encoding="utf-8"))
+    core = dict(dossier)
+    stored_hash = core.pop("dossier_sha256", None)
+    if stored_hash != sha256_value(core) or stored_hash != pointer.get("dossier_sha256"):
+        raise ResearchError("Current research dossier hash is invalid")
+    verdict = json.loads(verdict_pointer.read_text(encoding="utf-8"))
+    if (
+        verdict.get("verdict") != "APPROVE"
+        or verdict.get("dossier_sha256") != dossier.get("dossier_sha256")
+    ):
+        raise ResearchError("The current research dossier is not Codex-approved")
     return dossier

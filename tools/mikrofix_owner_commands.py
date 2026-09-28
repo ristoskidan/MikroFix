@@ -44,6 +44,9 @@ REQUIRED_ARGUMENT = frozenset({
     "/codex-approved",
     "/replace-goal",
     "/research",
+    "/research-approved",
+    "/research-revise",
+    "/research-rejected",
 })
 OPTIONAL_ARGUMENT = frozenset({"/codex-opinion", "/reject-plan"})
 COMMAND_NAMES = NO_ARGUMENT | REQUIRED_ARGUMENT | OPTIONAL_ARGUMENT
@@ -70,6 +73,9 @@ def parse_owner_command(message: str) -> OwnerCommand | None:
             "/codex-approved": "commit SHA",
             "/replace-goal": "nov potrjeni cilj",
             "/research": "worker_model=<tag> ter razdelki OWNER_REQUEST, CODEX_RESEARCH_PROMPT in REQUIRED_QUESTIONS",
+            "/research-approved": "SHA-256 dosjeja",
+            "/research-revise": "SHA-256 dosjeja, ID podnaloge in razlog",
+            "/research-rejected": "SHA-256 dosjeja in razlog",
         }[name]
         raise OwnerCommandError(f"Po ukazu {name} napiši {description}.")
     return OwnerCommand(name=name, argument=argument)
@@ -79,6 +85,9 @@ def help_text() -> str:
     return "\n".join((
         "Razpoložljivi ukazi:",
         "/research <ovojnica> — začne novo, izrecno read-only raziskavo",
+        "/research-approved <sha256> — Codex potrdi trenutno revizijo dosjeja",
+        "/research-revise <sha256> <R1-R3> <razlog> — zahteva ciljni novi worker run",
+        "/research-rejected <sha256> <razlog> — dokončno blokira raziskavo",
         "/prepare-plan — pripravi izvedbeni načrt iz pogovora",
         "/plan-dispatch — pošlje naprej zadnjo prikazano revizijo načrta",
         "/replace-goal <nov cilj> — izrecno zamenja glavni cilj pogovora",

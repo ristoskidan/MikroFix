@@ -42,6 +42,9 @@ try:
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
         ResearchError, validate_questions,
     )
+    from tools.mikrofix_research_dossier import (
+        record_codex_research_verdict, require_current_codex_approval,
+    )
 except ModuleNotFoundError:
     from mikrofix_codex_review import (  # type: ignore[no-redef]
         prepare_review, record_codex_approved, record_codex_rejected,
@@ -64,6 +67,9 @@ except ModuleNotFoundError:
     from mikrofix_research import (  # type: ignore[no-redef]
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
         ResearchError, validate_questions,
+    )
+    from mikrofix_research_dossier import (  # type: ignore[no-redef]
+        record_codex_research_verdict, require_current_codex_approval,
     )
 
 
@@ -422,12 +428,18 @@ def build_plan_intent(
     research_binding: dict[str, Any] = {}
     if job_dir is not None:
         research_input = load_research_input(job_dir)
-        manifests = load_research_manifests(job_dir, conversation)
+        try:
+            dossier = require_current_codex_approval(job_dir)
+        except ResearchError as exc:
+            raise ManagerError(str(exc)) from exc
+        if (
+            dossier.get("research_identity", {}).get("repository_checkpoint")
+            != checkpoint
+        ):
+            raise ManagerError("STALE: research dossier checkpoint differs from repository")
         research_binding = {
             "research_input_sha256": research_input["research_input_sha256"],
-            "research_manifest_sha256s": [
-                manifest["manifest_sha256"] for manifest in manifests
-            ],
+            "research_dossier_sha256": dossier["dossier_sha256"],
         }
     core = {
         "schema_version": 1,
@@ -1804,17 +1816,8 @@ def plan_preparer_snapshot(research_snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def plan_preparer_prompt(
     *, plan_intent: dict[str, Any], research_input: dict[str, Any],
-    manifests: list[dict[str, Any]], repository_snapshot: str,
+    dossier: dict[str, Any], repository_snapshot: str,
 ) -> str:
-    reports = [
-        {
-            "manifest_sha256": manifest["manifest_sha256"],
-            "report": manifest["report"],
-            "report_sha256": manifest["report_sha256"],
-            "successful_evidence_calls": manifest["successful_evidence_calls"],
-        }
-        for manifest in manifests
-    ]
     return (
         "Pripravi samo prikazni kandidat izvedbenega načrta iz spodnjih "
         "eksplicitnih artefaktov. Nimaš dostopa do spomina raziskovalca in ne "
@@ -1825,8 +1828,8 @@ def plan_preparer_prompt(
         + research_input["codex_research_prompt"]
         + "\n\nZAMRZNJENI PLAN INTENT:\n"
         + json.dumps(plan_intent, ensure_ascii=False, sort_keys=True)
-        + "\n\nRAZISKOVALNA POROČILA IN DOKAZNI MANIFESTI:\n"
-        + json.dumps(reports, ensure_ascii=False, sort_keys=True)
+        + "\n\nCODEXOVO POTRJENI RAZISKOVALNI DOSJE:\n"
+        + json.dumps(dossier, ensure_ascii=False, sort_keys=True)
         + "\n\nVrni samo objekt po zahtevani strukturirani shemi."
     )
 
@@ -1846,14 +1849,11 @@ def run_plan_preparer(
     research_snapshot = lead_snapshot or read_profile_snapshot(job_dir)
     snapshot = plan_preparer_snapshot(research_snapshot)
     research_input = load_research_input(job_dir)
-    conversation = json.loads((job_dir / "conversation.json").read_text(encoding="utf-8"))
-    manifests = load_research_manifests(job_dir, conversation)
+    dossier = require_current_codex_approval(job_dir)
     if plan_intent.get("research_input_sha256") != research_input["research_input_sha256"]:
         raise ManagerError("Plan intent is not bound to the research input")
-    if plan_intent.get("research_manifest_sha256s") != [
-        manifest["manifest_sha256"] for manifest in manifests
-    ]:
-        raise ManagerError("Plan intent is not bound to the research manifests")
+    if plan_intent.get("research_dossier_sha256") != dossier["dossier_sha256"]:
+        raise ManagerError("Plan intent is not bound to the approved research dossier")
 
     template = json.loads(BRIDGE_TEMPLATE.read_text(encoding="utf-8"))
     intent_hash = str(plan_intent["intent_sha256"])
@@ -1928,7 +1928,7 @@ def run_plan_preparer(
     }
     prompt = plan_preparer_prompt(
         plan_intent=plan_intent, research_input=research_input,
-        manifests=manifests, repository_snapshot=repository_orientation(repository),
+        dossier=dossier, repository_snapshot=repository_orientation(repository),
     )
     try:
         wait_for_executor(executor_url, token_file, process)
@@ -2275,6 +2275,14 @@ def prepare_plan(
             "Ta pogovor nima nespremenljivega /research vhoda. Začni novo "
             "nalogo z /research."
         )
+    if responder is run_plan_preparer:
+        try:
+            approved_dossier = require_current_codex_approval(job_dir)
+        except ResearchError as exc:
+            raise ManagerError(str(exc)) from exc
+        conversation["approved_research_dossier_sha256"] = approved_dossier[
+            "dossier_sha256"
+        ]
     plan_intent = build_plan_intent(
         conversation, repository=repository,
         job_dir=job_dir if (job_dir / "research-input.json").is_file() else None,
@@ -2325,6 +2333,36 @@ def prepare_plan(
         plan_candidate_path=candidate_path,
         progress_callback=progress_callback,
     )
+
+
+def record_research_review(
+    parent_run_id: str, *, dossier_sha256: str, verdict: str,
+    research_task_id: str | None = None, reason: str = "",
+    workspace: Path = DEFAULT_WORKSPACE,
+) -> dict[str, Any]:
+    """Record a Codex semantic verdict for exactly the current dossier."""
+    workspace = workspace.expanduser().resolve()
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", parent_run_id):
+        raise ManagerError("Unsafe parent run id")
+    job_dir = workspace / "jobs" / parent_run_id
+    try:
+        verdict_record = record_codex_research_verdict(
+            root=job_dir, dossier_sha256=dossier_sha256, verdict=verdict,
+            research_task_id=research_task_id, reason=reason,
+        )
+    except ResearchError as exc:
+        raise ManagerError(str(exc)) from exc
+    manager_file = job_dir / "manager.json"
+    manager = json.loads(manager_file.read_text(encoding="utf-8"))
+    manager["research_state"] = {
+        "APPROVE": "CODEX_RESEARCH_APPROVED",
+        "REVISE": "RESEARCH_REVISION_REQUIRED",
+        "REJECT": "BLOCKED",
+    }[verdict]
+    manager["research_dossier_sha256"] = dossier_sha256
+    manager["research_verdict_sha256"] = verdict_record["verdict_sha256"]
+    atomic_write_json(manager_file, manager)
+    return verdict_record
 
 
 def dispatch_plan(

@@ -146,6 +146,44 @@ class ResearchDossierTests(unittest.TestCase):
         old_file = next((self.root / "research-dossiers").glob("revision-0001-*.json"))
         self.assertFalse(old_file.stat().st_mode & stat.S_IWUSR)
 
+    def test_only_current_exact_codex_approval_unlocks_dossier(self):
+        card = dossier.evidence_cards_from_trace(self.events, task=self.task, attempt=1)[0]
+        accepted = self.accepted(card["evidence_id"])
+        first = dossier.create_dossier_revision(
+            root=self.root, identity=self.identity,
+            required_questions=[{"id": "Q1", "question": "Where?"}],
+            accepted_results=accepted, evidence_cards=[card],
+            synthesis=[{"claim": "Write", "evidence_ids": [card["evidence_id"]]}],
+            unresolved=[],
+        )
+        dossier.record_codex_research_verdict(
+            root=self.root, dossier_sha256=first["dossier_sha256"], verdict="APPROVE",
+        )
+        self.assertEqual(
+            first["dossier_sha256"],
+            dossier.require_current_codex_approval(self.root)["dossier_sha256"],
+        )
+        second = dossier.create_dossier_revision(
+            root=self.root, identity=self.identity,
+            required_questions=[{"id": "Q1", "question": "Where?"}],
+            accepted_results=accepted, evidence_cards=[card],
+            synthesis=[{"claim": "Write", "evidence_ids": [card["evidence_id"]]}],
+            unresolved=["new gap"],
+        )
+        with self.assertRaisesRegex(dossier.ResearchError, "not Codex-approved"):
+            dossier.require_current_codex_approval(self.root)
+        with self.assertRaisesRegex(dossier.ResearchError, "current dossier"):
+            dossier.record_codex_research_verdict(
+                root=self.root, dossier_sha256=first["dossier_sha256"], verdict="REJECT",
+                reason="old revision",
+            )
+        dossier.record_codex_research_verdict(
+            root=self.root, dossier_sha256=second["dossier_sha256"], verdict="REVISE",
+            research_task_id="R1", reason="Need caller proof",
+        )
+        with self.assertRaisesRegex(dossier.ResearchError, "not Codex-approved"):
+            dossier.require_current_codex_approval(self.root)
+
 
 if __name__ == "__main__":
     unittest.main()
