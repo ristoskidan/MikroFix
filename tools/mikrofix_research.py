@@ -41,6 +41,7 @@ ALLOWED_TEXT_SUFFIXES = frozenset({
 })
 ALLOWED_EXTENSIONLESS = frozenset({"Makefile", "Dockerfile", "LICENSE"})
 DENIED_NAMES = frozenset({".env", "id_rsa", "id_ed25519", "credentials", "token"})
+SECRET_SCOPE_SUFFIXES = (".pem", ".key", ".p12", ".pfx")
 
 
 def canonical_json(value: Any) -> bytes:
@@ -87,12 +88,22 @@ def repository_identity(
             continue
         metadata, raw_path = record.split(b"\t", 1)
         mode, object_type, object_oid = metadata.decode("ascii").split()
+        relative = raw_path.decode("utf-8", errors="strict")
+        if _has_forbidden_scope_metadata(relative):
+            entries.append({
+                "path": relative,
+                "type": object_type,
+                "mode": mode,
+                "git_object_oid": object_oid,
+                "content_sha256": None,
+            })
+            continue
         content = _run_git(
             repository, ["cat-file", object_type, object_oid], binary=True,
         )
         assert isinstance(content, bytes)
         entries.append({
-            "path": raw_path.decode("utf-8", errors="strict"),
+            "path": relative,
             "type": object_type,
             "mode": mode,
             "content_sha256": hashlib.sha256(content).hexdigest(),
@@ -144,12 +155,21 @@ def _canonical_relative_path(raw: str) -> str:
         raise ResearchError(f"Scope path is not normalized POSIX: {raw}")
     if normalized == "." or normalized.startswith(".git/") or normalized == ".git":
         raise ResearchError(f"Forbidden scope path: {raw}")
-    lowered = {part.lower() for part in path.parts}
-    if lowered & DENIED_NAMES or any(
-        part.endswith((".pem", ".key", ".p12", ".pfx")) for part in lowered
-    ):
+    if _has_forbidden_scope_metadata(raw):
         raise ResearchError(f"Secret-bearing scope path is forbidden: {raw}")
     return normalized
+
+
+def _has_forbidden_scope_metadata(raw: str) -> bool:
+    """Classify secret-bearing names without opening or resolving the path."""
+    parts = tuple(part.lower() for part in PurePosixPath(raw).parts)
+    return any(
+        part in DENIED_NAMES
+        or PurePosixPath(part).stem in DENIED_NAMES
+        or part.startswith(".env")
+        or part.endswith(SECRET_SCOPE_SUFFIXES)
+        for part in parts
+    )
 
 
 def _assert_no_symlink(repository: Path, relative: str) -> Path:
@@ -184,7 +204,13 @@ def build_scope_catalog(repository: Path, checkpoint: str) -> dict[str, Any]:
             continue
         metadata, raw_path = record.split(b"\t", 1)
         mode, object_type, _object_oid = metadata.decode("ascii").split()
-        relative = _canonical_relative_path(raw_path.decode("utf-8", errors="strict"))
+        raw_relative = raw_path.decode("utf-8", errors="strict")
+        # Filter on Git path metadata before canonicalization or any operation
+        # that could inspect file contents. Model-proposed paths still pass
+        # through the strict canonical validator below.
+        if _has_forbidden_scope_metadata(raw_relative):
+            continue
+        relative = _canonical_relative_path(raw_relative)
         if mode == "120000":
             rejected_symlinks.append(relative)
             continue

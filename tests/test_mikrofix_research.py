@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "tools" / "mikrofix_research.py"
@@ -149,6 +150,51 @@ class ResearchContractTests(unittest.TestCase):
         ], catalog, checkpoint=checkpoint)
         self.assertEqual("src", details[0]["allowed_parent_directory"])
         self.assertIn("src/app.py", details[0]["nearest_valid_files"])
+
+    def test_catalog_skips_tracked_forbidden_paths_without_reading_them(self):
+        (self.repository / "private").mkdir()
+        (self.repository / "private/ca-bundle.pem").write_text(
+            "forbidden fixture\n", encoding="utf-8",
+        )
+        (self.repository / "certs").mkdir()
+        (self.repository / "certs/public.cer").write_text(
+            "ordinary certificate fixture\n", encoding="utf-8",
+        )
+        (self.repository / "certs/root.crt").write_text(
+            "ordinary certificate fixture\n", encoding="utf-8",
+        )
+        self.git("add", "private/ca-bundle.pem", "certs/public.cer", "certs/root.crt")
+        self.git("commit", "-qm", "certificate fixtures")
+        checkpoint = self.git("rev-parse", "HEAD")
+        calls = []
+        original_run_git = research._run_git
+        forbidden_oid = self.git("rev-parse", f"{checkpoint}:private/ca-bundle.pem")
+
+        def recording_run_git(repository, arguments, **kwargs):
+            calls.append(tuple(arguments))
+            return original_run_git(repository, arguments, **kwargs)
+
+        with mock.patch.object(research, "_run_git", side_effect=recording_run_git):
+            catalog = research.build_scope_catalog(self.repository, checkpoint)
+        serialized = json.dumps(catalog, sort_keys=True)
+        self.assertNotIn("ca-bundle.pem", serialized)
+        self.assertNotIn("private", catalog["directories"])
+        self.assertFalse(any(call and call[0] == "cat-file" for call in calls))
+        identity_calls = []
+
+        def recording_identity_run_git(repository, arguments, **kwargs):
+            identity_calls.append(tuple(arguments))
+            return original_run_git(repository, arguments, **kwargs)
+
+        with mock.patch.object(
+            research, "_run_git", side_effect=recording_identity_run_git,
+        ):
+            self.identity()
+        self.assertNotIn(("cat-file", "blob", forbidden_oid), identity_calls)
+        with self.assertRaisesRegex(research.ResearchError, "forbidden"):
+            research.normalize_scope_from_catalog([
+                {"kind": "file", "path": "private/ca-bundle.pem"},
+            ], catalog, checkpoint=checkpoint)
 
     def test_catalog_and_validation_require_the_same_frozen_checkpoint(self):
         checkpoint = self.git("rev-parse", "HEAD")

@@ -24,8 +24,12 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
             "tests/test_app.py": "# test\n",
             "docs/local_agents/MIKROFIX_PROJECT_MAP.md": "app.py: application\n",
             "docs/kanon/00_KAZALO.md": "canon\n",
+            "certs/public.cer": "ordinary certificate fixture\n",
+            "certs/root.crt": "ordinary certificate fixture\n",
+            "certs/furs-test-ca-bundle.pem": "forbidden fixture\n",
         }
         for relative, content in files.items():
+            (self.repository / relative).parent.mkdir(parents=True, exist_ok=True)
             (self.repository / relative).write_text(content, encoding="utf-8")
         self.git("init", "-q")
         self.git("config", "user.email", "test@example.invalid")
@@ -266,6 +270,7 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
         self.assertLessEqual(len(compact["relevant_existing_files"]), 1)
         self.assertNotIn("files", compact)
         self.assertEqual(checkpoint, compact["repository_checkpoint"])
+        self.assertNotIn(".pem", json.dumps(compact, sort_keys=True))
 
     def test_worker_schema_checkpoint_change_and_fourth_attempt_fail_closed(self):
         def invalid_worker(request, **kwargs):
