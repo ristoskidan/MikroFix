@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -32,6 +33,7 @@ MAX_REASON_CHARS = 4_000
 MAX_WORKER_STEPS = 30
 MAX_WORKER_NUM_PREDICT = 12_288
 MAX_WORKER_SILENCE_SECONDS = 900
+MAX_SCOPE_CATALOG_FILES = 10_000
 ALLOWED_TEXT_SUFFIXES = frozenset({
     ".py", ".pyi", ".md", ".txt", ".json", ".toml", ".yaml", ".yml",
     ".sql", ".html", ".css", ".js", ".ts", ".tsx", ".jsx", ".ini",
@@ -138,6 +140,8 @@ def _canonical_relative_path(raw: str) -> str:
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ResearchError(f"Unsafe scope path: {raw}")
     normalized = path.as_posix()
+    if raw != normalized:
+        raise ResearchError(f"Scope path is not normalized POSIX: {raw}")
     if normalized == "." or normalized.startswith(".git/") or normalized == ".git":
         raise ResearchError(f"Forbidden scope path: {raw}")
     lowered = {part.lower() for part in path.parts}
@@ -159,6 +163,139 @@ def _assert_no_symlink(repository: Path, relative: str) -> Path:
     except ValueError as exc:
         raise ResearchError(f"Scope escapes repository: {relative}") from exc
     return current
+
+
+def build_scope_catalog(repository: Path, checkpoint: str) -> dict[str, Any]:
+    """Build a bounded read-scope catalog from one immutable Git tree."""
+    repository = repository.resolve()
+    checkpoint = str(checkpoint).lower()
+    if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", checkpoint):
+        raise ResearchError("Scope catalog requires an exact Git checkpoint")
+    tree_oid = str(_run_git(repository, ["rev-parse", f"{checkpoint}^{{tree}}"])).lower()
+    raw_tree = _run_git(
+        repository, ["ls-tree", "-r", "-z", checkpoint], binary=True,
+    )
+    assert isinstance(raw_tree, bytes)
+    files: list[str] = []
+    directories: set[str] = set()
+    rejected_symlinks: list[str] = []
+    for record in raw_tree.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        mode, object_type, _object_oid = metadata.decode("ascii").split()
+        relative = _canonical_relative_path(raw_path.decode("utf-8", errors="strict"))
+        if mode == "120000":
+            rejected_symlinks.append(relative)
+            continue
+        if object_type != "blob" or mode not in {"100644", "100755"}:
+            continue
+        path = PurePosixPath(relative)
+        if path.suffix.lower() not in ALLOWED_TEXT_SUFFIXES and path.name not in ALLOWED_EXTENSIONLESS:
+            continue
+        files.append(relative)
+        parent = path.parent
+        while parent.as_posix() != ".":
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    if len(files) > MAX_SCOPE_CATALOG_FILES:
+        raise ResearchError("Research scope catalog exceeds its bounded file limit")
+    files.sort()
+    core = {
+        "schema_version": 1,
+        "repository_checkpoint": checkpoint,
+        "repository_tree_oid": tree_oid,
+        "files": files,
+        "directories": sorted(directories),
+        "rejected_symlinks": sorted(rejected_symlinks),
+    }
+    return {**core, "catalog_sha256": sha256_value(core)}
+
+
+def normalize_scope_from_catalog(
+    entries: Any, catalog: dict[str, Any], *, checkpoint: str,
+) -> list[dict[str, str]]:
+    """Validate scope only against the catalog made from the locked checkpoint."""
+    if catalog.get("repository_checkpoint") != str(checkpoint).lower():
+        raise ResearchError("Scope catalog checkpoint does not match research checkpoint")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_SCOPE_ENTRIES:
+        raise ResearchError("allowed_scope must contain 1..32 entries")
+    files = set(catalog.get("files") or [])
+    directories = set(catalog.get("directories") or [])
+    symlinks = set(catalog.get("rejected_symlinks") or [])
+    normalized: list[dict[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict) or set(entry) != {"kind", "path"}:
+            raise ResearchError("Each scope entry requires exactly kind and path")
+        kind = entry["kind"]
+        if kind not in {"file", "directory"}:
+            raise ResearchError("Scope kind must be file or directory")
+        relative = _canonical_relative_path(entry["path"])
+        if relative in symlinks:
+            raise ResearchError(f"Symlink scope is forbidden: {relative}")
+        expected = files if kind == "file" else directories
+        if relative not in expected:
+            raise ResearchError(f"Scoped {kind} does not exist at checkpoint: {relative}")
+        normalized.append({"kind": kind, "path": relative})
+    normalized.sort(key=lambda item: (item["path"], item["kind"]))
+    if len({(item["kind"], item["path"]) for item in normalized}) != len(normalized):
+        raise ResearchError("Duplicate scope entries are forbidden")
+    for item in normalized:
+        for other in normalized:
+            if item is other or other["kind"] != "directory":
+                continue
+            if item["path"].startswith(other["path"].rstrip("/") + "/"):
+                raise ResearchError("Redundant scope entries are forbidden")
+    return normalized
+
+
+def scope_correction_details(
+    entries: Any, catalog: dict[str, Any], *, checkpoint: str,
+) -> list[dict[str, Any]]:
+    """Return bounded, structured hints for invalid model-proposed scopes."""
+    if not isinstance(entries, list):
+        return [{
+            "invalid_path": "<allowed_scope>",
+            "reason": "allowed_scope must be an array",
+            "nearest_valid_files": [],
+            "allowed_parent_directory": None,
+        }]
+    files = list(catalog.get("files") or [])
+    directories = set(catalog.get("directories") or [])
+    details: list[dict[str, Any]] = []
+    for entry in entries:
+        raw = entry.get("path") if isinstance(entry, dict) else "<invalid-entry>"
+        try:
+            normalize_scope_from_catalog([entry], catalog, checkpoint=checkpoint)
+            continue
+        except ResearchError as exc:
+            reason = str(exc)
+        raw_text = str(raw)
+        parent: str | None = None
+        try:
+            candidate = PurePosixPath(raw_text)
+            for possible in (candidate.parent, *candidate.parents):
+                text = possible.as_posix()
+                if text in directories:
+                    parent = text
+                    break
+        except (TypeError, ValueError):
+            pass
+        same_parent = [
+            item for item in files
+            if parent is not None and PurePosixPath(item).parent.as_posix() == parent
+        ]
+        nearest = difflib.get_close_matches(raw_text, files, n=5, cutoff=0.25)
+        for item in same_parent[:5]:
+            if item not in nearest:
+                nearest.append(item)
+        details.append({
+            "invalid_path": raw_text,
+            "reason": reason,
+            "nearest_valid_files": nearest[:5],
+            "allowed_parent_directory": parent,
+        })
+    return details
 
 
 def normalize_scope(entries: Any, repository: Path) -> list[dict[str, str]]:
@@ -214,7 +351,10 @@ def validate_questions(value: Any) -> list[dict[str, str]]:
     return result
 
 
-def validate_research_task(value: Any, repository: Path) -> dict[str, Any]:
+def validate_research_task(
+    value: Any, repository: Path, *, scope_catalog: dict[str, Any] | None = None,
+    checkpoint: str | None = None,
+) -> dict[str, Any]:
     required = {
         "research_task_id", "objective", "question_ids", "allowed_scope",
         "required_evidence", "reason_for_overlap",
@@ -243,7 +383,13 @@ def validate_research_task(value: Any, repository: Path) -> dict[str, Any]:
         "research_task_id": task_id,
         "objective": objective,
         "question_ids": [str(item) for item in question_ids],
-        "allowed_scope": normalize_scope(value["allowed_scope"], repository),
+        "allowed_scope": (
+            normalize_scope_from_catalog(
+                value["allowed_scope"], scope_catalog, checkpoint=checkpoint or "",
+            )
+            if scope_catalog is not None else
+            normalize_scope(value["allowed_scope"], repository)
+        ),
         "required_evidence": [str(item).strip() for item in evidence],
         "reason_for_overlap": None if reason is None else str(reason).strip(),
     }

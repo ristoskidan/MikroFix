@@ -152,10 +152,16 @@ def validate_worker_result(
 
 def validate_task_set(
     raw_tasks: Any, *, repository: Path, required_question_ids: set[str],
+    scope_catalog: dict[str, Any] | None = None, checkpoint: str | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= 3:
         raise ResearchError("The lead must create 1..3 research tasks")
-    tasks = [validate_research_task(item, repository) for item in raw_tasks]
+    tasks = [
+        validate_research_task(
+            item, repository, scope_catalog=scope_catalog, checkpoint=checkpoint,
+        )
+        for item in raw_tasks
+    ]
     if len({item["research_task_id"] for item in tasks}) != len(tasks):
         raise ResearchError("Research task ids must be unique")
     covered = {question for task in tasks for question in task["question_ids"]}

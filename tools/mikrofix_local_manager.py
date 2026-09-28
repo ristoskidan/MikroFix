@@ -40,8 +40,9 @@ try:
     from tools.mikrofix_workspace_lock import workspace_lock
     from tools.mikrofix_research import (
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
-        ResearchError, assert_repository_identity, repository_identity,
-        normalize_scope, validate_questions,
+        ResearchError, assert_repository_identity, build_scope_catalog,
+        repository_identity, normalize_scope, scope_correction_details,
+        validate_questions,
     )
     from tools.mikrofix_research_dossier import (
         check_scope_expansion, create_dossier_revision,
@@ -72,8 +73,9 @@ except ModuleNotFoundError:
     from mikrofix_workspace_lock import workspace_lock  # type: ignore[no-redef]
     from mikrofix_research import (  # type: ignore[no-redef]
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
-        ResearchError, assert_repository_identity, repository_identity,
-        normalize_scope, validate_questions,
+        ResearchError, assert_repository_identity, build_scope_catalog,
+        repository_identity, normalize_scope, scope_correction_details,
+        validate_questions,
     )
     from mikrofix_research_dossier import (  # type: ignore[no-redef]
         check_scope_expansion, create_dossier_revision,
@@ -147,6 +149,48 @@ def research_decomposition_schema() -> dict[str, Any]:
                 "required": required, "properties": properties,
             },
         }},
+    }
+
+
+def compact_scope_catalog(
+    catalog: dict[str, Any], *, context: str, max_files: int = 80,
+    max_directories: int = 40,
+) -> dict[str, Any]:
+    """Select a compact hint set; the complete catalog remains manager-only."""
+    tokens = {
+        token.lower() for token in re.findall(r"[A-Za-z0-9_]{4,}", context)
+    }
+    files = list(catalog.get("files") or [])
+    scored = sorted(
+        files,
+        key=lambda path: (
+            -sum(token in path.lower() for token in tokens),
+            len(path), path,
+        ),
+    )
+    relevant = [
+        path for path in scored
+        if any(token in path.lower() for token in tokens)
+    ][:max_files]
+    directories = list(catalog.get("directories") or [])
+    top_level = [path for path in directories if "/" not in path]
+    related_directories = sorted({
+        parent
+        for path in relevant
+        for parent in [str(Path(path).parent).replace(os.sep, "/")]
+        if parent != "." and parent in directories
+    })
+    selected_directories = list(dict.fromkeys(
+        [*top_level, *related_directories]
+    ))[:max_directories]
+    return {
+        "repository_checkpoint": catalog["repository_checkpoint"],
+        "allowed_directories": selected_directories,
+        "relevant_existing_files": relevant,
+        "instruction": (
+            "Use only an exact listed path. If the exact file is unknown, "
+            "choose an existing allowed directory; never invent a filename."
+        ),
     }
 
 
@@ -3298,6 +3342,9 @@ def start_research(
             "worker_profile_snapshot_hash": worker_snapshot["profile_snapshot_hash"],
         })
         identity["research_identity_sha256"] = canonical_json_sha256(identity)
+        scope_catalog = build_scope_catalog(
+            repository, identity["repository_checkpoint"],
+        )
         atomic_write_immutable_json(job_dir / "request.json", {
             "schema_version": 1, "run_id": run_id,
             "task": research_input["owner_request"], "parent_run_id": None,
@@ -3310,6 +3357,9 @@ def start_research(
         atomic_write_immutable_json(job_dir / "research-input.json", research_input)
         atomic_write_immutable_json(job_dir / "worker-profile-snapshot.json", worker_snapshot)
         atomic_write_immutable_json(job_dir / "research-identity.json", identity)
+        atomic_write_immutable_json(
+            job_dir / "research-scope-catalog.json", scope_catalog,
+        )
         write_profile_snapshot(job_dir, lead_snapshot)
         write_system_prompt_snapshot(
             job_dir, project_root=PROJECT_ROOT, snapshot=lead_snapshot,
@@ -3336,6 +3386,16 @@ def start_research(
             f"{path.relative_to(repository)} sha256={sha256_text(path.read_text(encoding='utf-8'))}"
             for path in canon_paths
         )
+        compact_catalog = compact_scope_catalog(
+            scope_catalog,
+            context=(
+                research_input["owner_request"] + "\n"
+                + research_input["codex_research_prompt"] + "\n"
+                + json.dumps(
+                    research_input["required_questions"], ensure_ascii=False,
+                )
+            ),
+        )
         decomposition_prompt = (
             "Razdeli raziskavo na 1 do največ 3 zaporedne podnaloge. Sam ne "
             "raziskuj kode. Vsaka podnaloga mora pokriti navedena vprašanja, "
@@ -3346,29 +3406,81 @@ def start_research(
                 research_input["required_questions"], ensure_ascii=False,
             )
             + "\n\nZEMLJEVID:\n" + project_map_text
+            + "\n\nPREVERJEN KOMPAKTNI KATALOG POTI:\n"
+            + json.dumps(compact_catalog, ensure_ascii=False, sort_keys=True)
             + "\n\nKANON HASHI:\n" + canon_digest
         )
-        assert_identity()
-        if decomposition_runner is None:
-            raw_decomposition, _ = run_structured_research_session(
-                decomposition_prompt, job_dir=job_dir, repository=repository,
-                snapshot=lead_snapshot, session_kind="LEAD_DECOMPOSITION",
-                response_format=research_decomposition_schema(), allowed_tools=[],
-                max_steps=4, progress_callback=progress_callback,
+
+        def run_decomposition(prompt: str, *, correction: bool) -> dict[str, Any]:
+            assert_identity()
+            if decomposition_runner is None:
+                result, _ = run_structured_research_session(
+                    prompt, job_dir=job_dir, repository=repository,
+                    snapshot=lead_snapshot,
+                    session_kind=(
+                        "LEAD_DECOMPOSITION_CORRECTION" if correction else
+                        "LEAD_DECOMPOSITION"
+                    ),
+                    response_format=research_decomposition_schema(),
+                    allowed_tools=[], max_steps=4,
+                    progress_callback=progress_callback,
+                )
+                return result
+            return decomposition_runner(
+                prompt, job_dir=job_dir, repository=repository,
+                snapshot=lead_snapshot, correction=correction,
             )
-        else:
-            raw_decomposition = decomposition_runner(
-                decomposition_prompt, job_dir=job_dir, repository=repository,
-                snapshot=lead_snapshot,
-            )
-        if not isinstance(raw_decomposition, dict) or set(raw_decomposition) != {"tasks"}:
-            raise ResearchError("LEAD_DECOMPOSITION returned an invalid schema")
-        tasks = validate_task_set(
-            raw_decomposition["tasks"], repository=repository,
-            required_question_ids={
-                item["id"] for item in research_input["required_questions"]
-            },
+
+        required_question_ids = {
+            item["id"] for item in research_input["required_questions"]
+        }
+        raw_decomposition = run_decomposition(
+            decomposition_prompt, correction=False,
         )
+        for decomposition_attempt in (1, 2):
+            if not isinstance(raw_decomposition, dict) or set(raw_decomposition) != {"tasks"}:
+                raise ResearchError("LEAD_DECOMPOSITION returned an invalid schema")
+            assert_identity()
+            try:
+                tasks = validate_task_set(
+                    raw_decomposition["tasks"], repository=repository,
+                    required_question_ids=required_question_ids,
+                    scope_catalog=scope_catalog,
+                    checkpoint=identity["repository_checkpoint"],
+                )
+                break
+            except ResearchError:
+                corrections = [
+                    detail
+                    for task in raw_decomposition.get("tasks", [])
+                    if isinstance(task, dict)
+                    for detail in scope_correction_details(
+                        task.get("allowed_scope"), scope_catalog,
+                        checkpoint=identity["repository_checkpoint"],
+                    )
+                ]
+                if not corrections or decomposition_attempt == 2:
+                    raise
+                correction_payload = {
+                    "error": "INVALID_DECOMPOSITION_SCOPE",
+                    "attempt": decomposition_attempt,
+                    "invalid_scopes": corrections,
+                    "compact_catalog": compact_catalog,
+                }
+                correction_prompt = (
+                    decomposition_prompt
+                    + "\n\nPOPRAVEK MANAGERJA:\n"
+                    + json.dumps(
+                        correction_payload, ensure_ascii=False, sort_keys=True,
+                    )
+                    + "\nVrni celoten popravljen tasks JSON. To je edini "
+                    "dovoljeni popravljalni poskus."
+                )
+                raw_decomposition = run_decomposition(
+                    correction_prompt, correction=True,
+                )
+        else:
+            raise ResearchError("LEAD_DECOMPOSITION scope validation failed")
         atomic_write_immutable_json(job_dir / "research-tasks.json", {
             "schema_version": 1, "tasks": tasks,
         })

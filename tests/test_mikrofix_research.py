@@ -114,6 +114,58 @@ class ResearchContractTests(unittest.TestCase):
             ], self.repository),
         )
 
+    def test_checkpoint_catalog_accepts_existing_file_and_directory(self):
+        checkpoint = self.git("rev-parse", "HEAD")
+        catalog = research.build_scope_catalog(self.repository, checkpoint)
+        self.assertEqual(checkpoint, catalog["repository_checkpoint"])
+        self.assertEqual(
+            [
+                {"kind": "file", "path": "PROJECT_MAP.md"},
+                {"kind": "directory", "path": "src"},
+            ],
+            research.normalize_scope_from_catalog([
+                {"kind": "directory", "path": "src"},
+                {"kind": "file", "path": "PROJECT_MAP.md"},
+            ], catalog, checkpoint=checkpoint),
+        )
+
+    def test_checkpoint_catalog_rejects_invented_unsafe_and_symlink_paths(self):
+        (self.repository / "escape.py").symlink_to("/tmp/outside.py")
+        self.git("add", "escape.py")
+        self.git("commit", "-qm", "tracked symlink")
+        checkpoint = self.git("rev-parse", "HEAD")
+        catalog = research.build_scope_catalog(self.repository, checkpoint)
+        invalid = [
+            "tests/test_pos_barcode.py", "/tmp/outside.py", "../outside.py",
+            "src//app.py", "escape.py",
+        ]
+        for path in invalid:
+            with self.subTest(path=path), self.assertRaises(research.ResearchError):
+                research.normalize_scope_from_catalog([
+                    {"kind": "file", "path": path},
+                ], catalog, checkpoint=checkpoint)
+        details = research.scope_correction_details([
+            {"kind": "file", "path": "src/missing.py"},
+        ], catalog, checkpoint=checkpoint)
+        self.assertEqual("src", details[0]["allowed_parent_directory"])
+        self.assertIn("src/app.py", details[0]["nearest_valid_files"])
+
+    def test_catalog_and_validation_require_the_same_frozen_checkpoint(self):
+        checkpoint = self.git("rev-parse", "HEAD")
+        catalog = research.build_scope_catalog(self.repository, checkpoint)
+        (self.repository / "src/new.py").write_text("new\n", encoding="utf-8")
+        self.git("add", "src/new.py")
+        self.git("commit", "-qm", "new checkpoint")
+        new_checkpoint = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(research.ResearchError, "does not match"):
+            research.normalize_scope_from_catalog([
+                {"kind": "directory", "path": "src"},
+            ], catalog, checkpoint=new_checkpoint)
+        with self.assertRaisesRegex(research.ResearchError, "does not exist"):
+            research.normalize_scope_from_catalog([
+                {"kind": "file", "path": "src/new.py"},
+            ], catalog, checkpoint=checkpoint)
+
     def test_questions_and_task_are_bounded_and_task_hash_is_stable(self):
         questions = research.validate_questions([
             {"id": "Q1", "question": "Where is the write performed?"},

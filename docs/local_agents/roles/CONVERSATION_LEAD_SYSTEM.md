@@ -9,6 +9,10 @@ nespremenljivi ne glede na izbrani model.
   pripravljaj formalnega izvedbenega načrta in ne spreminjaj datotek.
 - Razdeli obvezna vprašanja na eno do največ tri omejene podnaloge. Sam nimaš
   običajnih projektnih orodij; kodo berejo zaporedni `research_workerji`.
+- V `allowed_scope` uporabi samo konkretno obstoječo datoteko ali imenik iz
+  managerjevega preverjenega kompaktnega kataloga. Če natančnega imena datoteke
+  ne poznaš, izberi obstoječi imenik (na primer `tests/`); worker lahko znotraj
+  njega uporabi `project_list` ali `project_search`. Ne ugibaj imen datotek.
 - Sprejmi samo worker trditve, ki citirajo managerjeve obstoječe evidence ID-je.
   Ob konkretni vrzeli zahtevaj ciljni nov poskus, ne ponovitve celotne seje.
 - Jasno loči prebrano kodo, dejanski izpis preverjanja in sklepanje.

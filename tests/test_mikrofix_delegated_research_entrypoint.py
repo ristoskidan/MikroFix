@@ -198,6 +198,75 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
                 "unexpected": True,
             })
 
+    def test_invented_scope_gets_one_targeted_correction_before_worker(self):
+        calls = []
+        worker_calls = []
+
+        def decomposition(prompt, *, correction, **_kwargs):
+            calls.append((correction, prompt))
+            result = self.decomposition(prompt)
+            result["tasks"][0]["allowed_scope"] = [{
+                "kind": "directory" if correction else "file",
+                "path": "tests" if correction else "tests/test_pos_barcode.py",
+            }]
+            return result
+
+        def worker(*args, **kwargs):
+            worker_calls.append(args[0])
+            result, events = self.worker(*args, **kwargs)
+            events[0]["arguments"]["path"] = "tests/test_app.py"
+            events[1]["result"]["path"] = "tests/test_app.py"
+            return result, events
+
+        conversation = self.run_research(
+            decomposition_runner=decomposition, worker_runner=worker,
+        )
+        self.assertTrue(conversation["research_dossier_sha256"])
+        self.assertEqual([False, True], [item[0] for item in calls])
+        self.assertEqual(1, len(worker_calls))
+        self.assertIn("INVALID_DECOMPOSITION_SCOPE", calls[1][1])
+        self.assertIn("tests/test_pos_barcode.py", calls[1][1])
+        self.assertIn('"allowed_parent_directory": "tests"', calls[1][1])
+        self.assertEqual(
+            [{"kind": "directory", "path": "tests"}],
+            worker_calls[0]["research_task"]["allowed_scope"],
+        )
+
+    def test_second_invalid_scope_blocks_without_worker_or_dossier(self):
+        calls = []
+        worker_calls = []
+
+        def decomposition(prompt, *, correction, **_kwargs):
+            calls.append(correction)
+            result = self.decomposition(prompt)
+            result["tasks"][0]["allowed_scope"] = [{
+                "kind": "file", "path": "tests/test_pos_barcode.py",
+            }]
+            return result
+
+        with self.assertRaisesRegex(manager.ResearchError, "does not exist"):
+            self.run_research(
+                decomposition_runner=decomposition,
+                worker_runner=lambda *args, **kwargs: worker_calls.append(args),
+            )
+        self.assertEqual([False, True], calls)
+        self.assertEqual([], worker_calls)
+        job_dir = sorted((self.workspace / "jobs").glob("MF-LOCAL-*"))[-1]
+        self.assertFalse((job_dir / "research-tasks.json").exists())
+        self.assertFalse((job_dir / "research-dossier.json").exists())
+        manager_state = json.loads((job_dir / "manager.json").read_text())
+        self.assertEqual("BLOCKED", manager_state["state"])
+
+    def test_compact_catalog_does_not_expose_full_inventory(self):
+        checkpoint = self.git("rev-parse", "HEAD")
+        catalog = manager.build_scope_catalog(self.repository, checkpoint)
+        compact = manager.compact_scope_catalog(
+            catalog, context="value app tests", max_files=1,
+        )
+        self.assertLessEqual(len(compact["relevant_existing_files"]), 1)
+        self.assertNotIn("files", compact)
+        self.assertEqual(checkpoint, compact["repository_checkpoint"])
+
     def test_worker_schema_checkpoint_change_and_fourth_attempt_fail_closed(self):
         def invalid_worker(request, **kwargs):
             _result, events = self.worker(request, **kwargs)
