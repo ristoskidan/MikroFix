@@ -14,6 +14,13 @@
       "display_name": "Pripravljavec izvedbenega načrta",
       "system_prompt": "docs/local_agents/roles/PLAN_PREPARER_SYSTEM.md",
       "enabled": false
+    },
+    "research_worker": {
+      "version": 1,
+      "role": "research_worker",
+      "display_name": "Omejeni raziskovalni delavec",
+      "system_prompt": "docs/local_agents/roles/RESEARCH_WORKER_SYSTEM.md",
+      "enabled": false
     }
   }
 }
