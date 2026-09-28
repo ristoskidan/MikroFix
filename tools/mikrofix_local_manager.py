@@ -41,10 +41,11 @@ try:
     from tools.mikrofix_research import (
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
         ResearchError, assert_repository_identity, repository_identity,
-        validate_questions,
+        normalize_scope, validate_questions,
     )
     from tools.mikrofix_research_dossier import (
-        create_dossier_revision, evidence_cards_from_trace, evidence_gate,
+        check_scope_expansion, create_dossier_revision,
+        evidence_cards_from_trace, evidence_gate, load_current_dossier,
         record_codex_research_verdict, require_current_codex_approval,
     )
     from tools.mikrofix_research_orchestrator import (
@@ -72,10 +73,11 @@ except ModuleNotFoundError:
     from mikrofix_research import (  # type: ignore[no-redef]
         MAX_OWNER_REQUEST_CHARS, MAX_RESEARCH_PROMPT_CHARS,
         ResearchError, assert_repository_identity, repository_identity,
-        validate_questions,
+        normalize_scope, validate_questions,
     )
     from mikrofix_research_dossier import (  # type: ignore[no-redef]
-        create_dossier_revision, evidence_cards_from_trace, evidence_gate,
+        check_scope_expansion, create_dossier_revision,
+        evidence_cards_from_trace, evidence_gate, load_current_dossier,
         record_codex_research_verdict, require_current_codex_approval,
     )
     from mikrofix_research_orchestrator import (  # type: ignore[no-redef]
@@ -1742,6 +1744,29 @@ def assert_frozen_research_models(
             raise ResearchError(f"RESEARCH_{label.upper()}_MODEL_CHANGED")
 
 
+def expand_research_scope(
+    task: dict[str, Any], result: dict[str, Any],
+    evidence_cards: list[dict[str, Any]], *, repository: Path,
+) -> dict[str, Any]:
+    """Apply one evidence-linked, exact-path scope revision deterministically."""
+    request = result.get("scope_expansion")
+    if not isinstance(request, dict):
+        raise ResearchError("Scope expansion result has no request")
+    evidence_by_id = {card["evidence_id"]: card for card in evidence_cards}
+    check_scope_expansion(request, evidence_by_id=evidence_by_id)
+    relative = str(request["path"])
+    target = repository / relative
+    kind = "file" if target.is_file() else "directory" if target.is_dir() else ""
+    if not kind:
+        raise ResearchError("Requested scope expansion path does not exist")
+    revised_scope = normalize_scope(
+        [*task["allowed_scope"], {"kind": kind, "path": relative}], repository,
+    )
+    revised = dict(task)
+    revised["allowed_scope"] = revised_scope
+    return revised
+
+
 def run_structured_research_session(
     prompt: str, *, job_dir: Path, repository: Path, snapshot: dict[str, Any],
     session_kind: str, response_format: dict[str, Any],
@@ -2502,6 +2527,14 @@ def prepare_plan(
             approved_dossier = require_current_codex_approval(job_dir)
         except ResearchError as exc:
             raise ManagerError(str(exc)) from exc
+        try:
+            assert_repository_identity(
+                approved_dossier["research_identity"], repository,
+                project_map=repository / "docs/local_agents/MIKROFIX_PROJECT_MAP.md",
+                canon_paths=sorted((repository / "docs/kanon").glob("*.md")),
+            )
+        except (KeyError, ResearchError) as exc:
+            raise ManagerError("Approved research dossier is stale") from exc
         conversation["approved_research_dossier_sha256"] = approved_dossier[
             "dossier_sha256"
         ]
@@ -2557,10 +2590,231 @@ def prepare_plan(
     )
 
 
+def continue_research_revision(
+    parent_run_id: str, *, research_task_id: str, reason: str,
+    workspace: Path = DEFAULT_WORKSPACE,
+    worker_runner: Callable[..., tuple[dict[str, Any], Any]] | None = None,
+    review_runner: Callable[..., dict[str, Any]] | None = None,
+    synthesis_runner: Callable[..., dict[str, Any]] | None = None,
+    model_releaser: Callable[[str], None] = release_ollama_model,
+    model_identity_checker: Callable[[dict[str, Any], dict[str, Any]], None] = (
+        assert_frozen_research_models
+    ),
+) -> dict[str, Any]:
+    """Run one Codex-requested worker revision and create dossier revision N+1."""
+    workspace = workspace.expanduser().resolve()
+    job_dir = workspace / "jobs" / parent_run_id
+    config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+    repository = Path(config["repository"]).resolve()
+    project_map = repository / "docs/local_agents/MIKROFIX_PROJECT_MAP.md"
+    canon_paths = sorted((repository / "docs/kanon").glob("*.md"))
+    lead_snapshot = read_profile_snapshot(job_dir)
+    worker_snapshot = json.loads(
+        (job_dir / "worker-profile-snapshot.json").read_text(encoding="utf-8")
+    )
+    identity = json.loads((job_dir / "research-identity.json").read_text(encoding="utf-8"))
+    previous = load_current_dossier(job_dir)
+
+    def assert_identity() -> None:
+        assert_repository_identity(
+            identity, repository, project_map=project_map, canon_paths=canon_paths,
+        )
+        model_identity_checker(lead_snapshot, worker_snapshot)
+
+    tasks = previous["accepted_tasks"]
+    selected = next(
+        (task for task in tasks if task["research_task_id"] == research_task_id), None,
+    )
+    if selected is None:
+        raise ResearchError("Codex revision references an unknown research task")
+    prior_result = next(
+        result for result in previous["worker_results"]
+        if result["research_task_id"] == research_task_id
+    )
+    prior_attempt = int(prior_result["attempt"])
+
+    def execute_worker(request: dict[str, Any]):
+        assert_identity()
+        task = request["research_task"]
+        prompt = (
+            "Ponovi samo ciljno read-only podnalogo po Codexovi pripombi. "
+            "Dokazna branja označi READ-1, READ-2 ... in vrni samo JSON.\n\n"
+            + json.dumps(request, ensure_ascii=False, sort_keys=True)
+        )
+        if worker_runner is not None:
+            return worker_runner(
+                request, prompt=prompt, job_dir=job_dir,
+                repository=repository, snapshot=worker_snapshot,
+            )
+        return run_structured_research_session(
+            prompt, job_dir=job_dir, repository=repository, snapshot=worker_snapshot,
+            session_kind=f"RESEARCH_WORKER_{research_task_id}_A{request['attempt']}",
+            response_format=worker_result_schema(),
+            allowed_tools=["project_status", "project_read", "project_list", "project_search"],
+            max_steps=30, allowed_scope=task["allowed_scope"],
+        )
+
+    def prepare_result(request: dict[str, Any], result: dict[str, Any], events: Any):
+        if not isinstance(events, list):
+            raise ResearchError("Worker session has no durable tool-result trace")
+        cards = evidence_cards_from_trace(
+            events, task=request["research_task"], attempt=request["attempt"],
+        )
+        if not cards:
+            raise ResearchError("Worker produced no evidence cards")
+        mapping = {
+            f"READ-{index}": card["evidence_id"]
+            for index, card in enumerate(cards, start=1)
+        }
+        normalized = json.loads(json.dumps(result))
+        for field in ("answers", "claims"):
+            for item in normalized.get(field, []):
+                item["evidence_ids"] = [
+                    mapping.get(value, value) for value in item.get("evidence_ids", [])
+                ]
+        expansion = normalized.get("scope_expansion")
+        if isinstance(expansion, dict):
+            expansion["evidence_ids"] = [
+                mapping.get(value, value) for value in expansion.get("evidence_ids", [])
+            ]
+        attempt_dir = (
+            job_dir / "research-workers" / research_task_id
+            / f"attempt-{request['attempt']}"
+        )
+        atomic_write_immutable_json(attempt_dir / "issued-evidence.json", {
+            "schema_version": 1, "evidence_cards": cards,
+        })
+        return normalized, cards
+
+    def review(task: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        assert_identity()
+        attempt_dir = (
+            job_dir / "research-workers" / research_task_id
+            / f"attempt-{result['attempt']}"
+        )
+        cards = json.loads((attempt_dir / "issued-evidence.json").read_text())["evidence_cards"]
+        prompt = (
+            "Preveri popravljeni rezultat proti podnalogi in Codexovi pripombi. "
+            "Vrni samo zahtevani JSON.\n\n"
+            + json.dumps({"task": task, "result": result, "evidence_cards": cards,
+                          "codex_reason": reason}, ensure_ascii=False, sort_keys=True)
+        )
+        if review_runner is not None:
+            return review_runner(
+                task, result, prompt=prompt, job_dir=job_dir, snapshot=lead_snapshot,
+            )
+        decision, _ = run_structured_research_session(
+            prompt, job_dir=job_dir, repository=repository, snapshot=lead_snapshot,
+            session_kind="LEAD_WORKER_REVISION_REVIEW",
+            response_format=lead_review_schema(), allowed_tools=[], max_steps=4,
+        )
+        return decision
+
+    manager_file = job_dir / "manager.json"
+    manager_state = json.loads(manager_file.read_text(encoding="utf-8"))
+    manager_state["research_state"] = "WORKERS_RUNNING"
+    atomic_write_json(manager_file, manager_state)
+    revised = run_sequential_workers(
+        root=job_dir, repository=repository, tasks=[selected],
+        worker_snapshot=worker_snapshot, worker_runner=execute_worker,
+        review_result=review, release_model=model_releaser,
+        prepare_result=prepare_result,
+        expand_scope=lambda task, result, issued: expand_research_scope(
+            task, result, issued, repository=repository,
+        ),
+        attempt_offsets={research_task_id: prior_attempt},
+        initial_corrections={research_task_id: {
+            "previous_worker_result": prior_result,
+            "missing_evidence": [reason], "reason": reason,
+        }},
+    )[0]
+    accepted: list[dict[str, Any]] = []
+    for task, result, decision in zip(
+        previous["accepted_tasks"], previous["worker_results"],
+        previous["lead_decisions"], strict=True,
+    ):
+        if task["research_task_id"] == research_task_id:
+            accepted.append(revised)
+            continue
+        attempt = int(result["attempt"])
+        accepted.append({
+            "task": task, "attempt": attempt, "attempt_id": "preserved",
+            "result": result, "lead_decision": decision,
+            "evidence_cards": [
+                card for card in previous["evidence_cards"]
+                if card["research_task_id"] == task["research_task_id"]
+                and card["attempt"] == attempt
+            ],
+        })
+    cards = [card for item in accepted for card in item["evidence_cards"]]
+    assert_identity()
+    research_input = load_research_input(job_dir)
+    gate = evidence_gate(
+        identity=identity, repository=repository, project_map=project_map,
+        canon_paths=canon_paths, tasks=[item["task"] for item in accepted],
+        accepted_results=accepted, evidence_cards=cards,
+        required_question_ids={item["id"] for item in research_input["required_questions"]},
+    )
+    next_revision = int(previous["dossier_revision"]) + 1
+    atomic_write_immutable_json(
+        job_dir / f"evidence-gate-revision-{next_revision:04d}.json", gate,
+    )
+    synthesis_payload = {"accepted_results": accepted, "evidence_cards": cards}
+    if synthesis_runner is None:
+        synthesis, _ = run_structured_research_session(
+            "Sestavi strukturirano sintezo. Vrni samo JSON.\n\n"
+            + json.dumps(synthesis_payload, ensure_ascii=False, sort_keys=True),
+            job_dir=job_dir, repository=repository, snapshot=lead_snapshot,
+            session_kind="LEAD_REVISION_SYNTHESIS",
+            response_format=lead_synthesis_schema(), allowed_tools=[], max_steps=4,
+        )
+    else:
+        synthesis = synthesis_runner(
+            accepted, cards, prompt=json.dumps(synthesis_payload, ensure_ascii=False),
+            job_dir=job_dir, snapshot=lead_snapshot,
+        )
+    if not isinstance(synthesis, dict) or set(synthesis) != {"synthesis", "unresolved"}:
+        raise ResearchError("LEAD_SYNTHESIS returned an invalid schema")
+    dossier = create_dossier_revision(
+        root=job_dir, identity=identity,
+        required_questions=research_input["required_questions"],
+        accepted_results=accepted, evidence_cards=cards,
+        synthesis=synthesis["synthesis"], unresolved=synthesis["unresolved"],
+    )
+    manager_state["research_state"] = "AWAITING_CODEX_RESEARCH_REVIEW"
+    manager_state["research_dossier_sha256"] = dossier["dossier_sha256"]
+    manager_state["research_verdict_sha256"] = ""
+    atomic_write_json(manager_file, manager_state)
+    conversation_file = job_dir / "conversation.json"
+    conversation = json.loads(conversation_file.read_text(encoding="utf-8"))
+    conversation["research_dossier_sha256"] = dossier["dossier_sha256"]
+    conversation["updated_at"] = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(),
+    )
+    conversation["turns"].append({
+        "role": "lead", "kind": "research_dossier",
+        "content": json.dumps({
+            "status": "DOSSIER_READY", "dossier_revision": dossier["dossier_revision"],
+            "dossier_sha256": dossier["dossier_sha256"],
+            "synthesis": dossier["synthesis"], "unresolved": dossier["unresolved"],
+        }, ensure_ascii=False, indent=2),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    })
+    atomic_write_json(conversation_file, conversation)
+    return dossier
+
+
 def record_research_review(
     parent_run_id: str, *, dossier_sha256: str, verdict: str,
     research_task_id: str | None = None, reason: str = "",
     workspace: Path = DEFAULT_WORKSPACE,
+    revision_worker_runner: Callable[..., tuple[dict[str, Any], Any]] | None = None,
+    revision_review_runner: Callable[..., dict[str, Any]] | None = None,
+    revision_synthesis_runner: Callable[..., dict[str, Any]] | None = None,
+    model_releaser: Callable[[str], None] = release_ollama_model,
+    model_identity_checker: Callable[[dict[str, Any], dict[str, Any]], None] = (
+        assert_frozen_research_models
+    ),
 ) -> dict[str, Any]:
     """Record a Codex semantic verdict for exactly the current dossier."""
     workspace = workspace.expanduser().resolve()
@@ -2568,6 +2822,14 @@ def record_research_review(
         raise ManagerError("Unsafe parent run id")
     job_dir = workspace / "jobs" / parent_run_id
     try:
+        dossier = load_current_dossier(job_dir)
+        config = json.loads((workspace / "workspace.json").read_text(encoding="utf-8"))
+        repository = Path(config["repository"]).resolve()
+        assert_repository_identity(
+            dossier["research_identity"], repository,
+            project_map=repository / "docs/local_agents/MIKROFIX_PROJECT_MAP.md",
+            canon_paths=sorted((repository / "docs/kanon").glob("*.md")),
+        )
         verdict_record = record_codex_research_verdict(
             root=job_dir, dossier_sha256=dossier_sha256, verdict=verdict,
             research_task_id=research_task_id, reason=reason,
@@ -2584,6 +2846,23 @@ def record_research_review(
     manager["research_dossier_sha256"] = dossier_sha256
     manager["research_verdict_sha256"] = verdict_record["verdict_sha256"]
     atomic_write_json(manager_file, manager)
+    if verdict == "REVISE":
+        try:
+            dossier = continue_research_revision(
+                parent_run_id, research_task_id=str(research_task_id), reason=reason,
+                workspace=workspace, worker_runner=revision_worker_runner,
+                review_runner=revision_review_runner,
+                synthesis_runner=revision_synthesis_runner,
+                model_releaser=model_releaser,
+                model_identity_checker=model_identity_checker,
+            )
+        except BaseException as exc:
+            manager = json.loads(manager_file.read_text(encoding="utf-8"))
+            manager["research_state"] = "BLOCKED"
+            manager["exact_reason"] = str(exc)
+            atomic_write_json(manager_file, manager)
+            raise
+        verdict_record = {**verdict_record, "new_dossier": dossier}
     return verdict_record
 
 
@@ -3134,7 +3413,8 @@ def start_research(
                 "Presodi samo popolnost worker rezultata proti podnalogi. "
                 "ACCEPT je dovoljen le, če so odgovorjena vsa vprašanja in vsaka "
                 "trditev citira obstoječi evidence_id. Semantične dvome označi "
-                "REVISE. Vrni samo zahtevani JSON.\n\n"
+                "REVISE. Zahtevo SCOPE_EXPANSION_REQUIRED izrecno označi REVISE "
+                "ali BLOCKED; manager bo preveril in omejil pot. Vrni samo JSON.\n\n"
                 + json.dumps({"task": task, "result": result, "evidence_cards": cards},
                              ensure_ascii=False, sort_keys=True)
             )
@@ -3169,6 +3449,9 @@ def start_research(
             worker_snapshot=worker_snapshot, worker_runner=execute_worker,
             review_result=review_worker, release_model=model_releaser,
             prepare_result=prepare_and_persist,
+            expand_scope=lambda task, result, issued: expand_research_scope(
+                task, result, issued, repository=repository,
+            ),
         )
         cards = [card for item in accepted for card in item["evidence_cards"]]
         assert_identity()

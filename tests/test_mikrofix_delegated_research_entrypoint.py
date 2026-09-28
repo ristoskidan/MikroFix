@@ -20,7 +20,7 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
         (self.repository / "tests").mkdir(parents=True)
         files = {
             "AGENTS.md": "test rules\n",
-            "app.py": "def value():\n    return 1\n",
+            "app.py": "# tests: tests/test_app.py\ndef value():\n    return 1\n",
             "tests/test_app.py": "# test\n",
             "docs/local_agents/MIKROFIX_PROJECT_MAP.md": "app.py: application\n",
             "docs/kanon/00_KAZALO.md": "canon\n",
@@ -90,9 +90,9 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
         }
         events = [
             {"type": "tool_call", "step": 1, "tool": "project_read",
-             "arguments": {"path": "app.py", "start_line": 1, "end_line": 2}},
+             "arguments": {"path": "app.py", "start_line": 2, "end_line": 3}},
             {"type": "tool_result", "step": 1, "tool": "project_read", "ok": True,
-             "result": {"path": "app.py", "start_line": 1, "end_line": 2,
+             "result": {"path": "app.py", "start_line": 2, "end_line": 3,
                         "raw_content": "def value():\n    return 1\n"}},
         ]
         return result, events
@@ -192,6 +192,12 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
         blocked = sorted((self.workspace / "jobs").glob("MF-LOCAL-*"))[-1]
         self.assertEqual("BLOCKED", json.loads((blocked / "manager.json").read_text())["state"])
 
+        with self.assertRaisesRegex(Exception, "Lead review"):
+            self.run_research(review_runner=lambda *_a, **_k: {
+                "decision": "ACCEPT", "reason": "ok", "missing_evidence": [],
+                "unexpected": True,
+            })
+
     def test_worker_schema_checkpoint_change_and_fourth_attempt_fail_closed(self):
         def invalid_worker(request, **kwargs):
             _result, events = self.worker(request, **kwargs)
@@ -209,7 +215,7 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "clean protected repository|RESEARCH_BASE_CHANGED"):
             self.run_research(worker_runner=changing_worker)
         (self.repository / "app.py").write_text(
-            "def value():\n    return 1\n", encoding="utf-8",
+            "# tests: tests/test_app.py\ndef value():\n    return 1\n", encoding="utf-8",
         )
 
         attempts = []
@@ -241,6 +247,112 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
                 model_identity_checker=changed_after_decomposition,
             )
 
+    def test_approved_dossier_becomes_stale_when_repository_is_dirty(self):
+        conversation = self.run_research()
+        run_id = conversation["parent_run_id"]
+        manager.record_research_review(
+            run_id, dossier_sha256=conversation["research_dossier_sha256"],
+            verdict="APPROVE", workspace=self.workspace,
+        )
+        (self.repository / "app.py").write_text("changed\n", encoding="utf-8")
+        with self.assertRaisesRegex(manager.ManagerError, "stale"):
+            manager.prepare_plan(
+                run_id, workspace=self.workspace, responder=lambda *_a, **_k: None,
+            )
+
+    def test_stale_dossier_cannot_be_approved(self):
+        conversation = self.run_research()
+        (self.repository / "app.py").write_text("changed\n", encoding="utf-8")
+        with self.assertRaisesRegex(manager.ManagerError, "clean protected repository"):
+            manager.record_research_review(
+                conversation["parent_run_id"],
+                dossier_sha256=conversation["research_dossier_sha256"],
+                verdict="APPROVE", workspace=self.workspace,
+            )
+
+    def test_research_revise_runs_new_attempt_and_creates_unapproved_revision(self):
+        conversation = self.run_research()
+        old_hash = conversation["research_dossier_sha256"]
+
+        def revised_synthesis(_accepted, cards, **_kwargs):
+            return {"synthesis": [{
+                "claim": "Popravljeno", "evidence_ids": [cards[-1]["evidence_id"]],
+            }], "unresolved": []}
+
+        verdict = manager.record_research_review(
+            conversation["parent_run_id"], dossier_sha256=old_hash,
+            verdict="REVISE", research_task_id="R1", reason="Preveri ponovno",
+            workspace=self.workspace, revision_worker_runner=self.worker,
+            revision_review_runner=self.accept,
+            revision_synthesis_runner=revised_synthesis,
+            model_releaser=lambda _model: None,
+            model_identity_checker=lambda _lead, _worker: None,
+        )
+        new = verdict["new_dossier"]
+        self.assertEqual(2, new["dossier_revision"])
+        self.assertEqual(old_hash, new["previous_dossier_sha256"])
+        self.assertEqual(2, new["worker_results"][0]["attempt"])
+        with self.assertRaisesRegex(manager.ManagerError, "not Codex-approved"):
+            manager.prepare_plan(
+                conversation["parent_run_id"], workspace=self.workspace,
+                responder=lambda *_a, **_k: None,
+            )
+
+    def test_scope_expansion_is_validated_and_used_by_next_attempt(self):
+        seen_scopes = []
+
+        def worker(request, **_kwargs):
+            seen_scopes.append(request["research_task"]["allowed_scope"])
+            attempt = request["attempt"]
+            if attempt == 1:
+                result = {
+                    "status": "SCOPE_EXPANSION_REQUIRED",
+                    "research_task_id": "R1", "attempt": 1,
+                    "answers": [], "claims": [], "unconfirmed": [],
+                    "scope_expansion": {
+                        "path": "tests/test_app.py", "symbol": None,
+                        "reason": "app.py points to its test",
+                        "evidence_ids": ["READ-1"],
+                    },
+                }
+                path, content = "app.py", "# tests: tests/test_app.py\n"
+            else:
+                result = {
+                    "status": "COMPLETE", "research_task_id": "R1", "attempt": 2,
+                    "answers": [{"question_id": "Q1", "answer": "Potrjeno",
+                                 "evidence_ids": ["READ-1"]}],
+                    "claims": [{"claim": "Test obstaja", "evidence_ids": ["READ-1"]}],
+                    "unconfirmed": [], "scope_expansion": None,
+                }
+                path, content = "tests/test_app.py", "# test\n"
+            return result, [
+                {"type": "tool_call", "step": 1, "tool": "project_read",
+                 "arguments": {"path": path}},
+                {"type": "tool_result", "step": 1, "tool": "project_read", "ok": True,
+                 "result": {"path": path, "start_line": 1, "end_line": 1,
+                            "raw_content": content}},
+            ]
+
+        def synthesis(_accepted, cards, **_kwargs):
+            return {"synthesis": [{"claim": "Potrjeno",
+                                    "evidence_ids": [cards[-1]["evidence_id"]]}],
+                    "unresolved": []}
+
+        def review(_task, result, **_kwargs):
+            if result["status"] == "SCOPE_EXPANSION_REQUIRED":
+                return {"decision": "REVISE", "reason": "Sledi dokazani poti",
+                        "missing_evidence": ["Preberi ciljni test"]}
+            return self.accept(_task, result)
+
+        conversation = self.run_research(
+            worker_runner=worker, review_runner=review, synthesis_runner=synthesis,
+        )
+        self.assertEqual(2, len(seen_scopes))
+        self.assertIn(
+            {"kind": "file", "path": "tests/test_app.py"}, seen_scopes[1],
+        )
+        self.assertTrue(conversation["research_dossier_sha256"])
+
     def test_prepare_plan_without_dossier_is_blocked(self):
         def legacy(_message, **_kwargs):
             return {"reply": "legacy"}, {"bridge_job_id": "OLD"}
@@ -255,7 +367,7 @@ class DelegatedResearchEntrypointTests(unittest.TestCase):
             json.dumps(manager.parse_research_envelope(self.envelope())),
             encoding="utf-8",
         )
-        with self.assertRaisesRegex(manager.ManagerError, "Codex-approved research dossier"):
+        with self.assertRaisesRegex(manager.ManagerError, "research dossier"):
             manager.prepare_plan(
                 conversation["parent_run_id"], workspace=self.workspace,
                 responder=lambda *_a, **_k: None,

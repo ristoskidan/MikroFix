@@ -70,7 +70,9 @@ class ResearchOrchestratorTests(unittest.TestCase):
                 [self.task], repository=self.repository, required_question_ids={"Q1"},
             ),
             worker_snapshot=self.snapshot, worker_runner=runner,
-            review_result=lambda task, result: {"decision": "ACCEPT"},
+            review_result=lambda task, result: {
+                "decision": "ACCEPT", "reason": "complete", "missing_evidence": [],
+            },
             release_model=releases.append,
         )
         self.assertEqual([("R1", 1)], calls)
@@ -95,7 +97,7 @@ class ResearchOrchestratorTests(unittest.TestCase):
                     "decision": "REVISE", "reason": "Missing persistence proof",
                     "missing_evidence": ["database write"],
                 }
-            return {"decision": "ACCEPT"}
+            return {"decision": "ACCEPT", "reason": "complete", "missing_evidence": []}
 
         results = orchestrator.run_sequential_workers(
             root=self.root, repository=self.repository,

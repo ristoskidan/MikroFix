@@ -152,6 +152,24 @@ def evidence_gate(
     evidence_by_id = {card["evidence_id"]: card for card in evidence_cards}
     if len(evidence_by_id) != len(evidence_cards):
         raise ResearchError("Evidence ids must be unique")
+
+    def card_belongs_to(card: dict[str, Any], accepted: dict[str, Any]) -> bool:
+        task = accepted["task"]
+        path = str(card.get("canonical_path") or "")
+        in_scope = any(
+            item["kind"] == "file" and path == item["path"]
+            or item["kind"] == "directory" and (
+                path == item["path"] or path.startswith(item["path"].rstrip("/") + "/")
+            )
+            for item in task["allowed_scope"]
+        )
+        return bool(
+            card.get("research_task_id") == task["research_task_id"]
+            and card.get("original_task_sha256") == task["original_task_sha256"]
+            and card.get("attempt") == accepted["attempt"]
+            and in_scope
+        )
+
     answered: set[str] = set()
     for accepted in accepted_results:
         result = accepted["result"]
@@ -160,11 +178,22 @@ def evidence_gate(
         for answer in result["answers"]:
             answered.add(answer["question_id"])
             for evidence_id in answer["evidence_ids"]:
-                if evidence_id not in evidence_by_id:
+                card = evidence_by_id.get(evidence_id)
+                if card is None:
                     raise ResearchError("Worker answer cites unknown evidence")
+                if not card_belongs_to(card, accepted):
+                    raise ResearchError(
+                        "Worker answer cites evidence from another task, attempt or scope"
+                    )
         for claim in result["claims"]:
-            if any(item not in evidence_by_id for item in claim["evidence_ids"]):
-                raise ResearchError("Worker claim cites unknown evidence")
+            for evidence_id in claim["evidence_ids"]:
+                card = evidence_by_id.get(evidence_id)
+                if card is None:
+                    raise ResearchError("Worker claim cites unknown evidence")
+                if not card_belongs_to(card, accepted):
+                    raise ResearchError(
+                        "Worker claim cites evidence from another task, attempt or scope"
+                    )
     if answered != required_question_ids:
         raise ResearchError("Evidence gate requires an answer for every question")
     return {
@@ -267,11 +296,11 @@ def record_codex_research_verdict(
     return artifact
 
 
-def require_current_codex_approval(root: Path) -> dict[str, Any]:
+def load_current_dossier(root: Path) -> dict[str, Any]:
+    """Load and verify the current immutable dossier without implying approval."""
     dossier_pointer = root / "research-dossiers/current.json"
-    verdict_pointer = root / "research-dossiers/current-verdict.json"
-    if not dossier_pointer.is_file() or not verdict_pointer.is_file():
-        raise ResearchError("/prepare-plan requires a Codex-approved research dossier")
+    if not dossier_pointer.is_file():
+        raise ResearchError("No current research dossier exists")
     pointer = json.loads(dossier_pointer.read_text(encoding="utf-8"))
     dossier_path = (root / "research-dossiers" / str(pointer.get("path") or "")).resolve()
     try:
@@ -283,6 +312,14 @@ def require_current_codex_approval(root: Path) -> dict[str, Any]:
     stored_hash = core.pop("dossier_sha256", None)
     if stored_hash != sha256_value(core) or stored_hash != pointer.get("dossier_sha256"):
         raise ResearchError("Current research dossier hash is invalid")
+    return dossier
+
+
+def require_current_codex_approval(root: Path) -> dict[str, Any]:
+    dossier = load_current_dossier(root)
+    verdict_pointer = root / "research-dossiers/current-verdict.json"
+    if not verdict_pointer.is_file():
+        raise ResearchError("/prepare-plan requires a Codex-approved research dossier")
     verdict = json.loads(verdict_pointer.read_text(encoding="utf-8"))
     if (
         verdict.get("verdict") != "APPROVE"

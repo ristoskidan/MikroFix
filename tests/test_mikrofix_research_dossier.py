@@ -110,6 +110,25 @@ class ResearchDossierTests(unittest.TestCase):
                 evidence_cards=cards, required_question_ids={"Q1"},
             )
 
+    def test_gate_rejects_evidence_from_another_task_attempt_or_scope(self):
+        card = dossier.evidence_cards_from_trace(self.events, task=self.task, attempt=1)[0]
+        for field, value in (
+            ("research_task_id", "R2"),
+            ("attempt", 2),
+            ("canonical_path", "docs/canon.md"),
+        ):
+            foreign = dict(card)
+            foreign[field] = value
+            with self.subTest(field=field), self.assertRaisesRegex(
+                dossier.ResearchError, "another task, attempt or scope",
+            ):
+                dossier.evidence_gate(
+                    identity=self.identity, repository=self.repo,
+                    project_map=self.repo / "MAP.md",
+                    canon_paths=[self.repo / "docs/canon.md"], tasks=[self.task],
+                    accepted_results=self.accepted(foreign["evidence_id"]),
+                    evidence_cards=[foreign], required_question_ids={"Q1"},
+                )
     def test_scope_expansion_checks_identity_and_text_not_semantics(self):
         card = dossier.evidence_cards_from_trace(self.events, task=self.task, attempt=1)[0]
         dossier.check_scope_expansion({

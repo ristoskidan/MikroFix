@@ -175,14 +175,21 @@ def run_sequential_workers(
     prepare_result: Callable[
         [dict[str, Any], dict[str, Any], Any], tuple[dict[str, Any], list[dict[str, Any]]]
     ] | None = None,
+    expand_scope: Callable[
+        [dict[str, Any], dict[str, Any], list[dict[str, Any]]], dict[str, Any]
+    ] | None = None,
+    attempt_offsets: dict[str, int] | None = None,
+    initial_corrections: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Run one worker at a time, in fresh sessions, with at most three attempts."""
     results: list[dict[str, Any]] = []
     worker_root = root / "research-workers"
-    for task in tasks:
-        correction: dict[str, Any] | None = None
+    for original_task in tasks:
+        task = original_task
+        correction = (initial_corrections or {}).get(task["research_task_id"])
         accepted: dict[str, Any] | None = None
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        first_attempt = (attempt_offsets or {}).get(task["research_task_id"], 0) + 1
+        for attempt in range(first_attempt, MAX_ATTEMPTS + 1):
             attempt_id = f"{task['research_task_id']}-A{attempt}-{uuid.uuid4().hex[:12]}"
             attempt_dir = worker_root / task["research_task_id"] / f"attempt-{attempt}"
             request = {
@@ -220,10 +227,43 @@ def run_sequential_workers(
                     )
                 result = validate_worker_result(raw_result, task=task, attempt=attempt)
                 _atomic_json(attempt_dir / "result.json", result, immutable=True)
+                if result["status"] == "SCOPE_EXPANSION_REQUIRED":
+                    if expand_scope is None:
+                        raise ResearchError("No scope-expansion handler is configured")
+                    decision = review_result(task, result)
+                    if (
+                        not isinstance(decision, dict)
+                        or set(decision) != {"decision", "reason", "missing_evidence"}
+                        or decision.get("decision") not in {"REVISE", "BLOCKED"}
+                        or not isinstance(decision.get("reason"), str)
+                        or not isinstance(decision.get("missing_evidence"), list)
+                    ):
+                        raise ResearchError(
+                            "Lead must explicitly REVISE or BLOCK a scope expansion"
+                        )
+                    _atomic_json(
+                        attempt_dir / "lead-decision.json", decision, immutable=True,
+                    )
+                    if decision["decision"] == "BLOCKED":
+                        break
+                    task = expand_scope(task, result, evidence_cards)
+                    _atomic_json(
+                        attempt_dir / "scope-revision.json", task, immutable=True,
+                    )
+                    correction = {
+                        "previous_worker_result": result,
+                        "missing_evidence": decision["missing_evidence"],
+                        "reason": decision["reason"],
+                    }
+                    continue
                 decision = review_result(task, result)
-                if not isinstance(decision, dict) or decision.get("decision") not in {
-                    "ACCEPT", "REVISE", "BLOCKED",
-                }:
+                if (
+                    not isinstance(decision, dict)
+                    or set(decision) != {"decision", "reason", "missing_evidence"}
+                    or decision.get("decision") not in {"ACCEPT", "REVISE", "BLOCKED"}
+                    or not isinstance(decision.get("reason"), str)
+                    or not isinstance(decision.get("missing_evidence"), list)
+                ):
                     raise ResearchError("Lead review returned an invalid decision")
                 _atomic_json(attempt_dir / "lead-decision.json", decision, immutable=True)
                 if decision["decision"] == "ACCEPT":
