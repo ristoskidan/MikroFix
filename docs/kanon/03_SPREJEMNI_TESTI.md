@@ -168,6 +168,10 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
   oprostitvijo ter pravilnimi osnovami in seštevki po kategorijah.
 - Manjkajoč ali zastarel vir potrditve statusa blokira produkcijsko izdajo; sama
   programska privzeta vrednost testa ne opravi.
+- Preverjanje vira je veljavno do istega koledarskega dne naslednjega meseca
+  oziroma do zadnjega dne tega meseca, če istega dne ni. Izdaja tik pred rokom
+  uspe, izdaja po roku je blokirana, novo sledljivo preverjanje pa profil znova
+  omogoči brez samodejne spremembe njegovega statusa.
 - Pri prometu do 60.000 EUR, nad 60.000 EUR do vključno 66.000 EUR in pri
   transakciji, ki preseže 66.000 EUR, sistem uporabi ustrezno pravilo. Posebej se
   preverita meja koledarskega leta in promet predhodnega leta. Transakcija čez

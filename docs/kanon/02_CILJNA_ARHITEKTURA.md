@@ -186,6 +186,10 @@ Notranji statusi so najmanj `NON_VAT`, `VAT_ATYPICAL` in `VAT_REGISTERED`.
 Profil hrani začetek in morebitni konec veljavnosti, vir potrditve, čas zadnjega
 preverjanja in odgovorno odobritev. Prekrivajoči se profili, status brez
 dokazljivega vira in retroaktivna sprememba izdanega računa so zavrnjeni.
+Veljavnost preverjanja vira traja en koledarski mesec od `verified_at`; rok je
+isti koledarski dan naslednjega meseca oziroma njegov zadnji dan, kadar takega
+dne ni. Zastarel profil blokira produkcijsko izdajo, ne povzroči pa samodejne
+spremembe davčnega statusa.
 
 Ločen projekcijski modul računa promet tekočega in predhodnega koledarskega leta
 po 94.a členu ZDDV-1. Pred potrditvijo izdaje v isti transakciji preveri tudi

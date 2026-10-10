@@ -345,6 +345,11 @@ pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
 - Aktivacija ali sprememba statusa je nadzorovana operacija odgovorne osebe z
   datumom začetka veljavnosti, virom potrditve, datumom zadnjega preverjanja in
   revizijsko sledjo; spreminjanje za nazaj ni dovoljeno.
+- Uradni vir davčnega profila se ponovno preveri najpozneje en koledarski mesec
+  po datumu in času zadnjega preverjanja. Rok zapade na isti koledarski dan v
+  naslednjem mesecu oziroma na njegov zadnji dan, če takega dne ni. Po izteku
+  roka je profil zastarel in produkcijska izdaja računa je blokirana do novega
+  sledljivega preverjanja; status se zaradi poteka roka ne spremeni samodejno.
 - Dejanski status MikroFIX in datum njegove veljavnosti nista določena samo s
   programsko privzeto vrednostjo. Pred produkcijsko izdajo se ugotovita iz
   dejanskih pogojev ter preverljivih podatkov FURS oziroma eDavkov; potrditev
