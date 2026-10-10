@@ -1,6 +1,6 @@
 # MikroFIX — ciljna arhitektura
 
-Datum konsolidacije: 26. 9. 2026
+Datum konsolidacije: 11. 10. 2026
 
 ## 1. Topologija
 
@@ -110,6 +110,17 @@ strošek in izračunani minimum `strošek + 5 %`, zaokrožen navzgor na naslednj
 ceno, davek, rabat, odločilni minimum in različico profila. Blagajna zahteva
 rabat, ne poljubnega prepisa cene. Strežnik pred izdajo ponovno preveri prag.
 
+Interni minimum in zakonska prejšnja cena sta ločena podatka. Strežnik vodi
+časovno zgodovino bruto in neto cene po artiklu, lokaciji in prodajnem kanalu ter
+iz nje reproducibilno določi najnižjo ceno v zahtevanem 30-dnevnem obdobju.
+
+Cenovni profil vsebuje skupino, način prehoda `KEEP_GROSS` ali
+`REPRICE_FROM_COST`, datum začetka veljavnosti, odgovorno odobritev in izvorno
+različico. Terenske storitve in delo ob prehodu v `VAT_REGISTERED` uporabljajo
+`KEEP_GROSS`; rezervni deli in paketna popravila uporabljajo
+`REPRICE_FROM_COST` s preverjanjem marže. Že dogovorjeno naročilo hrani svoj
+cenovni posnetek in se zaradi poznejše aktivacije profila ne preračuna samo.
+
 ## 9. Priloge in varnostne kopije
 
 Centralno potrjeni dokumenti in priloge imajo centralno avtoritativno hrambo.
@@ -159,3 +170,77 @@ Danielovo identiteto.
 - Združljivostni adapter je začasen in ne postane trajna druga poslovna baza.
 - Nov odjemalec se priključi šele, ko so njegovi pogodbeni testi z API-jem
   uspešni.
+
+## 13. Davčni model
+
+Centralni model ločuje:
+
+1. časovno veljavni režim domače prodaje;
+2. časovno veljavni obseg identifikacije za DDV;
+3. časovno veljavno davčno klasifikacijo artikla ali storitve;
+4. transakcijsko pravilo oziroma dovoljeno izjemo;
+5. nespremenljiv davčni posnetek računske vrstice;
+6. seštevke računa po davčnih kategorijah.
+
+Notranji statusi so najmanj `NON_VAT`, `VAT_ATYPICAL` in `VAT_REGISTERED`.
+Profil hrani začetek in morebitni konec veljavnosti, vir potrditve, čas zadnjega
+preverjanja in odgovorno odobritev. Prekrivajoči se profili, status brez
+dokazljivega vira in retroaktivna sprememba izdanega računa so zavrnjeni.
+
+Ločen projekcijski modul računa promet tekočega in predhodnega koledarskega leta
+po 94.a členu ZDDV-1. Pred potrditvijo izdaje v isti transakciji preveri tudi
+vpliv novega računa na pragova 60.000 EUR in 66.000 EUR. Opozorilo ne sme
+samodejno ustvariti uradnega statusa, pri možnem prehodu pa izdaja ne sme nadaljevati
+z nejasnim davčnim pravilom.
+
+Davčni odločevalnik poleg profila in klasifikacije uporabi datum dobave oziroma
+opravljene storitve, datum izdaje, predplačila, kupca, kraj in vrsto transakcije.
+S tem izvede tudi prehodna pravila 161. člena PZDDV-1. Prehod profila ne
+spreminja artiklov, količin zaloge ali zgodovinskih dokumentov; morebitna
+prilagoditev odbitka DDV je ločen knjižen dogodek.
+
+## 14. Knjiga gibanja zaloge in vrednotenje
+
+Vsako poslovno povečanje ali zmanjšanje je nespremenljiv centralni zalogovni
+dogodek z vrsto, količino, mersko enoto, izvorno listino, uporabnikom, časom in
+predhodnikom, kadar gre za popravek. Razpoložljivo stanje je izpeljano iz knjige
+dogodkov, ne iz nepovezanega ročnega prepisa količine.
+
+Vrednotenje podpira FIFO in tehtano povprečje, vendar je v posameznem obdobju
+aktivna samo potrjena računovodska metoda. Sistem hrani sestavo nabavne
+vrednosti, razporeditev odvisnih stroškov, oslabitve, odpise in inventurne
+razlike brez izgube izvorne listine.
+
+## 15. FURS vrsta in fiskalni dokument
+
+Centralni izvajalec vrste FURS uporablja trajna stanja najmanj `PREPARED`,
+`SENDING`, `CONFIRMED`, `RETRYABLE`, `REJECTED` in `MANUAL_REVIEW`. Ob ponovitvi
+uporabi isti pripravljeni podpisani zahtevek. Nadzira obstale operacije, uporablja
+nadzorovan backoff, opozori pred potekom dveh oziroma desetih delovnih dni in ne
+ustvari nove številke ali ZOI.
+
+Koledar rokov upošteva slovenske dela proste dni, ne samo vikendov. Ročna
+intervencija je revizijsko zabeležena in ne sme prepisati izvornega zahtevka.
+
+Osrednja predstavitvena storitev iz istega nespremenljivega posnetka pripravi A4
+in termični izpis z enakimi davčnimi zneski, ZOI, EOR, strojno berljivo kodo ter
+evidentirano številko kopije.
+
+## 16. Davčne evidence, izvoz in e-računi
+
+Iz nespremenljivih listin se izdelajo evidence obračunanega in odbitka DDV po
+posamezni listini, dogovorjeni računovodski izvozi ter ločena izvoza izdanih
+računov in njihovih poznejših sprememb za davčni nadzor. Izvoz je ponovljiv in
+vsebinsko vezan na uporabljeno različico sheme.
+
+Podsistem e-računov loči vsebino od transporta. Validira e-SLOG oziroma dovoljeno
+sintakso EN 16931, hrani strukturirani izvirnik in vizualizacijo ter podpira UJP,
+registriranega ponudnika, PEPPOL ali dovoljeno neposredno sistemsko povezavo.
+Statusi dostave in zavrnitve so idempotentni poslovni dogodki.
+
+## 17. Retencija in dokazljivost
+
+Politika retencije je različicena po vrsti dokumenta in pravni podlagi. Brisanje
+je mogoče šele po poteku najdaljšega veljavnega roka in brez aktivnega pravnega
+zadržanja. Izvorni dokument, njegove spremembe, sistemska dokumentacija in
+revizijski dogodki ostanejo dostopni ter preverljivo povezani skozi celoten rok.

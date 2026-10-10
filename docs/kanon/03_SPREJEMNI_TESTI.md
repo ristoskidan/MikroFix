@@ -99,6 +99,13 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
   artikla ali veljavnega `L0` je zavrnjen.
 - Izdani račun ohrani različico profila in cenovni posnetek tudi po poznejši
   spremembi cenika.
+- Ob aktivaciji `VAT_REGISTERED` terenska storitev in delo ohranita potrjeno
+  končno ceno, sistem pa pravilno razdeli davčno osnovo in DDV znotraj te cene.
+- Rezervni del in paketno popravilo uporabita vnaprej potrjen novi cenik,
+  izračunan po preverjanju marže glede na novo nabavno stroškovno osnovo.
+- Aktivacija prehodnega cenika ne spremeni že izdanega računa ali cenovnega
+  posnetka že dogovorjenega naročila brez zabeležene pogodbene podlage oziroma
+  soglasja kupca.
 
 ## 9. Inventura
 
@@ -148,3 +155,81 @@ testi se lahko dodajo, ne smejo pa oslabiti teh pravil.
   nobene dovoljene elektronske poti.
 - Produkcijski preizkus se izvede šele po novi prijavi naprav in podpisu novega
   internega akta.
+
+## 14. Davčni profil in račun
+
+- Profil `NON_VAT` izda račun brez obračunanega DDV in s pravilno zakonsko
+  navedbo; ne sme uporabljati navedbe, za katero izdajatelj nima pogojev.
+- Profil `VAT_ATYPICAL` pri domači dobavi ne obračuna DDV samo zaradi obstoja
+  številke `SI`, ne dovoli splošnega odbitka vstopnega DDV in pravilno evidentira
+  zadevno pridobitev blaga oziroma čezmejno storitev. Uradna oznaka `P` se
+  preslika v ta notranji status brez zamenjave z `VAT_REGISTERED`.
+- Profil `VAT_REGISTERED` izda račun z ločenimi postavkami 22 %, 9,5 %, 5 % in
+  oprostitvijo ter pravilnimi osnovami in seštevki po kategorijah.
+- Manjkajoč ali zastarel vir potrditve statusa blokira produkcijsko izdajo; sama
+  programska privzeta vrednost testa ne opravi.
+- Pri prometu do 60.000 EUR, nad 60.000 EUR do vključno 66.000 EUR in pri
+  transakciji, ki preseže 66.000 EUR, sistem uporabi ustrezno pravilo. Posebej se
+  preverita meja koledarskega leta in promet predhodnega leta. Transakcija čez
+  66.000 EUR ne sme biti najprej napačno izdana kot `NON_VAT` in popravljena
+  šele naknadno.
+- Prehod profila na določen datum ne spremeni zaloge ali računa pred datumom
+  prehoda. Dobava, opravljena pred prehodom in zaračunana po njem, ter
+  predplačilo pred prehodom za dobavo po njem prestaneta ločena testa po 161.
+  členu PZDDV-1; datum izdaje sam ne odloči režima.
+- Vračilo po prehodu uporabi davčni posnetek izvornega računa.
+- Morebitni odbitek DDV od obstoječe zaloge nastane samo kot sledljiv, odobren
+  računovodski popravek in ne spremeni fizične količine.
+- Polni in poenostavljeni račun vsebujeta vse podatke, zahtevane za konkretni
+  tip računa; mešani račun ohrani davčne podatke vsake vrstice.
+
+## 15. Plačila, fiskalni izpis in kopije
+
+- Plačilo s kartico sproži davčno potrjevanje enako kot plačilo z gotovino;
+  neposredno nakazilo na TRR ga brez drugega gotovinskega dela ne sproži.
+- Poznejše gotovinsko plačilo prej neplačanega računa ustvari pravočasen FURS
+  dogodek in ne novega računa.
+- Izpad povezave, zavrnitev zahtevka, restart izvajalca in obstali `SENDING`
+  nadaljujejo isti račun, številko, ZOI, `MessageID` in podpisani zahtevek.
+- Alarm se sproži dovolj zgodaj pred potekom roka dveh oziroma desetih delovnih
+  dni, vključno s pravilnim koledarjem praznikov.
+- A4 in termični izpis vsebujeta pravilne ZOI, EOR in strojno berljivo kodo.
+- Vsaka ponovna izdaja je označena `KOPIJA`, ima naslednjo zaporedno številko,
+  čas nastanka in nespremenljivo vsebino izvirnika.
+
+## 16. Cene, merske enote in zaloga
+
+- Pri objavi znižanja se prejšnja cena izračuna kot zakonsko zahtevana najnižja
+  cena v istem kanalu oziroma lokaciji v zadnjih najmanj 30 dneh; interni
+  stroškovni minimum na rezultat ne vpliva.
+- Potrošniška cena vključuje DDV, prodajna cena in zahtevana cena na enoto pa sta
+  skladni z mersko enoto artikla.
+- Iz konkretnega prevzema je mogoče dokazati dobavitelja, obe številki in datuma
+  dokumentov, ime, mersko enoto, količino, prodajno ceno in njene spremembe.
+- Prejem, prodaja, servisna poraba, vračilo, prenos, odpis in inventurna razlika
+  ustvarijo ustrezne povezane dogodke ter reproducibilno stanje in vrednost po
+  aktivni računovodski metodi.
+
+## 17. DDV evidence, izvoz in hramba
+
+- Iz znanega nabora listin se reproducibilno izdelata evidenci obračunanega in
+  odbitka DDV; tehnična zavrnitev oddaje ne ustvari lažnega uspeha.
+- Popravek evidence ohrani prvotno oddajo, razlog in čas ter je mogoče dokazati,
+  ali je bil izveden v treh delovnih dneh.
+- Izvoz za davčni nadzor ločeno vsebuje izvorne izdane račune in vse njihove
+  poznejše spremembe. Računovodski izvoz se številčno ujema z računi in DDV
+  evidencami.
+- Testna obnovitev dokaže dostopnost, čitljivost in celovitost računov, prilog,
+  sprememb ter revizijske sledi. Politika prepreči prezgodnji izbris dokumenta z
+  deset-, dvajsetletnim ali daljšim veljavnim rokom.
+
+## 18. E-računi
+
+- B2G račun se uspešno validira in izmenja prek UJP; zavrnitev je sledljiva in
+  ponovitev ne podvoji dokumenta.
+- Domači B2B račun se validira v podprti strukturirani sintaksi; PDF brez
+  strukturiranega izvirnika je zavrnjen kot e-račun.
+- B2C e-račun brez dokazljivega predhodnega izrecnega soglasja je zavrnjen;
+  potrošnik prejme vizualizacijo in lahko zahteva papir.
+- Gotovinsko oziroma kartično plačan e-račun opravi tudi zahtevani neodvisni tok
+  davčnega potrjevanja.
