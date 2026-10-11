@@ -123,6 +123,36 @@ ni usklajeno z raziskavo agenta za vloge.
 - Odločitev: coder ne commita in ne pusha. Git-agent izvede commit oziroma push
   šele po pregledu in lastnikovi odobritvi.
 
+### SIDRO-20261011-06 — Stalna izmenjevalna datoteka aktivne naloge
+
+- Stanje: `VELJAVNO`
+- Odločitev: `/home/mikrofix/Desktop/aktivna naloga.md` ostane pod tem imenom in
+  je stalna operativna izmenjevalna točka, v kateri lastnik in Sidro pripravljata
+  oziroma menjata aktivne naloge po dogovorjenem postopku.
+- Datoteka ni samostojen poslovni kanon in ne sme preglasiti novejše izrecne
+  lastnikove odločitve, aktivnega kanona ali projektnih omejitev.
+- Ker je zunaj repozitorija, se njene spremembe ne vključijo samodejno v Git
+  commit projekta. Pred predajo nove naloge se preverijo njena vsebina, datum in
+  skladnost z dejanskim stanjem repozitorija.
+
+### SIDRO-20261011-07 — Namizje in dostop do lokalnih agentov
+
+- Stanje: `VELJAVNO`
+- Odločitev: lokalni modeli se zaganjajo iz terminala. Na namizju ostanejo
+  sistemske ikone ter bližnjica `Codex.desktop`, ki odpira nameščeno aplikacijo.
+  Prikaz nemontiranih oziroma drugih naprav je skrit, ne da bi se particije
+  odklopile. Te nastavitve in zaganjalnike vzdržuje Nika.
+
+### SIDRO-20261011-08 — Nova aktivna veriga
+
+- Stanje: `VELJAVNO`
+- Odločitev: od 11. 10. 2026 velja veriga **lastnik → Sidro/Nika → coder z enim
+  `/goal` → pregled → Git-agent**. Stara nadzorovana veriga ostane zgodovinsko
+  gradivo in ni vzporedni aktivni postopek.
+- Uskladitev `AGENTS.md`, kanonskih procesnih razdelkov, README, Nikinega
+  operativnega zapisa in starega pravilnika je naslednja ločena naloga. Do tedaj
+  njihove starejše navedbe ne preglasijo te novejše lastnikove odločitve.
+
 ## Odprta vprašanja
 
 ### SIDRO-OPEN-01 — Prekinitev zanke odobritev v `/goal`
@@ -136,3 +166,5 @@ odobritev in pravilo prekinitve samodejne zanke.
 
 - 2026-10-11: ustvarjena izhodiščna točka vloge Sidro; zapisane doslej potrjene
   procesne odločitve in odprta vrzel glede zanke odobritev.
+- 2026-10-11: potrjeno stalno ime in namen namizne datoteke `aktivna naloga.md`;
+  evidentirane Nikine zadnje odločitve o namizju in dostopu do lokalnih agentov.

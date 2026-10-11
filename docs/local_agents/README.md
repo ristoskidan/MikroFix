@@ -1,30 +1,16 @@
-# MikroFIX — lokalna agentna veriga
+# MikroFIX — odgovornosti in lokalna agentska veriga
 
-Uradni proces je v [`PRAVILNIK_VERIGE.md`](PRAVILNIK_VERIGE.md). Vloge so
-neodvisne od modelov; Open WebUI prikaže eno pogovorno vlogo, lastnik pa pred
-prvim sporočilom izbere nameščeni model in njegove dovoljene runtime nastavitve.
+## Odgovornosti
 
-## Aktivni deli
+- **Lastnik** določa poslovna pravila, obseg dela in odloča o sprejemu sprememb.
+- **Sidro** skrbi za kanon, stanje Gita in aktivne naloge; njegov delovni zapis
+  je [`SIDRO.md`](SIDRO.md).
+- **Nika** skrbi za profile lokalnih modelov, zaganjalnike in njihova navodila;
+  njen delovni zapis je [`NIKA.md`](NIKA.md).
 
-- [`SIDRO.md`](SIDRO.md) — trajna izhodiščna točka za vzdrževanje kanona, Gita
-  in aktivnih nalog;
-- `roles/` — kratki prompti posameznih vlog;
-- `pravila/` — mehansko generirani, ciljno izbrani moduli iz `docs/kanon/`;
-- `supervisor/` — strojne JSON pogodbe in operativni priročnik;
-- `WORKSPACE.md` — meja izoliranega agentnega delovnega območja;
-- `LEKCIJE.md` — interni eval-dnevnik za lastnika in Codex, ki se modelom ne
-  pošilja;
-- `dnevnik/` — zgodovinski izpisi prejšnjega lokalnega mosta.
+## Tehnični viri
 
-Module po spremembi kanona osveži:
-
-```bash
-python3 tools/build_local_agent_rules.py
-```
-
-Generator shrani SHA-256 vsakega kanoničnega vira v `pravila/INDEX.json`.
-Reviewer zavrne delo, če moduli in kanon niso usklajeni.
-
-Stari model-specific pravilniki, prompti in registri pred konsolidacijo so
-ohranjeni z izvirnimi potmi in hashi v
-`docs/archive/rules-before-role-chain-20260925/`.
+Uradni izvedbeni proces je v [`PRAVILNIK_VERIGE.md`](PRAVILNIK_VERIGE.md).
+Mape `roles/`, `pravila/`, `supervisor/` in `dnevnik/` ter datoteki
+`WORKSPACE.md` in `LEKCIJE.md` so procesno ali zgodovinsko gradivo, ne dodatne
+odločevalske odgovornosti.
