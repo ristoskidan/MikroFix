@@ -56,6 +56,55 @@ Mistralov profil je simbolna povezava na HDD; ta pot je bila pri popisu berljiva
 Mistral ima tudi ločen raziskovalni zaganjalnik `mistral-research`, ki uporablja
 isti profil in model, vendar `read-only` okolje in raziskovalni začetni poziv.
 
+## Izolirani poskus varovalke `/goal` za Gemmo 12B
+
+Odločitev lastnika: za zdaj se spreminja in preizkuša samo izolirani zaganjalnik
+`/home/mikrofix/goal_guard_lab/gemma12-guard-trial`; varovalke
+`/home/mikrofix/goal_guard_lab/bridge.js` in običajnega zaganjalnika
+`/home/mikrofix/.local/bin/mikrofix-gemma12-coder` v zadnjem koraku nismo
+spreminjali. Lastnik preizkuse izvaja sam in sporoči rezultat. Brez uspešnega
+izoliranega preizkusa varovalke ne vključuj v običajne zaganjalnike ali aktivne
+seje.
+
+Preverjeno stanje 11. 10. 2026: poskusni zaganjalnik zdaj uporablja Ollamin
+lokalni tag `mikrofix-gemma4-12b-focused-65k` (ne surovega `gemma4:12b`) in
+kopira Gemmin obstoječi modelni katalog v ločen `CODEX_HOME` poskusa. Isti tag
+poda prednalaganju prek Ollaminega `/api/generate`, Codexovemu app-serverju in
+odjemalcu; zahteva kontekst 65.536. Zaporedje v skripti je: prednalaganje in
+preverjanje naloženega modela, zagon app-serverja, nato zagon varovalke in
+nazadnje povezava odjemalca. Poskus uporablja projekt v načinu `read-only`.
+To je opis konfiguracije in zaporedja skripte, ne potrditev uspešnega novega
+zagona ali delovanja celotne verige.
+
+Prejšnji dnevnik `goal_guard_lab/run.vDvK7c/guard.log` vsebuje dogodke
+`goal_active`, `unmarked` in `goal_paused`, ne pa dokaza o štirih enakih
+zaključkih `[WAITING_OWNER]`, oborožitvi in prekinitvi naslednjega samodejnega
+obrata. Učinek varovalke po zadnji spremembi zaganjalnika zato ostaja
+**NEPOTRJEN**. Naslednji dokaz je lastnikov dejanski poskus, brez posega v
+varovalko na podlagi samega starega dnevnika.
+
+## Ollamina shramba: odločitev in izvedba
+
+Odločitev lastnika, 11. 10. 2026: privzeta Ollamina shramba ostane na SSD.
+Modeli, katerih podatki so na HDD, se morajo v `ollama list` samodejno pojaviti
+**samo, ko je HDD montiran**. Če HDD ni montiran, mora ukaz uspešno izpisati
+dejanski seznam modelov na SSD, brez zapisov za nedostopne modele s HDD.
+Devet obstoječih skupin manifestov za modele s HDD usklajuje sistemski
+`ollama-hdd-manifests.timer` prek
+`/usr/local/libexec/ollama-reconcile-hdd-manifests`. Preveri točen UUID
+montirane particije. Ko HDD ni montiran, manifeste premakne iz aktivnega
+kataloga v `/usr/share/ollama/.ollama/hdd-manifests-parked`; ob priklopu jih
+vrne. Podatkovnih blobov in manifestov SSD-modelov ne premika. Uskladitev
+teče približno vsaki dve sekundi, zato je neposredno po spremembi montaže
+možen kratek zamik. Ob konfliktu aktivne in odložene kopije skripta ničesar
+ne prepiše in napako zabeleži v sistemski dnevnik. Novi modeli, pozneje
+premaknjeni na HDD, potrebujejo dopolnitev seznama v skripti.
+
+Prejšnje manifestne povezave ostajajo kot varnostna kopija v
+`/usr/share/ollama/.ollama/manifest-links-backup.UxnrNw`. Veliki blobi za
+premaknjene modele ostajajo na HDD. Funkcionalno preverjanje odklopljenega
+HDD je treba opraviti ločeno in s predhodnim lastnikovim dovoljenjem za test.
+
 ## Od kod pridejo navodila in kdo odloča
 
 1. Codex ob novi seji naloži profilni `CODEX_HOME/AGENTS.md` in projektni
