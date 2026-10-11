@@ -170,6 +170,19 @@ prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
 - `APPROVAL_REQUEST_ID` ni zahteva prve izvedbe in ostaja le možna prihodnja
   razširitev.
 
+### SIDRO-20261011-10 — Naraven zapis aktivnih nalog
+
+- Stanje: `VELJAVNO`
+- Odločitev: Sidro v vsebino pripravljene aktivne naloge ne dodaja ukaza
+  `/goal`; lastnik cilj aktivira ločeno, zato bi moral oznako pred uporabo le
+  odstranjevati.
+- Naloga je napisana neposredno in naravno: pove namen, obseg, potrebno delo,
+  merila uspeha in pričakovani rezultat. Ne vsebuje odvečnega procesnega
+  zaključka »ustavi se, ne sprašuj za nadaljevanje in ne začni naslednjega
+  sklopa«, kadar že sam obseg naloge jasno določa njen konec.
+- Tehnične omejitve, dokazila in vrata ostanejo natančna; poenostavi se način
+  podajanja, ne zahtevnost ali preverljivost naloge.
+
 ## Odprta vprašanja
 
 ### SIDRO-OPEN-01 — Izolirani preizkus varovalke
@@ -188,3 +201,5 @@ Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
   evidentirane Nikine zadnje odločitve o namizju in dostopu do lokalnih agentov.
 - 2026-10-11: potrjen zaključni signal `[WAITING_OWNER]` in pravilo štirih
   ponovitev; tehnični učinek ostaja nepotrjen do izoliranega preizkusa.
+- 2026-10-11: potrjen naraven zapis aktivnih nalog brez vgrajenega ukaza
+  `/goal` in brez odvečnega zaključnega procesnega opozorila.
