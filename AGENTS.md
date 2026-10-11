@@ -36,6 +36,24 @@ uporabnikovo zahtevo ali tem dokumentom.
   počakaj na izrecno odobritev implementacije. Ne spreminjaj datotek samo zato,
   ker je bil načrt sprejet v pogovoru kot tema razprave.
 
+## Potek večjih nalog po sklopih in vratih
+
+- Pri ustvarjanju večje naloge, razdeljene na sklope in vrata, v začetni poziv
+  vključi ta potek. Model naj najprej v celoti prebere sistemska in projektna
+  navodila, vhodno zahtevo ter navedene priloge, nato pa samo sporoči, da je
+  pripravljen na delo. Izvajanja ne začne pred prvim uporabnikovim `/goal`.
+- Posamezni `/goal` zajema natanko en sklop do njegovih zadnjih vrat. Dokler cilj
+  ali vrata niso uspešni, isti sklop ponavljaj in odpravljaj ugotovljene napake.
+  Ko je cilj uspešen, se ustavi; ne sprašuj, ali naj nadaljuješ v naslednji sklop.
+- Ob zaključku cilja izpiši rezultat vseh pripadajočih vrat, vse zahtevane
+  spremenljivke ter preverljive rezultate ukazov in testov, ki so pogoj za vrata.
+  Uspeha ne razglasi, dokler niso izpolnjena zadnja vrata tega sklopa.
+- Po uporabnikovem `/compact` in pred naslednjim `/goal` naj naloga vedno vsebuje
+  obnovitveno kontrolno točko: preveri povzetek in rezultate prejšnjega sklopa,
+  ponovno potrdi njegove ključne izhode ter za nadaljevanje preglej najmanj
+  `git status --short`, `git diff` in `git diff --cached`. Šele nato sprejmi novi
+  `/goal`; ugotovljenih nedokončanih ali nasprotujočih sprememb ne preskoči.
+
 ## Izvedba in preverjanje
 
 - Pri odobreni implementaciji ohrani vse obstoječe uporabnikove spremembe in
