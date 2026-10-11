@@ -1,10 +1,13 @@
 # MikroFIX local supervisor
 
+Status: historical tooling for the superseded supervised chain. It is not the
+active MikroFIX agent workflow; see `docs/local_agents/README.md`.
+
 Supervisor is the fail-closed coordinator above the local executor bridge. It
 turns an owner-approved JSON plan into bounded implementation attempts, local
 checks, an independent local review and an immutable candidate patch for Codex
-review. Role contracts are model-independent and are defined in
-`docs/local_agents/PRAVILNIK_VERIGE.md`.
+review. Its historical role contracts are model-independent and are preserved
+in `docs/local_agents/PRAVILNIK_VERIGE.md`.
 
 The trusted control checkout and the agent-owned candidate repository may be
 different paths. Pass `--repository-root /path/to/agent/repository` before the

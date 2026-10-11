@@ -10,7 +10,8 @@
 - `mikrofix_server/`: centralni API, modeli, operacije in trajna strežniška stanja.
 - `alembic/versions/`: spremembe centralne podatkovne sheme.
 - `tests/`: aplikacijski in domenski regresijski testi.
-- `tools/`, `config/local_agents/` in `docs/local_agents/`: agentna nadzorna veriga.
+- `tools/`, `config/local_agents/` in `docs/local_agents/`: lokalna agentska
+  orodja, aktivne vloge in zgodovinski artefakti prejšnje nadzorne verige.
 
 ## Običajna podatkovna pot
 
@@ -27,7 +28,8 @@ dejanskega zapisovalnega mehanizma ter preveriti transakcijski rob.
 - Ciljna arhitektura: `docs/kanon/02_CILJNA_ARHITEKTURA.md`.
 - Sprejemni testi: `docs/kanon/03_SPREJEMNI_TESTI.md`.
 - Stanje izvedbe: `docs/kanon/04_STANJE_IZVEDBE.md`.
-- Agentna pravila: `docs/local_agents/PRAVILNIK_VERIGE.md`.
+- Aktivne lokalne vloge in potek: `docs/local_agents/README.md`.
+- Zgodovinska nadzorovana veriga: `docs/local_agents/PRAVILNIK_VERIGE.md`.
 
 ## Nespremenljive raziskovalne omejitve
 

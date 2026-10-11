@@ -2,7 +2,7 @@
 
 # MikroFIX — veljavna poslovna pravila
 
-Datum konsolidacije: 26. 9. 2026
+Datum konsolidacije: 11. 10. 2026
 
 ## 1. Programi in odgovornosti
 
@@ -66,6 +66,9 @@ procesov. Če izvora ni mogoče dokazati, ostane nerazpoložljiv.
 
 ## 4. Artikli, barkode, LOT-i in poraba
 
+- Trgovsko blago ima ime, mersko enoto in sledljivo količino ter povezavo do
+  številke in datuma prevzemnega dokumenta, dobavitelja ter številke in datuma
+  dobaviteljevega dokumenta.
 - Barkoda določi konkretno zalogovno identiteto.
 - Kosi z isto barkodo se lahko vodijo količinsko znotraj sledljivega LOT-a;
   serijsko voden kos zahteva svojo identiteto.
@@ -75,6 +78,16 @@ procesov. Če izvora ni mogoče dokazati, ostane nerazpoložljiv.
 - Rezervacija je dovoljena kot neobvezna možnost pred uporabo. Rezerviran kos je
   še fizična zaloga; porabljen oziroma vgrajen kos ni več zaloga.
 - `SERVICE_RESERVATION` ne sme biti prikrito ime za že vgrajen del.
+- Vsa povečanja in zmanjšanja zaloge nastanejo kot nespremenljivi dogodki
+  enotne knjige gibanj: prejem, pulled del, rezervacija, poraba, prodaja,
+  vračilo, prenos, odpis, inventurna razlika ali drug izrecno dovoljen tip.
+- Vrednotenje uporablja eno potrjeno metodo, FIFO ali tehtano povprečje. Aktivna
+  metoda se ne menja brez računovodske odločitve, datuma začetka in revizijske
+  sledi. Izbira začetne metode je odprta odločitev.
+- Neposredni nabavni stroški, nevračljive dajatve in nepovračljivi DDV so del
+  nabavne vrednosti, kadar tako zahtevajo računovodska pravila. Poškodovana,
+  zastarela ali neprodajljiva zaloga se vodi ločeno in se po potrjenem postopku
+  oslabi oziroma odpiše.
 
 ## 5. Servisni čas
 
@@ -261,11 +274,26 @@ Blagajna in Office v prvi fazi nimata offline zapisovalnega načina.
   novo topologijo. Ko bo znana končna matrika naprav, se prijava FURS po potrebi
   spremeni in izdela ter podpiše nov interni akt.
 - `MFD` pomeni delavnico oziroma pisarno, `MFT` pa terenski poslovni prostor.
+- Plačilo z bankovci, kovanci, plačilno, kreditno ali debetno kartico oziroma
+  drugim načinom, ki ni neposredno nakazilo na transakcijski račun, se za ZDavPR
+  obravnava kot gotovinsko plačilo. Neposredno nakazilo na TRR praviloma ni
+  gotovinsko plačilo.
+- Če ob izdaji neplačanega računa poznejši način plačila ni znan in je račun
+  nato plačan gotovinsko, se podatki pošljejo FURS v desetih delovnih dneh od
+  plačila.
+- Ob izpadu povezave se račun izda z ZOI in drugimi obveznimi podatki brez EOR.
+  Povezava se ponovno vzpostavi in račun pošlje praviloma v dveh delovnih dneh;
+  pozneje prejeti EOR se shrani skupaj s kopijo računa.
+- Če FURS zahtevek zavrne zaradi napake, se račun izda brez EOR, napaka odpravi
+  in popravljeni podatki pošljejo praviloma v dveh delovnih dneh. Račun je
+  davčno potrjen šele po prejemu EOR.
 - VKR se uporabi samo, ko računa objektivno ni mogoče izdati po nobeni dovoljeni
   elektronski poti. Gre za skrajni rezervni postopek, ne običajni odgovor na
   kratkotrajno motnjo ene povezave ali ene naprave.
-- Natančen izredni postopek in roki se pred produkcijo ponovno preverijo pri
-  uradnem viru.
+- Ob okvari elektronske naprave se uporabi predhodno potrjena VKR, podatki pa se
+  po ponovni vzpostavitvi praviloma sporočijo v dveh delovnih dneh. Podrobne
+  izjeme zaradi nepredvidljivih in neodvrnljivih razlogov ter morebitne novele se
+  pred produkcijo ponovno preverijo pri uradnem viru.
 
 ## 14. Vidna in notranja stanja servisa
 
@@ -278,7 +306,7 @@ Tehnična faza in stanje sinhronizacije sta ločena podatka. Zato so
 `Pripravljeno za obračun`, `Čaka sinhronizacijo` in `SYNC_CONFLICT` vidna
 pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
 
-## 15. Najnižja cena in rabat
+## 15. Interni cenovni minimum, zakonska prejšnja cena in rabat
 
 - Najnižja dovoljena prodajna cena artikla je dokumentirani skupni strošek,
   povečan za `5 %`, nato zaokrožen navzgor na naslednjih `5 EUR`.
@@ -288,6 +316,13 @@ pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
   z rabatom, ki ne sme prebiti veljavnega minimuma artikla ali `L0`.
 - Na računu se ob izdaji shrani uporabljena različica cenovnega profila in
   odločilni cenovni posnetek.
+- Interni minimum iz tega poglavja ni prejšnja cena po pravilih varstva
+  potrošnikov. Pri objavi znižanja se ločeno prikažeta znižana in prejšnja cena;
+  prejšnja je praviloma najnižja cena v najmanj 30 dneh pred znižanjem v istem
+  prodajnem kanalu oziroma lokaciji.
+- Cena za potrošnika je v EUR in vključuje DDV, kadar je MikroFIX DDV-zavezanec.
+  Kjer je zahtevano, se poleg prodajne cene prikaže tudi cena na običajno mersko
+  enoto. Sistem upošteva zakonske izjeme, ne pa splošne izjeme po lastni presoji.
 
 ## 16. Omejeno zastopanje pri odkupu
 
@@ -298,3 +333,148 @@ pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
   Ristoski.
 - Sistem pred sprejemom takega dejanja preveri veljavnost in obseg pooblastila
   ter v revizijsko sled zapiše uporabljeno različico.
+
+## 17. Davčni profil, artikel in prehod v DDV
+
+- Sistem podpira tri notranje statuse `NON_VAT`, `VAT_ATYPICAL` in
+  `VAT_REGISTERED`. `VAT_ATYPICAL` je programsko ime za omejeno identifikacijo,
+  ki je v uradnem seznamu FURS označena s `P`, in ni samostojen zakonski izraz.
+- Model loči režim domače prodaje od obsega identifikacije za DDV.
+  `VAT_ATYPICAL` praviloma še ne pomeni obračuna DDV od domačih dobav ali
+  pravice do odbitka, povzroči pa obveznosti za zadevne pridobitve blaga oziroma
+  čezmejne storitve. Prisotnost predpone `SI` zato sama ne sme vključiti DDV na
+  domačem računu.
+- Aktivacija ali sprememba statusa je nadzorovana operacija odgovorne osebe z
+  datumom začetka veljavnosti, virom potrditve, datumom zadnjega preverjanja in
+  revizijsko sledjo; spreminjanje za nazaj ni dovoljeno.
+- Uradni vir davčnega profila se ponovno preveri najpozneje en koledarski mesec
+  po datumu in času zadnjega preverjanja. Rok zapade na isti koledarski dan v
+  naslednjem mesecu oziroma na njegov zadnji dan, če takega dne ni. Po izteku
+  roka je profil zastarel in produkcijska izdaja računa je blokirana do novega
+  sledljivega preverjanja; status se zaradi poteka roka ne spremeni samodejno.
+- Dejanski status MikroFIX in datum njegove veljavnosti nista določena samo s
+  programsko privzeto vrednostjo. Pred produkcijsko izdajo se ugotovita iz
+  dejanskih pogojev ter preverljivih podatkov FURS oziroma eDavkov; potrditev
+  računovodje je priporočljiva, ni pa nadomestilo za uradni status.
+- Sistem po koledarskem letu vodi zakonsko opredeljeni promet na ozemlju
+  Slovenije iz 94.a člena ZDDV-1 in upošteva tudi predhodno koledarsko leto.
+  Opozori pred pragovoma 60.000 EUR in 66.000 EUR. Če tekoči promet preseže
+  60.000 EUR, vendar ne 66.000 EUR, podpre začetek rednega obračunavanja
+  najpozneje 1. januarja naslednjega leta. Transakcija, s katero promet preseže
+  66.000 EUR, mora že uporabiti ustrezno DDV-obravnavo; preverjanje je zato del
+  atomske izdaje računa, ne le naknadno opozorilo.
+- Podprta je tudi prostovoljna vključitev z datumom začetka in obdobjem vezanosti
+  po veljavnih pravilih ter omejena identifikacija zaradi pridobitev blaga iz EU
+  oziroma čezmejnih storitev. Sistem statusa ne aktivira samodejno, ampak ob
+  doseženem pogoju blokira nejasno izdajo in zahteva potrjeno odločitev oziroma
+  uradni podatek.
+- Davčni profil podjetja ni lastnost zaloge. Prehod v sistem DDV ne ustvari nove
+  zaloge, ne spremeni količin in ne spreminja že izdanih računov.
+- Artikel oziroma storitev ima časovno veljavno davčno klasifikacijo. Končno
+  pravilo ob izdaji upošteva tudi vrsto transakcije, kupca, kraj, oprostitev in
+  druge dovoljene okoliščine; stopnja DDV ni samo statično polje artikla.
+- Vsaka izdana vrstica in račun hranita nespremenljiv posnetek uporabljenega
+  davčnega profila, klasifikacije, osnove, stopnje, zneska DDV in pravne navedbe.
+- Vračilo, storno ali dobropis uporablja davčni posnetek izvornega računa, tudi
+  če se je profil podjetja ali artikla pozneje spremenil.
+- Davčna obravnava prehoda ni določena samo z datumom izdaje. Sistem hrani datum
+  dobave oziroma opravljene storitve in podatke o predplačilu. Za dobavo,
+  dejansko opravljeno pred prehodom, vendar z računom po prehodu, uporabi pravilo
+  161. člena PZDDV-1 in nadzoruje poseben rok izdaje; pri predplačilu pred
+  prehodom in dobavi po njem davčno obravnavo določi obdobje opravljene dobave.
+- Obstoječa fizična zaloga se ob spremembi statusa ne podvoji ali prevrednoti na
+  skrivaj. Morebitni odbitek DDV za blago, nabavljeno pred identifikacijo, je
+  ločen, sledljiv računovodski popravek na podlagi konkretne listine in potrjene
+  upravičenosti; sistem ga ne predpostavi samodejno.
+- Ob prehodu v `VAT_REGISTERED` velja dokončno potrjena kombinirana cenovna
+  politika po skupinah. Pri terenskih storitvah in delu se ohranijo potrjene
+  končne cene za kupca, zato vključitev DDV zmanjša neto prihodek. Pri rezervnih
+  delih in paketnih popravilih se pred aktivacijo novega cenika preveri marža
+  glede na novo nabavno stroškovno osnovo ter potrdi nova končna cena.
+- Vsak prehodni cenik je različicno voden, vnaprej potrjen in ima datum začetka
+  veljavnosti. Ne spreminja že izdanih računov ali cen že dogovorjenih naročil
+  brez ustrezne pogodbene podlage oziroma soglasja kupca.
+
+## 18. Obvezna vsebina računa in fiskalni izpis
+
+- Polni račun hrani najmanj datum izdaje, enolično zaporedno številko, zahtevane
+  identifikacijske podatke izdajatelja in kupca, ime in naslov, količino in vrsto
+  blaga oziroma obseg in vrsto storitve, datum dobave, davčno osnovo po stopnjah,
+  ceno na enoto brez DDV, nevključene popuste, stopnjo in znesek DDV ter vse
+  pogojne zakonske navedbe.
+- Poenostavljeni račun se uporabi samo v zakonsko dovoljenem primeru in vsebuje
+  vse podatke, zahtevane za tak račun. Izbira oblike ne sme izpustiti podatkov,
+  potrebnih za preveritev količine, vrste in zaračunanega zneska.
+- Račun podpira več davčnih stopenj in oprostitev na različnih vrsticah ter
+  pravilne seštevke po davčni kategoriji.
+- A4 in termični izpis davčno potrjenega računa dosledno prikažeta ZOI, EOR in
+  predpisano strojno berljivo kodo. Dovoljeni račun brez EOR jasno ohrani ZOI in
+  vse druge zahtevane podatke.
+- Vsaka kopija je vsebinsko enaka izvirniku, označena `KOPIJA` in zaporedno
+  številko kopije. Evidenca hrani čas nastanka vseh kopij.
+
+## 19. Popravki, DDV evidence in davčni izvoz
+
+- Izdani račun se ne briše ali prepisuje. Vsaka poznejša sprememba je nov vezan
+  dokument oziroma dogodek z nedvoumnim sklicem na izvorni račun in se, kadar
+  tako zahteva ZDavPR, ponovno davčno potrdi.
+- Če je MikroFIX identificiran za DDV, za vsako davčno obdobje vodi in v roku za
+  DDV-O elektronsko predloži evidenco obračunanega DDV in evidenco odbitka DDV
+  po posamezni listini. Neskladnost z že predloženimi evidencami se odpravi
+  nemudoma oziroma najpozneje v treh delovnih dneh.
+- Sistem omogoča izvoz izvornih podatkov izdanih računov in vseh njihovih
+  poznejših sprememb v urejeni obliki, ki jo zahteva davčni nadzor, ter ločen
+  dogovorjeni računovodski izvoz.
+- Delni dobropis, delno vračilo, več delnih plačil in kombinirano plačilo morajo
+  ohraniti izvorne zneske, povezave, davčne posnetke in celotno časovno sled.
+
+## 20. Hramba in nespremenljivost dokumentacije
+
+- Kopije vseh izdanih in vsi prejeti računi se hranijo najmanj deset let po
+  poteku leta, na katero se nanašajo; računi v zvezi z nepremičninami najmanj
+  dvajset let. Za drugo davčno dokumentacijo se uporablja daljši veljavni rok,
+  kadar ga zahtevajo ZDavP-2 ali posebni predpisi.
+- Elektronsko ustvarjeni ali prejeti podatki ostanejo v elektronski obliki.
+  Izvor je berljiv, dostopen in reproducirljiv skupaj s podatki za dokazovanje
+  pristnosti izvora in celovitosti vsebine.
+- Sistem ne omogoča brisanja, popravljanja, razveljavitve, nadomestitve,
+  dodajanja ali skrivanja knjiženega zapisa brez hrambe izvornega podatka in vseh
+  poznejših sprememb.
+- Vsaka sprememba elektronske rešitve, ki vpliva na davčne evidence, se
+  kronološko dokumentira z vzrokom, vrsto, posledico in datumom.
+
+## 21. E-računi
+
+- Dobava proračunskemu uporabniku se dokumentira z veljavnim strukturiranim
+  e-računom in izmenja prek UJP skladno z ZPJS.
+- Za domače B2B dobave, opravljene v Sloveniji, se sistem pripravi na izključno
+  izmenjavo strukturiranih e-računov od 1. 1. 2028. Podprta oblika je e-SLOG,
+  sintaksa evropskega standarda oziroma drug zakonsko dovoljen dogovorjeni
+  standard; PDF sam zase ni e-račun.
+- B2C e-račun se izda samo s predhodnim izrecnim soglasjem potrošnika. Zagotovi
+  se vizualizacija in možnost, da potrošnik kadar koli zahteva papirni račun.
+- E-račun in davčno potrjevanje sta ločeni obveznosti. E-račun, plačan z
+  gotovino ali kartico, se davčno potrdi, kadar so izpolnjeni pogoji ZDavPR.
+- Hrani se strukturirani izvirnik, uporabljena sintaksa, enolična identiteta,
+  transportna pot ter statusi sprejema, zavrnitve in dostave.
+
+## 22. Imena in sistem vizualnih identitet
+
+- `MikroFIX` je identiteta programske družine. Njeni izdelki se dosledno
+  imenujejo **MikroFIX Office**, **MikroFIX Servis** in **MikroFIX Blagajna**.
+- `MikroFix` je javna identiteta terenskega servisa. Ime `MikroFIX Servis`
+  označuje programski izdelek in ni zamenljivo z javno storitveno identiteto
+  `MikroFix`.
+- Polno registrirano ime podjetja je pravna identifikacija, ne tretja prosto
+  oblikovana znamka. Na pravno pomembnih dokumentih se vedno prevzame iz
+  veljavnega poslovnega vira oziroma nastavitev.
+- Velikost črk je pomenska. Zapisov `MikroFIX` in `MikroFix` ni dovoljeno
+  poenotiti samo zaradi vizualne doslednosti.
+- Programsko in servisno identiteto povezuje pikselizirani oblikovni jezik. Del
+  imena `FIX` je njegov glavni poudarek; mreža, kvadratni moduli, rastrski
+  prehodi, fragmenti, robovi in ikone so dovoljeni načini njegove izvedbe.
+- Pikselizirani jezik ne sme zmanjšati čitljivosti, uporabnosti, resnosti ali
+  zakonsko zahtevane vsebine programske opreme, računov in servisnih gradiv.
+- Končni logotipi, barve, pisave, gostota vzorca, motiv razbitega stekla in
+  stopnja vizualne sorodnosti identitet niso določeni s tem pravilom. Postanejo
+  kanon šele po izrecni lastnikovi potrditvi.

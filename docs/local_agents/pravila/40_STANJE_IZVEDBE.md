@@ -2,7 +2,7 @@
 
 # MikroFIX — stanje izvedbe
 
-Datum dokumenta: 26. 9. 2026
+Datum dokumenta: 11. 10. 2026
 
 ## Namen
 
@@ -120,6 +120,57 @@ izvedeni centralni pregled vseh odprtih dokumentov in vseh aktivnih Service
 postaj, inventurne vrstice, pravila manjkov/viškov, zaključek ter nova
 inventurna epoha, ki zavrne zastarele offline ukaze.
 
+## Statična pravno-tehnična revizija 10.–11. 10. 2026
+
+Pregled je bil izveden samo za branje. Produkcijska baza, FURS okolje in celotni
+avtomatizirani testi niso bili zagnani, zato spodnje ugotovitve niso produkcijski
+sprejem.
+
+Potrjene dobre osnove so centralno atomsko številčenje, idempotentne identitete
+operacij, trajno pripravljen podpisani zahtevek FURS, revizijski dogodki,
+dokumentirani prevzemi, polni storno in pripravljalna inventurna pregrada.
+
+Potrjene blokade P0:
+
+- centralna izdaja trenutno uporablja `NON_VAT` in oprostitev po 94. členu brez
+  splošnega časovno veljavnega profila podjetja;
+- ni ločenega modela za režim domače prodaje in omejeno DDV-identifikacijo z
+  oznako `P`; statusa `VAT_ATYPICAL` in njegove čezmejne obveznosti niso
+  izvedeni;
+- ni dokazano spremljanje prometa po koledarskem letu in 94.a členu ZDDV-1,
+  preverjanje pragov 60.000 EUR in 66.000 EUR v atomski izdaji ali upoštevanje
+  prometa predhodnega leta;
+- davčna odločitev še ni dokazano vezana na datum dobave oziroma opravljene
+  storitve in predplačila po prehodnih pravilih 161. člena PZDDV-1;
+- artikel in račun nimata celovitega modela davčnih klasifikacij, davčnih vrstic
+  in več stopenj na istem računu;
+- centralna A4 in termična predstavitev nista dokazano poenoteni glede ZOI, EOR,
+  strojno berljive kode in kopij;
+- ni dokazan produkcijski izvajalec FURS vrste z obravnavo obstalega pošiljanja,
+  backoffom, alarmi zakonskih rokov in ročnim pregledom;
+- za DDV-zavezanca niso najdeni zaključeni izvozi evidenc obračunanega in
+  odbitka DDV;
+- B2G e-račun ni izveden; to je takojšnja blokada, če MikroFIX izdaja račune
+  proračunskim uporabnikom.
+
+Potrjene vrzeli P1:
+
+- ni splošne knjige vseh gibanj zaloge, dokončane polne inventure ali potrjene
+  računovodske metode FIFO oziroma tehtanega povprečja;
+- ni dokazljivega izračuna zakonske prejšnje cene v 30-dnevnem obdobju po
+  lokaciji in kanalu;
+- ni zaključenih delnih dobropisov, več delnih poravnav ter celovitega izvoza
+  izvora in vseh sprememb za davčni nadzor;
+- koledar delovnih dni še ni dokazano dopolnjen s slovenskimi prazniki;
+- ni e-SLOG/EN 16931 generatorja, validatorja in transporta za B2B obveznost od
+  1. 1. 2028;
+- retencija in varnostne kopije so arhitekturno opisane, niso pa še dokazano
+  uveljavljene po posamezni zakonski vrsti dokumenta.
+
+Ničelni račun z negativnimi količinami ostaja potrjeno interno ciljno pravilo,
+vendar pred produkcijo zahteva računovodsko-davčno potrditev, da prikaz ustreza
+dejanskemu poslovnemu dogodku v vseh predvidenih scenarijih.
+
 ## Naslednja revizija kode
 
 Kodo je treba primerjati po tem vrstnem redu:
@@ -136,7 +187,12 @@ Kodo je treba primerjati po tem vrstnem redu:
 9. reklamacija, ki se vedno začne iz računa in ohrani povezave;
 10. centralne priloge, garancijsko vezana retencija in nova strategija
     varnostnih kopij;
-11. FURS matrika, novi interni akt in produkcijski sprejemni test.
+11. časovno veljavni davčni profil, klasifikacije in večstopenjski račun;
+12. fiskalni izpisi, kopije in produkcijski izvajalec FURS vrste;
+13. DDV evidence, davčni in računovodski izvozi ter zakonska retencija;
+14. zakonska 30-dnevna prejšnja cena in cena na mersko enoto;
+15. B2G e-račun ter priprava B2B e-računov za 1. 1. 2028;
+16. FURS matrika, novi interni akt in produkcijski sprejemni test.
 
 ## Produkcijski status
 

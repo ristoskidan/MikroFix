@@ -64,7 +64,13 @@
         "offline",
         "microdetect",
         "imei",
-        "dokument"
+        "dokument",
+        "identitet",
+        "mikrofix",
+        "znamk",
+        "vizual",
+        "logotip",
+        "piksel"
       ],
       "source": "docs/kanon/01_POSLOVNA_PRAVILA.md"
     },
@@ -99,12 +105,12 @@
     }
   },
   "sources": {
-    "docs/kanon/00_KAZALO.md": "d2e15a9e819b2bedb6025aefc024b217cdfed1141162bb22967571fd6fdc4e0a",
-    "docs/kanon/01_POSLOVNA_PRAVILA.md": "5b7c9c5d249dbfc78261c26fd8aa99f5d2bffc220baf84c760e2e42f8b025c90",
-    "docs/kanon/02_CILJNA_ARHITEKTURA.md": "b5ec64165bea749d4e972d9cc9a6a6613296928f6bdac93bf28bac305b927438",
-    "docs/kanon/03_SPREJEMNI_TESTI.md": "2614b280ed41c5e9249337342bec8b1ae271f6d2c22d20e6fcd278db3ae794c9",
-    "docs/kanon/04_STANJE_IZVEDBE.md": "6f1a84eaa3754935f9c8cd727942843249d04b91acb88f206cb54aaf58f3805e",
-    "docs/kanon/05_ZGODOVINA_ODLOCITEV.md": "9af53d8abba8ff1215bed2767dad4dc1dab72d83ded23167f2deb86647fda123"
+    "docs/kanon/00_KAZALO.md": "7ca11d62a84ec6bd238e87f19b8c9be9fd6b2d7485fc7def1e12be985a91eb69",
+    "docs/kanon/01_POSLOVNA_PRAVILA.md": "b4a9c5bbf8eeeaf8a2c6298f9ea88284b72d22278e3bb9f21bd27915eb51f2e3",
+    "docs/kanon/02_CILJNA_ARHITEKTURA.md": "8e320b0dfeea875f73ee59e57b88d04e2ee2a877b89e869b5b069fd0a969d8bd",
+    "docs/kanon/03_SPREJEMNI_TESTI.md": "9f83b4eb67450997dbb4eacd98ace7a232a73fb041c8be3fd321a69ee2cf310f",
+    "docs/kanon/04_STANJE_IZVEDBE.md": "e54e46b3e85eb30601073f5452bef7885d0f14aa05ac959cbc53f51ca39aff0b",
+    "docs/kanon/05_ZGODOVINA_ODLOCITEV.md": "8bb52f386228de1a8af109c2f36479255886ba3b9213c0f08459ccb411ff8428"
   },
   "version": 2
 }

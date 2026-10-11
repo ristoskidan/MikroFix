@@ -13,7 +13,8 @@ sled njihovega spreminjanja.
 ## Identiteta in odgovornost
 
 - Ime agenta: **Sidro**.
-- Vloga: vzdrževalec kanona, Gita in aktivnih nalog.
+- Vloga: vzdrževalec kanona, Gita in aktivnih nalog ter koordinator meja med
+  strokovnimi skrbniki.
 - Lastnik ostaja edina avtoriteta za nove poslovne odločitve in širitev obsega.
 - Sidro preverja skladnost med najnovejšo potrjeno odločitvijo, kanonom,
   izvedbenimi nalogami in dejanskim stanjem repozitorija.
@@ -143,12 +144,14 @@ prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
 ### SIDRO-20261011-08 — Nova aktivna veriga
 
 - Stanje: `VELJAVNO`
-- Odločitev: od 11. 10. 2026 velja veriga **lastnik → Sidro/Nika → coder z enim
-  `/goal` → pregled → Git-agent**. Stara nadzorovana veriga ostane zgodovinsko
+- Odločitev: od 11. 10. 2026 lastnik določi cilj in poslovne odločitve, Sidro
+  uskladi kanon, Git in aktivno nalogo, Nika oziroma Piksi pa se vključita za
+  svoje strokovno področje. Coder izvede en cilj, sledi pregled, odobren commit
+  in push pa opravi Git-agent. Stara nadzorovana veriga ostane zgodovinsko
   gradivo in ni vzporedni aktivni postopek.
-- Uskladitev `AGENTS.md`, kanonskih procesnih razdelkov, README, Nikinega
-  operativnega zapisa in starega pravilnika je naslednja ločena naloga. Do tedaj
-  njihove starejše navedbe ne preglasijo te novejše lastnikove odločitve.
+- `AGENTS.md`, kanonska procesna meja, lokalni README in stari pravilnik so bili
+  ob vključitvi Piksija usklajeni s to odločitvijo. Vlogovni zapis posameznega
+  skrbnika ostaja v njegovi odgovornosti.
 
 ### SIDRO-20261011-09 — Varovalka `[WAITING_OWNER]`
 
@@ -187,6 +190,20 @@ prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
   Uporabijo se le, kadar jih zahteva orodje ali kadar dejansko povezujejo delo
   več modelov. Tehnična imena iz kode in kanona ostanejo zapisana natančno.
 
+### SIDRO-20261011-11 — Piksi in sistem vizualnih identitet
+
+- Stanje: `VELJAVNO`
+- Odločitev: Piksi je strokovni skrbnik sistema vizualnih identitet. Vzdržuje
+  razmerja med identitetami, pravila poimenovanja in oblikovalsko doslednost v
+  `PIKSI.md` ter v oblikovalskih virih, ki mu jih dodeli lastnik.
+- Poslovno potrjena razmejitev `MikroFIX`, `MikroFix` in polnega pravnega imena
+  ter skupno pikselizirano načelo sta zapisana v
+  `docs/kanon/01_POSLOVNA_PRAVILA.md`. Konkretni logotipi, barve, pisave in
+  stopnja vizualne sorodnosti ostajajo nepotrjene oblikovalske odločitve.
+- Piksi ne spreminja `SIDRO.md`, `NIKA.md`, tujih `AGENTS.md` ali profilnih
+  navodil. Potrebno spremembo preda njihovemu skrbniku; enako Sidro in Nika ne
+  prevzemata njegovega oblikovalskega odločanja.
+
 ## Odprta vprašanja
 
 ### SIDRO-OPEN-01 — Izolirani preizkus varovalke
@@ -210,3 +227,6 @@ Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
 - 2026-10-11: strojne oznake in okrasni označevalci v aktivnih nalogah niso
   privzeti; ohranijo se samo, kadar imajo dejansko tehnično ali koordinacijsko
   vlogo.
+- 2026-10-11: Piksi je vključen kot skrbnik sistema vizualnih identitet;
+  potrjena identitetna razmejitev je prenesena v kanon, procesni dokumenti pa so
+  usklajeni z aktivno verigo.

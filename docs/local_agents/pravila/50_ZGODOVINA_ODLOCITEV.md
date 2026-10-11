@@ -79,7 +79,7 @@ odobritve ali sklenitve pogodbe in ne dovoljuje plačila.
 - pooblaščenka sme pregledati in prevzeti napravo ter pripraviti samo osnutek
   pogodbe. Daniel Ristoski jo dokončno odobri in sklene ter izvede plačilo.
 
-## 5. Tri odprte odločitve
+## 5. Evidenca odprtih in razrešenih odločitev
 
 1. **Aktivni cenovni profil in `L0`:** določiti začetno vrednost `L0`, lastnika
    cenovnega profila, njegovo različico ter postopek potrditve spremembe.
@@ -91,9 +91,30 @@ odobritve ali sklenitve pogodbe in ne dovoljuje plačila.
    oziroma drugega poslovnega dokumenta. To vprašanje je ločeno od namenskega
    digitalnega potrdila za davčno potrjevanje računov in centralizirano FURS
    komunikacijo.
+4. **Trenutni DDV-status in datum prehoda:** iz preverljivega podatka FURS ali
+   eDavkov ugotoviti režim domače prodaje, morebitni omejeni obseg identifikacije
+   in datum začetka. Vnaprej določen datum prehoda ni nujen, ker ga lahko sproži
+   tudi promet ali prostovoljna vključitev.
+5. **Cenovna politika ob prehodu v DDV — RAZREŠENO 11. 10. 2026:** velja
+   kombinacija po skupinah. Terenske storitve in delo ohranijo potrjene končne
+   cene, pri rezervnih delih in paketnih popravilih pa se nova končna cena
+   potrdi po preverjanju marže glede na novo nabavno stroškovno osnovo.
+6. **Vrednotenje zaloge:** z računovodjo potrditi FIFO ali tehtano povprečje in
+   metodo razporejanja odvisnih nabavnih stroškov.
+7. **B2G obseg:** potrditi, ali MikroFIX izdaja račune proračunskim uporabnikom;
+   če jih, je UJP e-račun produkcijska blokada.
+8. **Ničelni račun:** računovodsko in davčno potrditi uporabo negativnih količin
+   za garancijsko, brezplačno, zavrnjeno in drugo nezaračunano obravnavo ali
+   določiti pravilen nadomestni prikaz po scenariju.
+9. **Delni popravki in plačila:** določiti uporabniški tok delnega dobropisa,
+   delnega vračila, več delnih plačil in kombiniranega plačila.
+10. **Retencija in obnova:** potrditi odgovorne osebe, RPO/RTO, lokacije kopij,
+    zakonske roke po vrsti dokumenta in pogostost dokazne testne obnove.
 
-Vse druge zgoraj zapisane točke so potrjeno ciljno poslovno stanje. Njihova
-neizvedenost v trenutni kodi je izvedbena vrzel, ne odprta poslovna odločitev.
+Točka 5 je razrešena in je del kanona. Preostale oštevilčene točke v tem
+poglavju ostajajo odprte. Vse druge pred tem poglavjem zapisane točke so
+potrjeno ciljno poslovno stanje. Njihova neizvedenost v trenutni kodi je
+izvedbena vrzel, ne odprta poslovna odločitev.
 
 ## 6. Dodatno potrjeno 14. 9. 2026
 
@@ -110,3 +131,50 @@ neizvedenost v trenutni kodi je izvedbena vrzel, ne odprta poslovna odločitev.
   prijave; vsaka offline prijava mora prikazati opozorilo in čas izteka;
 - obstoječi preprosti fizični prepis identitete nepodprte naprave je zadosten;
   dodatnih polj za razčlenjevanje vira odčitka se ne uvaja.
+
+## 7. Pravno-davčna uskladitev 11. 10. 2026
+
+Novejša pravna preverba nadomešča prejšnji dvorežimski model. Potrjena je ciljna
+podpora notranjim statusom `NON_VAT`, `VAT_ATYPICAL` in `VAT_REGISTERED` ter
+ločitev režima domače prodaje od obsega DDV-identifikacije. `VAT_ATYPICAL` je
+notranje ime za omejeno identifikacijo, ki jo FURS na seznamu označuje s `P`;
+ne pomeni samodejnega obračuna DDV od domačih dobav ali splošne pravice do
+odbitka. Podpora vsem statusom ne odloča, kateri trenutno velja za MikroFIX;
+ta podatek in njegov začetek ostajata odprta odločitev iz 5. poglavja.
+
+Potrjeno je tudi:
+
+- ob prehodu v `VAT_REGISTERED` velja kombinirana cenovna politika: terenske
+  storitve in delo ohranijo potrjene končne cene, rezervni deli in paketna
+  popravila pa dobijo vnaprej potrjen, časovno veljaven cenik po preverjanju
+  marže glede na novo nabavno stroškovno osnovo;
+- prehod davčnega profila ne ustvari nove zaloge in ne spreminja zgodovinskih
+  računov;
+- pragova 60.000 EUR in 66.000 EUR se spremljata po koledarskem letu po
+  zakonski opredelitvi prometa; pri preseganju 66.000 EUR je obdavčena že
+  transakcija, s katero je prag presežen;
+- datum izdaje sam ne določa davčne obravnave prehoda; hranijo se datum dobave
+  oziroma opravljene storitve in predplačila, uporabi pa se 161. člen PZDDV-1;
+- morebitni odbitek DDV od zaloge, nabavljene pred identifikacijo, ni samodejen,
+  temveč ločena preverjena računovodska odločitev po konkretnih listinah;
+- izdana vrstica ohrani davčni posnetek, popravek pa se sklicuje na izvor;
+- kartica se za ZDavPR obravnava kot gotovinsko plačilo, neposredno nakazilo na
+  TRR pa praviloma ne;
+- interni stroškovni minimum ni zakonska prejšnja cena pri objavi znižanja;
+- splošna domača obveznost B2B e-računov se začne 1. 1. 2028, medtem ko B2G
+  obveznost že velja;
+- PDF sam zase ni strukturirani e-račun in e-račun ne nadomesti morebitne
+  obveznosti davčnega potrjevanja.
+
+## 8. Sistem vizualnih identitet 11. 10. 2026
+
+Lastnik je potrdil pomensko razmejitev imen: `MikroFIX` označuje programsko
+družino in njene tri izdelke, `MikroFix` javno identiteto terenskega servisa,
+polno registrirano ime podjetja pa pravno identifikacijo. Velikost črk zato ni
+le slogovna različica.
+
+Potrjeno je tudi skupno pikselizirano oblikovno načelo s poudarkom na delu
+imena `FIX`. Načelo povezuje obe identitetni poti, vendar ne določa enakega
+logotipa ali enake uporabe vseh elementov. Končni logotipi, barve, pisave, motiv
+razbitega stekla in stopnja vizualne sorodnosti ostajajo odprte oblikovalske
+odločitve. Operativni zemljevid vodi Piksi v `docs/local_agents/PIKSI.md`.

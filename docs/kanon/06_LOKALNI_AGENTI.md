@@ -2,19 +2,27 @@
 
 Status: **izpeljana procesna meja, ne vir poslovnih pravil**
 
-Aktivni proces je določen v `docs/local_agents/PRAVILNIK_VERIGE.md`. Ta dokument
-zapisuje samo njegovo povezavo s poslovnim kanonom.
+Aktivna razdelitev vlog in izvedbeni tok sta določena v
+`docs/local_agents/README.md`. Operativni zapisi `SIDRO.md`, `NIKA.md` in
+`PIKSI.md` ne morejo sami ustvariti ali spremeniti poslovnega pravila.
 
-- Vloge `conversation_lead`, `plan_preparer`, `plan_validator`, `executor` in `local_reviewer`
-  niso vezane na ime modela.
-- Pogovorni raziskovalec sme projekt samo brati. `plan_preparer` je ločena seja
-  brez njegovega skritega spomina. Izvedba se začne šele po prikazanem načrtu,
-  `/plan-dispatch`, validaciji in lastnikovem `/approve-plan`.
-- Izvajalec piše samo v dovoljene datoteke izoliranega worktreeja.
-- Gatekeeper in reviewer preverita dejanski diff, teste ter sprejemna merila.
-- Lokalni kandidat ni odobritev. Codex ostane končni tehnični pregledovalec in
-  edini člen, ki lahko prenese preverjeni kandidat v zaščiteni original.
-- Noben model ne sme spreminjati poslovnih pravil, produkcijskih podatkov,
-  dovoljenj, testnih ukazov ali state machine.
-- Model dobi samo tematske module veljavnega kanona, ki so potrebni za njegovo
-  vlogo in trenutno nalogo. Zgodovinski master in eval-dnevnik se ne pošiljata.
+- Lastnik določa poslovna pravila, obseg dela in sprejem sprememb.
+- Sidro usklajuje kanon, Git stanje in aktivne naloge.
+- Nika vzdržuje profile lokalnih modelov, zaganjalnike in njihova navodila.
+- Piksi vzdržuje sistem vizualnih identitet in oblikovalska pravila. Potrjeno
+  identitetno pravilo se najprej zapiše v poslovni kanon; njegov operativni zapis
+  nato vodi izvedbene podrobnosti in odprte oblikovalske odločitve.
+- Coder izvede samo dodeljeni sklop. Strokovni skrbnik pregleda vpliv na svoje
+  področje, Sidro pa pred commitom preveri skladnost kanona, naloge in diffa.
+- Commit in push opravi Git-agent po lastnikovi odobritvi; coder tega ne opravi
+  sam.
+- Vloge ne spreminjajo profilnih ali operativnih datotek drugega skrbnika brez
+  njegovega dogovora. Potrebno spremembo mu predajo z razlogom in predlogom.
+- Noben agent ne sme poslovnega pravila izpeljati samo iz kode, starega pogovora
+  ali zgodovinskega pravilnika.
+- Model dobi relevantne module veljavnega kanona, potrebne za svojo vlogo in
+  trenutno nalogo. Celotnega kanona ne prebira brez stvarne potrebe.
+
+`docs/local_agents/PRAVILNIK_VERIGE.md` in pripadajoči artefakti prejšnje
+nadzorovane verige so zgodovinsko oziroma tehnično gradivo, ne vzporedni aktivni
+postopek.

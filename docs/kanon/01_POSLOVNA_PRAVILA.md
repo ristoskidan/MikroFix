@@ -455,3 +455,24 @@ pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
   gotovino ali kartico, se davčno potrdi, kadar so izpolnjeni pogoji ZDavPR.
 - Hrani se strukturirani izvirnik, uporabljena sintaksa, enolična identiteta,
   transportna pot ter statusi sprejema, zavrnitve in dostave.
+
+## 22. Imena in sistem vizualnih identitet
+
+- `MikroFIX` je identiteta programske družine. Njeni izdelki se dosledno
+  imenujejo **MikroFIX Office**, **MikroFIX Servis** in **MikroFIX Blagajna**.
+- `MikroFix` je javna identiteta terenskega servisa. Ime `MikroFIX Servis`
+  označuje programski izdelek in ni zamenljivo z javno storitveno identiteto
+  `MikroFix`.
+- Polno registrirano ime podjetja je pravna identifikacija, ne tretja prosto
+  oblikovana znamka. Na pravno pomembnih dokumentih se vedno prevzame iz
+  veljavnega poslovnega vira oziroma nastavitev.
+- Velikost črk je pomenska. Zapisov `MikroFIX` in `MikroFix` ni dovoljeno
+  poenotiti samo zaradi vizualne doslednosti.
+- Programsko in servisno identiteto povezuje pikselizirani oblikovni jezik. Del
+  imena `FIX` je njegov glavni poudarek; mreža, kvadratni moduli, rastrski
+  prehodi, fragmenti, robovi in ikone so dovoljeni načini njegove izvedbe.
+- Pikselizirani jezik ne sme zmanjšati čitljivosti, uporabnosti, resnosti ali
+  zakonsko zahtevane vsebine programske opreme, računov in servisnih gradiv.
+- Končni logotipi, barve, pisave, gostota vzorca, motiv razbitega stekla in
+  stopnja vizualne sorodnosti identitet niso določeni s tem pravilom. Postanejo
+  kanon šele po izrecni lastnikovi potrditvi.

@@ -141,13 +141,13 @@ HDD je treba opraviti ločeno in s predhodnim lastnikovim dovoljenjem za test.
    sklopi. `/goal` coderju poda *en* cilj z vrati; `/compact` ni odobritev novega
    cilja. Ob zagonu coder samo potrdi pripravljenost. Relevantni kanon se odpre
    ob cilju, ne celoten kanon preventivno ob začetku.
-3. Poslovni vir je `docs/kanon/00_KAZALO.md` z aktivnimi razdelki; procesni vir
-   je `docs/local_agents/PRAVILNIK_VERIGE.md`. Koda je dokaz trenutne izvedbe,
-   ne samostojen vir novih poslovnih pravil.
-4. Neposredni `*-coder` zaganjalniki so interaktivni Codex profili. Sami po
-   sebi **ne dokazujejo**, da je bil izveden uradni tok `/research` → priprava
-   in validacija načrta → lastnikova odobritev → izolirani `executor` →
-   gatekeeper/reviewer → Codexov končni pregled. Vloge so ločene od imen modelov.
+3. Poslovni vir je `docs/kanon/00_KAZALO.md` z aktivnimi razdelki; aktivno
+   razdelitev vlog in izvedbeni tok določa `docs/local_agents/README.md`.
+   `PRAVILNIK_VERIGE.md` je zgodovinski opis prejšnje nadzorovane verige. Koda
+   je dokaz trenutne izvedbe, ne samostojen vir novih poslovnih pravil.
+4. Neposredni `*-coder` zaganjalniki so interaktivni Codex profili. Izvedejo
+   samo cilj, ki jim ga dodeli lastnik; ne pomenijo poslovne odobritve, pregleda
+   ali dovoljenja za commit in push. Vloge so ločene od imen modelov.
 5. Coder izdela kandidatno spremembo in preveri vrata cilja. Codex opravi
    končni pregled, lastnik sprejme ali zavrne. Za odobren commit/push je po
    zadnjem dogovoru zadolžen poseben Git-agent, ne coder.
@@ -191,15 +191,10 @@ HDD je treba opraviti ločeno in s predhodnim lastnikovim dovoljenjem za test.
    celo `ast.parse`; projektni `AGENTS.md` za izrecno implementacijo dovoljuje
    varna potrebna preverjanja. Pred uporabo za nove sklope ga uskladi s
    potrjenim načinom Gemme/Mistrala. Tega v tem popisu nisem spreminjala.
-2. **Projektni `AGENTS.md`:** izjema za samodejni commit navodil modela je v
-   nasprotju z novo delitvijo (coder → Codex/lastnik → Git-agent). Enako je
-   treba natančneje opredeliti preverjanje po `/compact`, da se ne ponavljajo
-   nespremenjeni testi. Zapisana sta kot odprta predloga, ne kot že izveden
-   popravek projektnega pravila.
-3. **Mistralov nekdanji research profil:** uporablja isti `CODEX_HOME/config.toml`
+2. **Mistralov nekdanji research profil:** uporablja isti `CODEX_HOME/config.toml`
    kot coder. Njegov zaganjalnik je arhiviran in ni več aktivni terminalski ukaz;
    profilne datoteke ostanejo nedotaknjene za morebitno obnovitev.
-4. **Mistralov kontekst:** profil nastavi 40.960 tokenov, Ollamina metapodatka
+3. **Mistralov kontekst:** profil nastavi 40.960 tokenov, Ollamina metapodatka
    osnovnega modela pa navajata izvorno dolžino 32.768. Dejanski vpliv na
    kakovost ali hitrost brez preizkusa ni potrjen.
 
@@ -211,7 +206,7 @@ HDD je treba opraviti ločeno in s predhodnim lastnikovim dovoljenjem za test.
 - Profili: `/home/mikrofix/.gemma12-codex/`, `/home/mikrofix/.mistral-codex/`,
   `/home/mikrofix/.ministral-codex/` (`config.toml`, `AGENTS.md`).
 - Skupni projekt: `/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/AGENTS.md`;
-  proces: `docs/local_agents/PRAVILNIK_VERIGE.md` v istem repozitoriju.
+  aktivni potek: `docs/local_agents/README.md` v istem repozitoriju.
 - Osnovni model, parametri in zmožnosti so preverjeni z `ollama show` in
   `ollama show --modelfile`; tagi z `ollama list`. Enaki osnovni modelni blobi
   potrjujejo zgoraj navedene pare osnovni model ↔ lokalni tag.

@@ -9,9 +9,11 @@ uporabnikovo zahtevo ali tem dokumentom.
 
 - Poslovna pravila določa `docs/kanon/00_KAZALO.md` in aktivni dokumenti, na
   katere kaže. Koda in zgodovinski zapisi niso samostojen vir poslovnih pravil.
-- Uradni postopek lokalne agentske verige določa
-  `docs/local_agents/PRAVILNIK_VERIGE.md`. Neposredni zaganjalnik ni dokaz, da
-  so bili opravljeni koraki te verige ali izdana odobritev za implementacijo.
+- Aktivno razdelitev lokalnih vlog in izvedbeni tok določa
+  `docs/local_agents/README.md`, trajne operativne odločitve pa vodijo skrbniki
+  v svojih vlogovnih zapisih. `docs/local_agents/PRAVILNIK_VERIGE.md` je
+  zgodovinski opis prejšnje nadzorovane verige in ni več vzporedni aktivni
+  postopek.
 - Lastnik odloča o poslovnih pravilih in obsegu. Ob manjkajočem ali nasprotujočem
   pravilu zahtevaj konkretno odločitev; ne izmišljaj si novega pravila.
 
@@ -36,29 +38,27 @@ uporabnikovo zahtevo ali tem dokumentom.
   počakaj na izrecno odobritev implementacije. Ne spreminjaj datotek samo zato,
   ker je bil načrt sprejet v pogovoru kot tema razprave.
 
-## Potek večjih nalog po sklopih in vratih
+## Potek večjih nalog po sklopih
 
-- Pri ustvarjanju večje naloge, razdeljene na sklope in vrata, v začetni poziv
-  vključi ta potek. Model naj najprej v celoti prebere sistemska in projektna
-  navodila, vhodno zahtevo ter navedene priloge, nato pa samo sporoči, da je
-  pripravljen na delo. Izvajanja ne začne pred prvim uporabnikovim `/goal`.
-- Posamezni `/goal` zajema natanko en sklop do njegovih zadnjih vrat. Dokler cilj
-  ali vrata niso uspešni, isti sklop ponavljaj in odpravljaj ugotovljene napake.
-  Ko je cilj uspešen, se ustavi; ne sprašuj, ali naj nadaljuješ v naslednji sklop.
-- Ob zaključku cilja izpiši rezultat vseh pripadajočih vrat, vse zahtevane
-  spremenljivke ter preverljive rezultate ukazov in testov, ki so pogoj za vrata.
-  Uspeha ne razglasi, dokler niso izpolnjena zadnja vrata tega sklopa.
-- Po uporabnikovem `/compact` in pred naslednjim `/goal` naj naloga vedno vsebuje
-  obnovitveno kontrolno točko: preveri povzetek in rezultate prejšnjega sklopa,
-  ponovno potrdi njegove ključne izhode ter za nadaljevanje preglej najmanj
-  `git status --short`, `git diff` in `git diff --cached`. Šele nato sprejmi novi
-  `/goal`; ugotovljenih nedokončanih ali nasprotujočih sprememb ne preskoči.
+- Ob zagonu model pove svojo vlogo in pripravljenost. Konkretno delo začne šele,
+  ko lastnik ločeno aktivira cilj; izvedbeni dokument zato ne vsebuje ukaza
+  `/goal` kot dela svoje vsebine.
+- En cilj zajema en smiselno zaključen sklop. Model samostojno odpravi tehnične
+  napake znotraj dodeljenega obsega in uspeha ne razglasi, dokler niso izpolnjena
+  vsa merila sklopa.
+- Ob zaključku izpiše zahtevane rezultate, dejanske izide preverjanj in odprto
+  lastnikovo odločitev, če je ta res potrebna. Naslednjega sklopa ne začne brez
+  novega lastnikovega cilja.
+- Po uporabnikovem `/compact` se pred nadaljevanjem preverijo povzetek, ključni
+  izhodi prejšnjega sklopa, `git status --short`, `git diff` in
+  `git diff --cached`. Že uspešni testi se ponovijo samo, če se je spremenil
+  njihov vhod, če jih zahteva novi sklop ali če prejšnji dokaz ni zanesljiv.
 
 ## Izvedba in preverjanje
 
 - Pri odobreni implementaciji ohrani vse obstoječe uporabnikove spremembe in
-  spremeni samo odobrene datoteke. Za uradno agentsko verigo veljajo dodatne
-  omejitve worktreeja in odobritev iz `PRAVILNIK_VERIGE.md`.
+  spremeni samo odobrene datoteke. Morebitne dodatne omejitve worktreeja in
+  odobritve morajo biti izrecno zapisane v aktivni nalogi.
 - Pred `apply_patch` v repozitoriju preveri pripravljeni patch na trenutnem
   stanju datotek: njegovo obliko in ujemanje konteksta. Za spremembo izvorne
   kode v začasni kopiji ali pomnilniku sestavi **celotno nastalo datoteko** in
@@ -87,7 +87,6 @@ uporabnikovo zahtevo ali tem dokumentom.
   odobreni push; lokalni coder ga ne izvede sam.
 - Ne nameščaj paketov, ne spreminjaj odvisnosti, ne pripravljaj commita in ne
   posegaj v sistemsko okolje brez izrecne zahteve za to dejanje.
-- Izjema so spremembe zunaj izvorne kode, s katerimi aktivno izboljšujemo model
-  ali njegova navodila, na primer `AGENTS.md`, `README*` in primerljiva navodila.
-  Takšne spremembe vedno ohrani takšne, kot so, in jih commitaj brez dodatnega
-  vprašanja. Ne vključuj jih v isti commit s spremembami izvorne kode.
+- Spremembe navodil modelov, `AGENTS.md`, `README*` in primerljivih operativnih
+  dokumentov se ohranijo in predajo Git-agentu ločeno od sprememb izvorne kode.
+  Coder jih sam ne commita ali pusha brez izrecno dodeljene Git naloge.

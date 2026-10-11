@@ -23,6 +23,7 @@ MODULES = {
             "zaloga", "artikel", "furs", "storno", "plačil", "rabat",
             "znesek", "decimal", "cena", "odkup", "garanc", "reklamac",
             "inventura", "offline", "microdetect", "imei", "dokument",
+            "identitet", "mikrofix", "znamk", "vizual", "logotip", "piksel",
         ],
     },
     "architecture": {

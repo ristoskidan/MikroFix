@@ -163,3 +163,16 @@ Potrjeno je tudi:
   obveznost že velja;
 - PDF sam zase ni strukturirani e-račun in e-račun ne nadomesti morebitne
   obveznosti davčnega potrjevanja.
+
+## 8. Sistem vizualnih identitet 11. 10. 2026
+
+Lastnik je potrdil pomensko razmejitev imen: `MikroFIX` označuje programsko
+družino in njene tri izdelke, `MikroFix` javno identiteto terenskega servisa,
+polno registrirano ime podjetja pa pravno identifikacijo. Velikost črk zato ni
+le slogovna različica.
+
+Potrjeno je tudi skupno pikselizirano oblikovno načelo s poudarkom na delu
+imena `FIX`. Načelo povezuje obe identitetni poti, vendar ne določa enakega
+logotipa ali enake uporabe vseh elementov. Končni logotipi, barve, pisave, motiv
+razbitega stekla in stopnja vizualne sorodnosti ostajajo odprte oblikovalske
+odločitve. Operativni zemljevid vodi Piksi v `docs/local_agents/PIKSI.md`.
