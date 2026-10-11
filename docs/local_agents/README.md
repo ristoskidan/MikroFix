@@ -6,6 +6,8 @@ prvim sporočilom izbere nameščeni model in njegove dovoljene runtime nastavit
 
 ## Aktivni deli
 
+- [`SIDRO.md`](SIDRO.md) — trajna izhodiščna točka za vzdrževanje kanona, Gita
+  in aktivnih nalog;
 - `roles/` — kratki prompti posameznih vlog;
 - `pravila/` — mehansko generirani, ciljno izbrani moduli iz `docs/kanon/`;
 - `supervisor/` — strojne JSON pogodbe in operativni priročnik;
