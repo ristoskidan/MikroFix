@@ -31,7 +31,7 @@ Gemminim profilom. To ne pomeni samodejnega kopiranja njenih modelnih parametrov
 izjeme ostanejo predmet izrecnega dogovora. Ta zapis sam po sebi ne spremeni
 zaganjalnikov, `config.toml` ali `AGENTS.md` drugih agentov.
 
-## Trenutno dejansko stanje
+## Trenutno dejansko stanje glavnih treh profilov
 
 | Agent | Osnovni Ollama model | Aktivni lokalni tag | Zaganjalnik / profil | Kontekst / samodejna kompakcija | Parametri Ollama |
 | --- | --- | --- | --- | --- | --- |
@@ -53,8 +53,34 @@ Gemma 12B in Mistral imata izvedbeno vedenje v kratkem
 zemljevid projekta. Ministral je še na starejši ureditvi: nima tega
 `developer_instructions`, njegov profilni `AGENTS.md` vsebuje obširna pravila.
 Mistralov profil je simbolna povezava na HDD; ta pot je bila pri popisu berljiva.
-Mistral ima tudi ločen raziskovalni zaganjalnik `mistral-research`, ki uporablja
-isti profil in model, vendar `read-only` okolje in raziskovalni začetni poziv.
+Mistralov nekdanji raziskovalni zaganjalnik je arhiviran; ni več ukaz v `PATH`.
+
+## Terminalski zaganjalniki — samo coder
+
+Odločitev lastnika, 11. 10. 2026: v aktivni terminalski mapi ostanejo samo
+zaganjalniki za kodersko vlogo. Kratka priporočena imena so vezana na točno
+določeno družino oziroma velikost modela; vsa kličejo obstoječe dolge
+`mikrofix-*-coder` zaganjalnike, katerih nastavitve se s tem niso spremenile.
+
+| Kratki ukaz | Ciljni zaganjalnik | Aktivni model |
+| --- | --- | --- |
+| `gemma12-coder` | `mikrofix-gemma12-coder` | `mikrofix-gemma4-12b-focused-65k` |
+| `gemma26-coder` | `mikrofix-gemma-coder` | `gemma4:26b-codex` |
+| `mistral7-coder` | `mikrofix-mistral-coder` | `mikrofix/mistral:7b-40k` |
+| `ministral8-coder` | `mikrofix-ministral-coder` | `mikrofix/ministral-3:8b-coder-16k` |
+| `qwen25-coder` | `mikrofix-qwen25-coder` | `mikrofix/qwen2.5:14b-8k` |
+| `qwen35-coder` | `mikrofix-qwen35-coder` | `mikrofix/qwen3.5-coder:9b-65k` |
+| `gpt-oss-coder` | `mikrofix-gpt-oss-coder` | `mikrofix/gpt-oss-coder:20b-65k` |
+| `deepseek-coder` | `mikrofix-deepseek-coder` | `mikrofix/deepseek-r1:14b-65k` |
+
+Stara kratka koderska imena `gemma-coder`, `mistral-coder` in `qwen-coder`
+ostajajo združljivostni vzdevki za Gemmo 26B, Mistral 7B in Qwen 3.5;
+niso dodatne vloge ali modeli. Raziskovalnih in starih testnih zaganjalnikov
+ni več v `/home/mikrofix/.local/bin/`: vseh 20 datotek je obnovljivo v
+`/home/mikrofix/.local/share/mikrofix/retired-launchers/2026-10-11/`.
+Profilnih `AGENTS.md`, `config.toml`, modelov in izoliranega poskusa varovalke
+ta ureditev ni spreminjala. V `/home/mikrofix/Desktop/` ostaja samo splošna
+bližnjica za aplikacijo Codex, ne zaganjalnik lokalnega modela.
 
 ## Izolirani poskus varovalke `/goal` za Gemmo 12B
 
@@ -170,10 +196,9 @@ HDD je treba opraviti ločeno in s predhodnim lastnikovim dovoljenjem za test.
    treba natančneje opredeliti preverjanje po `/compact`, da se ne ponavljajo
    nespremenjeni testi. Zapisana sta kot odprta predloga, ne kot že izveden
    popravek projektnega pravila.
-3. **Mistralov research profil:** uporablja isti `CODEX_HOME/config.toml` kot
-   coder, kjer `developer_instructions` Mistrala imenuje programer. To je
-   možen konflikt vloge za raziskovalne seje; raziskovalnega profila v tem
-   koraku nisem spreminjala.
+3. **Mistralov nekdanji research profil:** uporablja isti `CODEX_HOME/config.toml`
+   kot coder. Njegov zaganjalnik je arhiviran in ni več aktivni terminalski ukaz;
+   profilne datoteke ostanejo nedotaknjene za morebitno obnovitev.
 4. **Mistralov kontekst:** profil nastavi 40.960 tokenov, Ollamina metapodatka
    osnovnega modela pa navajata izvorno dolžino 32.768. Dejanski vpliv na
    kakovost ali hitrost brez preizkusa ni potrjen.
