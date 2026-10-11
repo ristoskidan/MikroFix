@@ -61,22 +61,19 @@ lastnikov /goal
 - Pri preverjanju diffa se ločita sprememba trenutnega cilja in celoten
   kumulativni kandidat vseh še necommitiranih sklopov.
 
-## Stanja cilja in odobritve
+## Stanja cilja in čakanje na lastnika
 
-Ta del je **odprt predlog**, dokler agent za vloge ne zaključi raziskave
-dejanskega obnašanja `/goal` in njegovega konteksta.
-
-Predvidena stanja so:
+Uporabljene izhodne oznake so:
 
 - `PASSED`: vsa vrata sklopa so uspešna;
 - `FAILED_RETRYABLE`: tehnična napaka, ki jo agent lahko odpravi znotraj cilja;
 - `WAITING_OWNER`: manjka poslovna odločitev ali nova pristojnost, zato se
   samodejno ponavljanje ustavi.
 
-Predvideno varovalo je, da ima vsaka zahteva za odločitev stabilen
-`APPROVAL_REQUEST_ID`. Iste nerešene zahteve agent ne ponavlja, je ne odobri sam
-in tišine ne razume kot odobritev. To pravilo se ne označi kot dokončno, dokler
-ni usklajeno z raziskavo agenta za vloge.
+Coder ob `WAITING_OWNER` uporabi dogovorjeni besedilni signal, opisan v potrjeni
+odločitvi `SIDRO-20261011-09`. Signal ni vgrajena funkcija Codexa in ne nadomešča
+strukturiranih zahtev za dovoljenje. Stabilni `APPROVAL_REQUEST_ID` ni pogoj za
+prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
 
 ## Pravila vzdrževanja tega dokumenta
 
@@ -153,14 +150,35 @@ ni usklajeno z raziskavo agenta za vloge.
   operativnega zapisa in starega pravilnika je naslednja ločena naloga. Do tedaj
   njihove starejše navedbe ne preglasijo te novejše lastnikove odločitve.
 
+### SIDRO-20261011-09 — Varovalka `[WAITING_OWNER]`
+
+- Stanje: `VELJAVNO`; tehnični učinek je do izoliranega preizkusa
+  `NEPOTRJENO`.
+- Coder uporabi `[WAITING_OWNER]` samo na koncu odgovora, ko res potrebuje
+  lastnikovo odločitev, ter mu doda eno kratko in konkretno zahtevo.
+- Zunanja varovalka šteje samo take zaključke po uspešno zaključenem obratu in
+  samo znotraj istega `threadId` in istega cilja. Primerja poenostavljeno enako
+  zahtevo brez širokega semantičnega ugibanja.
+- Po četrti enaki zahtevi brez lastnikovega odgovora se varovalka oboroži. Z
+  `turn/interrupt` prekine šele naslednji samodejno začeti obrat, ko sta znana
+  njegova `threadId` in `turnId`.
+- Lastnikov novi vnos počisti števec in oboroženo stanje pred posredovanjem
+  app-serverju. Sprememba oziroma odstranitev cilja prav tako počisti stanje;
+  `/compact` sam po sebi ni lastnikov odgovor.
+- Varovalka ne odgovarja namesto lastnika, ne izbriše cilja in ne potrjuje ali
+  zamenjuje strukturiranih Codexovih zahtev za dovoljenje.
+- `APPROVAL_REQUEST_ID` ni zahteva prve izvedbe in ostaja le možna prihodnja
+  razširitev.
+
 ## Odprta vprašanja
 
-### SIDRO-OPEN-01 — Prekinitev zanke odobritev v `/goal`
+### SIDRO-OPEN-01 — Izolirani preizkus varovalke
 
-Počakati je treba na raziskavo agenta za vloge o tem, kako `/goal` hrani stanje,
-obravnava sistemska dovoljenja in razlikuje med ponovljivo napako ter čakanjem
-na uporabnika. Šele nato se dokončno določijo `WAITING_OWNER`, identifikatorji
-odobritev in pravilo prekinitve samodejne zanke.
+Pred vključitvijo v zaganjalnike je treba v izolirani seji dokazati štiri enake
+zaključke `[WAITING_OWNER]`, začetek naslednjega samodejnega obrata, uspešen
+`turn/interrupt`, pavziran cilj, uporaben terminal in lastnikovo nadaljevanje.
+Do uspešnega preizkusa se dejanski tehnični učinek ne predstavlja kot potrjen.
+Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
 
 ## Dnevnik
 
@@ -168,3 +186,5 @@ odobritev in pravilo prekinitve samodejne zanke.
   procesne odločitve in odprta vrzel glede zanke odobritev.
 - 2026-10-11: potrjeno stalno ime in namen namizne datoteke `aktivna naloga.md`;
   evidentirane Nikine zadnje odločitve o namizju in dostopu do lokalnih agentov.
+- 2026-10-11: potrjen zaključni signal `[WAITING_OWNER]` in pravilo štirih
+  ponovitev; tehnični učinek ostaja nepotrjen do izoliranega preizkusa.
