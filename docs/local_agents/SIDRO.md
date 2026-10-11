@@ -182,6 +182,10 @@ prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
   sklopa«, kadar že sam obseg naloge jasno določa njen konec.
 - Tehnične omejitve, dokazila in vrata ostanejo natančna; poenostavi se način
   podajanja, ne zahtevnost ali preverljivost naloge.
+- Strojne oznake, strogo kodirana imena korakov, velike signalne oznake,
+  okrasni simboli in podobni označevalci se ne dodajajo brez konkretne potrebe.
+  Uporabijo se le, kadar jih zahteva orodje ali kadar dejansko povezujejo delo
+  več modelov. Tehnična imena iz kode in kanona ostanejo zapisana natančno.
 
 ## Odprta vprašanja
 
@@ -203,3 +207,6 @@ Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
   ponovitev; tehnični učinek ostaja nepotrjen do izoliranega preizkusa.
 - 2026-10-11: potrjen naraven zapis aktivnih nalog brez vgrajenega ukaza
   `/goal` in brez odvečnega zaključnega procesnega opozorila.
+- 2026-10-11: strojne oznake in okrasni označevalci v aktivnih nalogah niso
+  privzeti; ohranijo se samo, kadar imajo dejansko tehnično ali koordinacijsko
+  vlogo.
