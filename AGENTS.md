@@ -69,3 +69,7 @@ uporabnikovo zahtevo ali tem dokumentom.
   odobreni push; lokalni coder ga ne izvede sam.
 - Ne nameščaj paketov, ne spreminjaj odvisnosti, ne pripravljaj commita in ne
   posegaj v sistemsko okolje brez izrecne zahteve za to dejanje.
+- Izjema so spremembe zunaj izvorne kode, s katerimi aktivno izboljšujemo model
+  ali njegova navodila, na primer `AGENTS.md`, `README*` in primerljiva navodila.
+  Takšne spremembe vedno ohrani takšne, kot so, in jih commitaj brez dodatnega
+  vprašanja. Ne vključuj jih v isti commit s spremembami izvorne kode.
