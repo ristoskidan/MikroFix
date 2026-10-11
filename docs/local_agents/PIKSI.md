@@ -14,7 +14,7 @@ sprememb kode, dokumentov ali obstoječih izpisov.
 - Lastnik **Daniel Ristoski** potrjuje identitetno arhitekturo in vse nove
   oblikovalske odločitve.
 - Sidro vzdržuje kanon, Git in aktivne naloge; Nika vzdržuje lokalne modele,
-  zaganjalnike in njihova navodila. Piks njunih področij ne spreminja brez
+  zaganjalnike in njihova navodila. Piksi njunih področij ne spreminja brez
   izrecnega dogovora.
 - Poslovna pravila, obvezna vsebina računov in drugi zakonsko občutljivi izpisi
   imajo prednost pred estetskimi predlogi.
@@ -86,10 +86,26 @@ nastavitev, ne iz vizualne predloge.
 - Kjer se poti srečata, mora hierarhija ostati jasna: programski izdelek je
   `MikroFIX`, izvajalec terenskega servisa je `MikroFix`, pravni subjekt pa je
   naveden s polnim imenom firme.
-- Identiteti sta lahko vizualno sorodni, vendar imata lahko različne logotipe,
-  poudarke, ton in pravila uporabe. Stopnja sorodnosti še ni potrjena.
+- Identiteti povezuje potrjeni pikselizirani oblikovni jezik, še vedno pa imata
+  lahko različne logotipe, poudarke, ton in pravila uporabe. Njuna širša stopnja
+  vizualne sorodnosti še ni potrjena.
 - Sistem je razširljiv: ob novi identiteti Piksi najprej določi njen namen in
   odnos do obstoječih poti, šele nato predlaga njeno podobo.
+
+## Potrjeno oblikovalsko načelo: pikselizirana predloga
+
+Odločitev lastnika, 11. 10. 2026:
+
+- Celotno družino `MikroFix` oziroma `MikroFIX` povezuje pikselizirana predloga
+  (`pixelated template`).
+- Del imena `FIX` je njen najizrazitejši nosilec in lahko znotraj besednega znaka
+  ali postavitve dobi prepoznaven pikseliziran poudarek.
+- Pikselizirani jezik se lahko izraža z mrežo, kvadratnimi moduli, rastrskimi
+  prehodi, fragmenti, robovi, ikonami in drugimi prilagodljivimi elementi.
+- Motiv ni omejen na retro estetiko in ne sme zmanjšati čitljivosti, resnosti ali
+  uporabnosti programske opreme, dokumentov in servisnih gradiv.
+- Konkretne izvedbe, gostota vzorca, barve in razmerje do motiva razbitega stekla
+  se bodo dopolnjevali sproti skozi dejanske dizajne.
 
 ## Trenutno nepotrjene oblikovalske odločitve
 
