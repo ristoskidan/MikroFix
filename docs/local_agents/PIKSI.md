@@ -65,11 +65,35 @@ nastavitev, ne iz vizualne predloge.
 
 - Zapis `MikroFix` označuje javno oziroma uporabniško identiteto terenskega
   servisa, ki ga izvaja podjetje.
+- MikroFix ni omejen na popravila naprav iPhone. Dejavnost je treba predstavljati
+  širše kot mobilni servis elektronskih in telekomunikacijskih naprav; za naprave
+  iPhone je predvidena zaloga, kar je ponudbena prednost in ne meja servisa.
 - Sem sodijo stik s stranko, vozilo, delovna oblačila, servisne oznake,
   promocijski materiali, spletna predstavitev in drugi javni nastopi storitve.
 - Dosedanja smer modra/siva, temna grafitno-modra tema, manjši logotip, motiv
-  razbitega stekla in poudarek na mobilnem oziroma iPhone servisu pripada tej
-  poti; ne prenese se samodejno na identiteto programske opreme.
+  razbitega stekla ter servisni znak telefona z izvijačem pripada tej poti; ne
+  prenese se samodejno na identiteto programske opreme.
+
+#### Potrjene zahteve za servisno identiteto in vizitko
+
+Odločitve lastnika, 12. 10. 2026:
+
+- Zgodovinska referenca je kvadratna grafika z razbitim steklom, sivim zapisom
+  `Mikro` in modrim zapisom `Fix` ter znakom telefona z izvijačem. Referenca je
+  shranjena kot
+  `/home/mikrofix/Downloads/756141101_122106714699400253_1994914353359322619_n.jpg`;
+  sama datoteka še ni tiskarska predloga ali samodejna potrditev končnega logotipa.
+- Telefon z izvijačem mora ostati del identitete `MikroFix`. To je neposredna
+  zahteva lastnika in ga Piksi ne odstrani zaradi širitve pomena znamke.
+- Pri motivu razbitega zaslona se uporabi značilen presek oziroma linija razpoke,
+  kadar se smiselno ujema s pikseliziranim konceptom in ne zmanjšuje čitljivosti.
+- Predlagana hrbtna stran vizitke ima QR-kodo, ki vodi na `mikrofix.si`, postavljeno
+  na sredino; okoli nje so bolj generične ikone različnih vrst naprav. Tako znak
+  telefona z izvijačem ostane, celotna ponudba pa ni predstavljena kot izključno
+  telefonski ali iPhone servis.
+- Appleov logotip, posnemanje iOS-vmesnika, embalaže ali drugega Applovega
+  identitetnega jezika se ne uporablja. Omemba zaloge oziroma podpore za iPhone
+  je stvar ponudbe in besedila, ne vizualno prevzemanje identitete proizvajalca.
 
 ### 3. Polno ime firme — pravna identifikacija
 
@@ -106,7 +130,9 @@ Odločitev lastnika, 11. 10. 2026:
 - Motiv ni omejen na retro estetiko in ne sme zmanjšati čitljivosti, resnosti ali
   uporabnosti programske opreme, dokumentov in servisnih gradiv.
 - Konkretne izvedbe, gostota vzorca in razmerje do motiva razbitega stekla se
-  bodo dopolnjevali sproti skozi dejanske dizajne.
+  bodo dopolnjevali sproti skozi dejanske dizajne. Pri servisni identiteti se
+  pikselizirani elementi lahko razvijejo iz linij razpoke v ponovno sestavljeno,
+  urejeno strukturo.
 
 ## Potrjena osnovna barvna paleta
 
@@ -127,7 +153,8 @@ deležev uporabe; Piksi jih določi v konkretnem oblikovalskem sklopu in preveri
 ## Trenutno nepotrjene oblikovalske odločitve
 
 - končni logotip in stopnja vizualne sorodnosti obeh glavnih poti;
-- način uporabe motiva razbitega stekla pri identiteti `MikroFix`;
+- natančna geometrija, gostota in obseg uporabe potrjenega motiva razpoke pri
+  identiteti `MikroFix`;
 - končna pisava; dosedanja kandidata sta Inter in Poppins;
 - samostojni znaki in razlikovanje programov Office, Servis in Blagajna.
 
