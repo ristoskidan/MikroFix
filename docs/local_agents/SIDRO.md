@@ -71,10 +71,11 @@ Uporabljene izhodne oznake so:
 - `WAITING_OWNER`: manjka poslovna odločitev ali nova pristojnost, zato se
   samodejno ponavljanje ustavi.
 
-Coder ob `WAITING_OWNER` uporabi dogovorjeni besedilni signal, opisan v potrjeni
-odločitvi `SIDRO-20261011-09`. Signal ni vgrajena funkcija Codexa in ne nadomešča
-strukturiranih zahtev za dovoljenje. Stabilni `APPROVAL_REQUEST_ID` ni pogoj za
-prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
+Coder ob `WAITING_OWNER` uporabi dogovorjeni besedilni signal. Signal ni
+vgrajena funkcija Codexa in ne nadomešča strukturiranih zahtev za dovoljenje.
+Skupni bridge poleg označenega zaključka prepozna tudi štirikrat ponovljen enak
+običajni zaključni odgovor; veljavno vedenje opisuje odločitev
+`SIDRO-20261012-12`.
 
 ## Pravila vzdrževanja tega dokumenta
 
@@ -145,18 +146,17 @@ prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
 
 - Stanje: `VELJAVNO`
 - Odločitev: od 11. 10. 2026 lastnik določi cilj in poslovne odločitve, Sidro
-  uskladi kanon, Git in aktivno nalogo, Nika oziroma Piksi pa se vključita za
-  svoje strokovno področje. Coder izvede en cilj, sledi pregled, odobren commit
-  in push pa opravi Git-agent. Stara nadzorovana veriga ostane zgodovinsko
-  gradivo in ni vzporedni aktivni postopek.
+  uskladi kanon, Git in aktivno nalogo, Nika, Piksi oziroma Svit pa se vključijo
+  za svoje strokovno področje. Coder izvede en cilj, sledi pregled, odobren
+  commit in push pa opravi Git-agent. Stara nadzorovana veriga ostane
+  zgodovinsko gradivo in ni vzporedni aktivni postopek.
 - `AGENTS.md`, kanonska procesna meja, lokalni README in stari pravilnik so bili
-  ob vključitvi Piksija usklajeni s to odločitvijo. Vlogovni zapis posameznega
-  skrbnika ostaja v njegovi odgovornosti.
+  ob vključitvi strokovnih skrbnikov usklajeni s to odločitvijo. Vlogovni zapis
+  posameznega skrbnika ostaja v njegovi odgovornosti.
 
 ### SIDRO-20261011-09 — Varovalka `[WAITING_OWNER]`
 
-- Stanje: `VELJAVNO`; tehnični učinek je do izoliranega preizkusa
-  `NEPOTRJENO`.
+- Stanje: `NADOMEŠČENO` z `SIDRO-20261012-12`.
 - Coder uporabi `[WAITING_OWNER]` samo na koncu odgovora, ko res potrebuje
   lastnikovo odločitev, ter mu doda eno kratko in konkretno zahtevo.
 - Zunanja varovalka šteje samo take zaključke po uspešno zaključenem obratu in
@@ -198,21 +198,69 @@ prvo izvedbo; ostaja samo morebitna poznejša izboljšava.
   `PIKSI.md` ter v oblikovalskih virih, ki mu jih dodeli lastnik.
 - Poslovno potrjena razmejitev `MikroFIX`, `MikroFix` in polnega pravnega imena
   ter skupno pikselizirano načelo sta zapisana v
-  `docs/kanon/01_POSLOVNA_PRAVILA.md`. Konkretni logotipi, barve, pisave in
-  stopnja vizualne sorodnosti ostajajo nepotrjene oblikovalske odločitve.
+  `docs/kanon/01_POSLOVNA_PRAVILA.md`. Konkretni logotipi, pisave in stopnja
+  vizualne sorodnosti ostajajo nepotrjene oblikovalske odločitve.
 - Piksi ne spreminja `SIDRO.md`, `NIKA.md`, tujih `AGENTS.md` ali profilnih
   navodil. Potrebno spremembo preda njihovemu skrbniku; enako Sidro in Nika ne
   prevzemata njegovega oblikovalskega odločanja.
 
-## Odprta vprašanja
+### SIDRO-20261012-12 — Preverjeni skupni bridge
+
+- Stanje: `VELJAVNO`.
+- Odločitev: skupni bridge je vključen v vseh osem aktivnih coder zaganjalnikov,
+  lastnik pa je po dejanski uporabi Gemme 12B njegovo osnovno delovanje potrdil
+  kot stabilno.
+- Bridge po četrtem enakem uspešno zaključenem odgovoru v istem cilju oboroži
+  varovalko in prekine naslednji samodejno začeti obrat. Štejeta tako dogovorjeni
+  zaključek `[WAITING_OWNER]` kot enak ponavljajoči se običajni zaključni
+  odgovor; strukturirane Codexove zahteve za dovoljenje ostanejo ločene.
+- Lastnikov novi vnos počisti števec in oboroženo stanje pred posredovanjem,
+  zato varovalka ne prekine lastnikovega odgovora. Ne odgovarja namesto lastnika
+  in ne briše cilja.
+- Dejanski dnevnik Gemme 12B vsebuje zaporedje `repeat_reply_4`, `armed_reply`
+  in `interrupt`, terminal pa je po prekinitvi ostal uporaben. Razlike v
+  obnašanju drugih sedmih modelov še niso ločeno preizkušene; to ni razlog za
+  ponovno označitev skupnega bridgea kot nepotrjenega.
+
+### SIDRO-20261012-13 — Svit in spletna prisotnost
+
+- Stanje: `VELJAVNO`.
+- Odločitev: Svit je strokovni skrbnik javne spletne prisotnosti `MikroFix`,
+  gostovanja, dosegljivosti in nadzorovanega postopka objave. Njegove meje in
+  začetno preverjeno stanje vodi `docs/local_agents/SVIT.md`.
+- Produkcijska objava, sprememba DNS, varnostno skeniranje, brisanje, obnova,
+  trajni dostopi in zunanje sledenje zahtevajo izrecno lastnikovo odobritev.
+  Piksi določa vizualna pravila, Svit pa jih po potrditvi tehnično uresniči na
+  spletni strani.
+
+### SIDRO-20261012-14 — Potrjena osnovna barvna paleta
+
+- Stanje: `VELJAVNO`.
+- Odločitev: skupno osnovno paleto sestavljajo siva `#929CAA`, modra `#4EA3E3`,
+  turkizna `#35C9C1`, rumena `#F2B84B` in rdeča `#FF6B67`.
+- Posamezne pomenske vloge, kontrasti in deleži uporabe še niso določeni s samo
+  izbiro barv; vodi jih Piksi v pripadajočih oblikovalskih pravilih.
+
+## Razrešena vprašanja
 
 ### SIDRO-OPEN-01 — Izolirani preizkus varovalke
 
-Pred vključitvijo v zaganjalnike je treba v izolirani seji dokazati štiri enake
-zaključke `[WAITING_OWNER]`, začetek naslednjega samodejnega obrata, uspešen
-`turn/interrupt`, pavziran cilj, uporaben terminal in lastnikovo nadaljevanje.
-Do uspešnega preizkusa se dejanski tehnični učinek ne predstavlja kot potrjen.
-Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
+- Stanje: `RAZREŠENO` z `SIDRO-20261012-12`.
+- Prvotno je bil zahtevan izolirani dokaz štirih enakih zaključkov
+  `[WAITING_OWNER]`, prekinitve naslednjega samodejnega obrata in uporabnega
+  terminala. Poznejši preizkusi ter lastnikova dejanska uporaba so potrdili
+  skupni bridge, vključno z ustavitvijo enakega neoznačenega zaključnega
+  odgovora.
+
+## Odprta vprašanja
+
+### SIDRO-OPEN-02 — Razlike bridgea med modeli
+
+Osnovno delovanje skupnega bridgea je potrjeno. Ločeno ostaja nepreverjeno, ali
+ima kateri od preostalih sedmih modelov posebnost pri oblikovanju zaključnega
+odgovora ali samodejnem nadaljevanju, ki zahteva modelno prilagoditev. Morebitni
+preizkusi ne smejo razvrednotiti že potrjenega skupnega mehanizma brez novega
+nasprotnega dokaza.
 
 ## Dnevnik
 
@@ -221,7 +269,8 @@ Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
 - 2026-10-11: potrjeno stalno ime in namen namizne datoteke `aktivna naloga.md`;
   evidentirane Nikine zadnje odločitve o namizju in dostopu do lokalnih agentov.
 - 2026-10-11: potrjen zaključni signal `[WAITING_OWNER]` in pravilo štirih
-  ponovitev; tehnični učinek ostaja nepotrjen do izoliranega preizkusa.
+  ponovitev; tehnični učinek je bil tedaj še nepotrjen do izoliranega preizkusa,
+  pozneje pa ga je nadomestila odločitev `SIDRO-20261012-12`.
 - 2026-10-11: potrjen naraven zapis aktivnih nalog brez vgrajenega ukaza
   `/goal` in brez odvečnega zaključnega procesnega opozorila.
 - 2026-10-11: strojne oznake in okrasni označevalci v aktivnih nalogah niso
@@ -230,3 +279,7 @@ Aktivnih sej in zgodovinske nadzorovane verige se pri tem ne spreminja.
 - 2026-10-11: Piksi je vključen kot skrbnik sistema vizualnih identitet;
   potrjena identitetna razmejitev je prenesena v kanon, procesni dokumenti pa so
   usklajeni z aktivno verigo.
+- 2026-10-12: lastnik je potrdil stabilnost skupnega bridgea na dejanski seji
+  Gemme 12B; ločeni preizkusi razlik drugih sedmih modelov ostajajo odprti.
+- 2026-10-12: potrjena je osnovna skupna barvna paleta in vključena nova vloga
+  Svit za spletno prisotnost ter gostovanje.

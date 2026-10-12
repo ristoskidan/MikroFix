@@ -106,11 +106,11 @@
   },
   "sources": {
     "docs/kanon/00_KAZALO.md": "7ca11d62a84ec6bd238e87f19b8c9be9fd6b2d7485fc7def1e12be985a91eb69",
-    "docs/kanon/01_POSLOVNA_PRAVILA.md": "b4a9c5bbf8eeeaf8a2c6298f9ea88284b72d22278e3bb9f21bd27915eb51f2e3",
+    "docs/kanon/01_POSLOVNA_PRAVILA.md": "f70a60a5ec6b391cd9343dc613b6d261692de53f0b8afebc9be04c9aa7ad1e7f",
     "docs/kanon/02_CILJNA_ARHITEKTURA.md": "8e320b0dfeea875f73ee59e57b88d04e2ee2a877b89e869b5b069fd0a969d8bd",
     "docs/kanon/03_SPREJEMNI_TESTI.md": "9f83b4eb67450997dbb4eacd98ace7a232a73fb041c8be3fd321a69ee2cf310f",
     "docs/kanon/04_STANJE_IZVEDBE.md": "e54e46b3e85eb30601073f5452bef7885d0f14aa05ac959cbc53f51ca39aff0b",
-    "docs/kanon/05_ZGODOVINA_ODLOCITEV.md": "8bb52f386228de1a8af109c2f36479255886ba3b9213c0f08459ccb411ff8428"
+    "docs/kanon/05_ZGODOVINA_ODLOCITEV.md": "f92dc2c6045f7333c46d3d4095673682f8ae5f937f0539193f50f2f94b813e44"
   },
   "version": 2
 }

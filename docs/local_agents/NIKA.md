@@ -1,9 +1,9 @@
 # Nika — lokalni coder profili in zaganjalniki MikroFIX v30
 
-Stanje preverjeno: 11. 10. 2026. Skrbnica tega zapisa: **Nika** (Codex) —
+Stanje preverjeno: 12. 10. 2026. Skrbnica tega zapisa: **Nika** (Codex) —
 zaganjalniki, profilni `AGENTS.md`, Codex/Ollama nastavitve in uskladitev navodil.
 To je operativni popis, ne poslovni kanon in ne samodejno naložen prompt.
-Ob vsaki naslednji dogovorjeni spremembi teh treh profilov posodobi ta zapis po
+Ob vsaki naslednji dogovorjeni spremembi coder profilov posodobi ta zapis po
 pregledu dejanskih datotek. Zapis ne pomeni spremljanja v ozadju med sejami.
 
 ## Namizje in dostop
@@ -31,13 +31,13 @@ Gemminim profilom. To ne pomeni samodejnega kopiranja njenih modelnih parametrov
 izjeme ostanejo predmet izrecnega dogovora. Ta zapis sam po sebi ne spremeni
 zaganjalnikov, `config.toml` ali `AGENTS.md` drugih agentov.
 
-## Trenutno dejansko stanje glavnih treh profilov
+## Glavni profili in preverjene posebnosti
 
 | Agent | Osnovni Ollama model | Aktivni lokalni tag | Zaganjalnik / profil | Kontekst / samodejna kompakcija | Parametri Ollama |
 | --- | --- | --- | --- | --- | --- |
-| Gemma 12B | `gemma4:12b` (arhitektura `gemma4`, 11,9B, Q4_K_M; enaki modelni blobi) | `mikrofix-gemma4-12b-focused-65k` | `gemma12-coder` → `mikrofix-gemma12-coder`; `CODEX_HOME=/home/mikrofix/.gemma12-codex` | 65.536 / 55.000 tokenov | temperature 0,35; top_p 0,9; top_k 40; repeat_penalty 1,05; draft_num_predict 3 |
-| Mistral 7B | `mistral:7b` (arhitektura `llama`, 7,2B, Q4_K_M; enak modelni blob) | `mikrofix/mistral:7b-40k` | `mistral-coder` → `mikrofix-mistral-coder`; `CODEX_HOME=/home/mikrofix/.mistral-codex` | 40.960 / 34.000 tokenov | temperature 0,2; top_p 0,9; top_k 40; repeat_penalty 1,05 |
-| Ministral 3 8B | `ministral-3:8b` (arhitektura `mistral3`, 8,9B, Q4_K_M; enak modelni blob) | `mikrofix/ministral-3:8b-coder-16k` | `mikrofix-ministral-coder`; `CODEX_HOME=/home/mikrofix/.ministral-codex` | 16.384 / 13.000 tokenov | temperature 1,2; top_p 0,9; top_k 40; repeat_penalty 1,05 |
+| Gemma 12B | `gemma4:12b` (arhitektura `gemma4`, 11,9B, Q4_K_M; enaki modelni blobi) | `mikrofix-gemma4-12b-focused-65k` | `gemma4-12b-coder`; `CODEX_HOME=/home/mikrofix/.gemma12-codex` | 65.536 / 55.000 tokenov | temperature 0,35; top_p 0,9; top_k 40; repeat_penalty 1,05; draft_num_predict 3 |
+| Mistral 7B | `mistral:7b` (arhitektura `llama`, 7,2B, Q4_K_M; enak modelni blob) | `mikrofix/mistral:7b-40k` | `mistral-7b-coder`; `CODEX_HOME=/home/mikrofix/.mistral-codex` | 40.960 / 34.000 tokenov | temperature 0,2; top_p 0,9; top_k 40; repeat_penalty 1,05 |
+| Ministral 3 8B | `ministral-3:8b` (arhitektura `mistral3`, 8,9B, Q4_K_M; enak modelni blob) | `mikrofix/ministral-3:8b-coder-focused-16k` | `ministral-3-8b-coder`; `CODEX_HOME=/home/mikrofix/.ministral-codex` | 16.384 / 13.000 tokenov | temperature 0,2; top_p 0,9; top_k 40; repeat_penalty 1,05 |
 
 Vsi trije zaganjalniki uporabljajo lokalni Ollama Responses endpoint,
 `model_reasoning_effort=none`, `model_verbosity=low`, `features.goals=true`,
@@ -57,40 +57,106 @@ Mistralov nekdanji raziskovalni zaganjalnik je arhiviran; ni več ukaz v `PATH`.
 
 ## Terminalski zaganjalniki — samo coder
 
-Odločitev lastnika, 11. 10. 2026: v aktivni terminalski mapi ostanejo samo
-zaganjalniki za kodersko vlogo. Kratka priporočena imena so vezana na točno
-določeno družino oziroma velikost modela; vsa kličejo obstoječe dolge
-`mikrofix-*-coder` zaganjalnike, katerih nastavitve se s tem niso spremenile.
+Odločitev lastnika, 12. 10. 2026: v aktivni terminalski mapi je natanko en
+zaganjalnik za vsakega od osmih coder modelov. Ukaz nosi ime družine in
+velikost modela ter pripono `-coder`.
+Spodaj so dejanski cilji; nobenega modela zaradi preimenovanja nismo zagnali.
 
-| Kratki ukaz | Ciljni zaganjalnik | Aktivni model |
-| --- | --- | --- |
-| `gemma12-coder` | `mikrofix-gemma12-coder` | `mikrofix-gemma4-12b-focused-65k` |
-| `gemma26-coder` | `mikrofix-gemma-coder` | `gemma4:26b-codex` |
-| `mistral7-coder` | `mikrofix-mistral-coder` | `mikrofix/mistral:7b-40k` |
-| `ministral8-coder` | `mikrofix-ministral-coder` | `mikrofix/ministral-3:8b-coder-16k` |
-| `qwen25-coder` | `mikrofix-qwen25-coder` | `mikrofix/qwen2.5:14b-8k` |
-| `qwen35-coder` | `mikrofix-qwen35-coder` | `mikrofix/qwen3.5-coder:9b-65k` |
-| `gpt-oss-coder` | `mikrofix-gpt-oss-coder` | `mikrofix/gpt-oss-coder:20b-65k` |
-| `deepseek-coder` | `mikrofix-deepseek-coder` | `mikrofix/deepseek-r1:14b-65k` |
+Poznejša odločitev lastnika istega dne: vseh osem aktivnih zaganjalnikov zdaj
+kliče skupni `/home/mikrofix/goal_guard_lab/codex-bridge-launch.sh`. Ta za
+vsako sejo ustvari ločena lokalna socketa in dnevnik v profilnem
+`CODEX_HOME/runtime/bridge.*`, zažene Codex app-server z istim modelom in
+konfiguracijskimi preglasitvami kot zaganjalnik, nato `bridge.js`, nazadnje pa
+interaktivni Codex poveže prek `--remote`. Ob koncu odjemalca ustavi oba
+podrejena procesa. Imena modelov, profili, začetni pozivi in nastavitve
+vzorčenja so ostali nespremenjeni.
 
-Stara kratka koderska imena `gemma-coder`, `mistral-coder` in `qwen-coder`
-ostajajo združljivostni vzdevki za Gemmo 26B, Mistral 7B in Qwen 3.5;
-niso dodatne vloge ali modeli. Raziskovalnih in starih testnih zaganjalnikov
-ni več v `/home/mikrofix/.local/bin/`: vseh 20 datotek je obnovljivo v
+**Trenutno delovno stanje bridgea, 12. 10. 2026:** lastnik je po dejanski
+uporabi Gemme 12B potrdil, da bridge stabilno deluje in ustavi potrjeno
+ponavljajočo se zanko. Dnevnik
+`/home/mikrofix/.gemma12-codex/runtime/bridge.sciYKX/guard.log` vsebuje
+`repeat_reply_4`, `armed_reply` in `interrupt` naslednjega obrata; terminal
+je po prekinitvi ostal uporaben. Panelna ikona `M` uporablja Piksijevo
+potrjeno paleto: siva `#929CAA`, modra `#4EA3E3`, turkizna `#35C9C1`,
+rumena `#F2B84B` in rdeča `#FF6B67`. Vseh osem zaganjalnikov je povezanih
+prek bridgea, vendar delovanje preostalih sedmih modelnih sej še ni ločeno
+potrjeno. Bridge ni poslovna odločitev in ne spreminja modelnih nastavitev.
+
+| Ukaz | Aktivni Ollama tag | Temp. / top_p / top_k | Privzeto reasoning |
+| --- | --- | --- | --- |
+| `gemma4-12b-coder` | `mikrofix-gemma4-12b-focused-65k` | 0,35 / 0,9 / 40 | none (potrjen profil) |
+| `gemma4-26b-coder` | `mikrofix/gemma4:26b-coder-focused-65k` | 1,0 / 0,95 / 64 | none; možen vklop thinking |
+| `mistral-7b-coder` | `mikrofix/mistral:7b-40k` | 0,2 / 0,9 / 40 | none; brez thinking |
+| `ministral-3-8b-coder` | `mikrofix/ministral-3:8b-coder-focused-16k` | 0,2 / 0,9 / 40 | none; brez thinking |
+| `qwen2.5-14b-coder` | `mikrofix/qwen2.5:14b-coder-focused-8k` | 0,7 / 0,8 / 20 | none; brez thinking |
+| `qwen3.5-9b-coder` | `mikrofix/qwen3.5-coder:9b-focused-65k` | 0,6 / 0,95 / 20 | low; on/off, stopnje niso potrjene |
+| `gpt-oss-20b-coder` | `mikrofix/gpt-oss-coder:20b-focused-65k` | 1,0 / 1,0 / 0 | low; low/medium/high |
+| `deepseek-r1-14b-coder` | `mikrofix/deepseek-r1:14b-focused-65k` | 0,6 / 0,95 / ni določen | low; on/off |
+
+Presoja vzorčenja, 12. 10. 2026 (efektivne vrednosti prebrane z
+`ollama show --modelfile`, brez pogovora z modeli ali testov):
+
+- Gemma 12B: obdržana lokalno potrjena kombinacija 0,35 / 0,9 / 40 s
+  `repeat_penalty=1,05`; privzeti coder ostane primerjalna osnova.
+- Gemma 26B: samostojen še nepreizkušen profil 1,0 / 0,95 / 64 po priporočilu
+  avtorja Gemma 4; Gemme 12B to ne spreminja.
+- Mistral 7B in Ministral 3 8B: obdržana konservativna kombinacija 0,2 / 0,9
+  / 40 ter `repeat_penalty=1,05`; avtorjevi konfiguraciji ne določata posebnih
+  vrednosti vzorčenja za programiranje.
+- Qwen 2.5 14B: 0,7 / 0,8 / 20 ter `repeat_penalty=1,05` po avtorjevi
+  `generation_config.json`. Tag še vedno uporablja splošne uteži `qwen2.5:14b`,
+  ne ločenih uteži Qwen2.5-Coder.
+- Qwen 3.5 9B: 0,6 / 0,95 / 20, `min_p=0`, `presence_penalty=0` in
+  `repeat_penalty=1,0` po avtorjevem profilu za natančne coding naloge.
+  Lokalni tag je dodatno prilagojena različica, zato to ni dokaz enakega
+  obnašanja kot pri uradnih utežeh.
+- GPT-OSS 20B: ohranjena nevtralna izbira 1,0 / 1,0 / 0,
+  `min_p=0`, `repeat_penalty=1,0`; dodatnega rezanja izbora tokenov ni.
+- DeepSeek R1 14B: ohranjena avtorjeva kombinacija 0,6 / 0,95; `top_k`
+  namenoma ni nastavljen, ker izvorno priporočilo zanj ne določa vrednosti.
+
+Vzorčenje je hipoteza za nadaljnji lastnikov preizkus, ne jamstvo sledenja
+navodilom. Fokusirani tagi dedujejo uteži in predloge iz izvornih modelov;
+stari izvorni tagi so arhivirani za morebitno vrnitev. Pri Qwen 3.5 je lokalno potrjena
+zmožnost thinking, ne pa samostojne stopnje medium/high, zato katalog ponuja
+samo none/low. Efektivna skladnost `reasoning_effort` z Ollaminim thinking
+pri delovanju ostaja za preverjanje ob lastnikovem naslednjem preizkusu.
+
+Stari kratki vzdevki in dolgi `mikrofix-*-coder` zaganjalniki so odstranjeni
+iz `/home/mikrofix/.local/bin/`. Prejšnji raziskovalni in testni zaganjalniki
+ostajajo v obnovljivem arhivu
 `/home/mikrofix/.local/share/mikrofix/retired-launchers/2026-10-11/`.
-Profilnih `AGENTS.md`, `config.toml`, modelov in izoliranega poskusa varovalke
-ta ureditev ni spreminjala. V `/home/mikrofix/Desktop/` ostaja samo splošna
+Neaktivne datoteke `Modelfile` so premaknjene v
+`/home/mikrofix/.local/share/mikrofix/retired-profiles/2026-10-12/`.
+Po dodatni odločitvi lastnika istega dne je 26 prejšnjih in osnovnih Ollaminih
+tagov umaknjenih iz aktivnega kataloga: njihovi manifesti so v
+`/usr/share/ollama/.ollama/archived-manifests/2026-10-12/`, ločeno po izvoru
+`active` oziroma `parked`. Postopek in natančen seznam sta v
+`/home/mikrofix/.local/share/mikrofix/retired-profiles/2026-10-12/archive-inactive-ollama-manifests.sh`.
+Uteži oziroma blobov nismo premaknili ali izbrisali. `ollama list` je po
+arhiviranju uspešno vrnil natanko osem zgoraj navedenih coder tagov; modelov
+nismo zagnali. Če bo treba profil znova sestaviti iz starega osnovnega taga,
+je treba najprej obnoviti njegov manifest na prvotno mesto. Poznejše čiščenje
+blobov bi lahko zmanjšalo obnovljivost tega arhiva, zato ga ne izvajaj brez
+ločene presoje. Lokalna zgodovina sej ostaja nedotaknjena.
+Profilnih `AGENTS.md`, `config.toml` in izoliranega poskusa varovalke ta
+ureditev ni spreminjala. V `/home/mikrofix/Desktop/` ostaja samo splošna
 bližnjica za aplikacijo Codex, ne zaganjalnik lokalnega modela.
 
 ## Izolirani poskus varovalke `/goal` za Gemmo 12B
 
-Odločitev lastnika: za zdaj se spreminja in preizkuša samo izolirani zaganjalnik
-`/home/mikrofix/goal_guard_lab/gemma12-guard-trial`; varovalke
-`/home/mikrofix/goal_guard_lab/bridge.js` in običajnega zaganjalnika
-`/home/mikrofix/.local/bin/mikrofix-gemma12-coder` v zadnjem koraku nismo
-spreminjali. Lastnik preizkuse izvaja sam in sporoči rezultat. Brez uspešnega
-izoliranega preizkusa varovalke ne vključuj v običajne zaganjalnike ali aktivne
-seje.
+Prejšnja odločitev lastnika: varovalka se je preizkušala samo z izoliranim
+zaganjalnikom `gemma12-guard-trial`; varovalke
+`/home/mikrofix/goal_guard_lab/bridge.js` in tedanjega običajnega zaganjalnika
+v tem izoliranem preizkusu nismo spreminjali. Običajni zaganjalnik se zdaj
+imenuje `/home/mikrofix/.local/bin/gemma4-12b-coder`. Lastnik preizkuse izvaja
+sam in sporoči rezultat. Omejitev na izolirani zaganjalnik je nadomestila
+zgornja izrecna odločitev o vključitvi bridgea v vseh osem coder zaganjalnikov.
+
+Ob poenotenju zaganjalnikov 12. 10. 2026 je tudi izolirani zaganjalnik
+umaknjen v `/home/mikrofix/.local/share/mikrofix/retired-launchers/2026-10-12/`.
+Koda mostu in zgodovinski izpisi v `goal_guard_lab/` so ohranjeni; poskusni
+zaganjalnik ni več aktiven terminalski ukaz.
 
 Preverjeno stanje 11. 10. 2026: poskusni zaganjalnik zdaj uporablja Ollamin
 lokalni tag `mikrofix-gemma4-12b-focused-65k` (ne surovega `gemma4:12b`) in
@@ -105,9 +171,11 @@ zagona ali delovanja celotne verige.
 Prejšnji dnevnik `goal_guard_lab/run.vDvK7c/guard.log` vsebuje dogodke
 `goal_active`, `unmarked` in `goal_paused`, ne pa dokaza o štirih enakih
 zaključkih `[WAITING_OWNER]`, oborožitvi in prekinitvi naslednjega samodejnega
-obrata. Učinek varovalke po zadnji spremembi zaganjalnika zato ostaja
-**NEPOTRJEN**. Naslednji dokaz je lastnikov dejanski poskus, brez posega v
-varovalko na podlagi samega starega dnevnika.
+obrata. Poznejši dnevnik `goal_guard_lab/run.2VQlzb/guard.log` tak niz za
+`[WAITING_OWNER]` beleži; aktualni Gemmin dnevnik v profilnem `runtime/`
+beleži tudi ustavitev ponavljajočega se navadnega odgovora. Lastnik je
+delovanje bridgea potrdil v dejanski uporabi; ta stari dnevnik ni več ocena
+trenutnega stanja.
 
 ## Ollamina shramba: odločitev in izvedba
 
@@ -200,9 +268,10 @@ HDD je treba opraviti ločeno in s predhodnim lastnikovim dovoljenjem za test.
 
 ## Viri za ponovni pregled
 
-- Zaganjalniki: `/home/mikrofix/.local/bin/mikrofix-gemma12-coder`,
-  `/home/mikrofix/.local/bin/mikrofix-mistral-coder`,
-  `/home/mikrofix/.local/bin/mikrofix-ministral-coder`.
+- Zaganjalniki: `/home/mikrofix/.local/bin/gemma4-12b-coder`,
+  `/home/mikrofix/.local/bin/mistral-7b-coder`,
+  `/home/mikrofix/.local/bin/ministral-3-8b-coder`; vseh osem imen je v tabeli
+  zgoraj.
 - Profili: `/home/mikrofix/.gemma12-codex/`, `/home/mikrofix/.mistral-codex/`,
   `/home/mikrofix/.ministral-codex/` (`config.toml`, `AGENTS.md`).
 - Skupni projekt: `/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/AGENTS.md`;

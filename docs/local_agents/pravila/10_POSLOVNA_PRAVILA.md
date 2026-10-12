@@ -2,7 +2,7 @@
 
 # MikroFIX — veljavna poslovna pravila
 
-Datum konsolidacije: 11. 10. 2026
+Datum konsolidacije: 12. 10. 2026
 
 ## 1. Programi in odgovornosti
 
@@ -475,6 +475,10 @@ pojasnila oziroma podstanja, ne dodatna končna poslovna stanja.
   prehodi, fragmenti, robovi in ikone so dovoljeni načini njegove izvedbe.
 - Pikselizirani jezik ne sme zmanjšati čitljivosti, uporabnosti, resnosti ali
   zakonsko zahtevane vsebine programske opreme, računov in servisnih gradiv.
-- Končni logotipi, barve, pisave, gostota vzorca, motiv razbitega stekla in
-  stopnja vizualne sorodnosti identitet niso določeni s tem pravilom. Postanejo
-  kanon šele po izrecni lastnikovi potrditvi.
+- Potrjena osnovna skupna barvna paleta je: siva `#929CAA`, modra `#4EA3E3`,
+  turkizna `#35C9C1`, rumena `#F2B84B` in rdeča `#FF6B67`. Posamezna identiteta
+  ali gradivo lahko uporablja le potreben del palete; konkretne pomenske vloge,
+  kontrasti in razmerja barv se določijo v pripadajočih oblikovalskih pravilih.
+- Končni logotipi, pisave, gostota vzorca, motiv razbitega stekla in stopnja
+  vizualne sorodnosti identitet niso določeni s tem pravilom. Postanejo kanon
+  šele po izrecni lastnikovi potrditvi.

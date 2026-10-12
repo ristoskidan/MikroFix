@@ -173,6 +173,18 @@ le slogovna različica.
 
 Potrjeno je tudi skupno pikselizirano oblikovno načelo s poudarkom na delu
 imena `FIX`. Načelo povezuje obe identitetni poti, vendar ne določa enakega
-logotipa ali enake uporabe vseh elementov. Končni logotipi, barve, pisave, motiv
+logotipa ali enake uporabe vseh elementov. Končni logotipi, pisave, motiv
 razbitega stekla in stopnja vizualne sorodnosti ostajajo odprte oblikovalske
 odločitve. Operativni zemljevid vodi Piksi v `docs/local_agents/PIKSI.md`.
+
+## 9. Barvna paleta in spletna vloga 12. 10. 2026
+
+Lastnik je kot osnovno skupno paleto potrdil sivo `#929CAA`, modro `#4EA3E3`,
+turkizno `#35C9C1`, rumeno `#F2B84B` in rdečo `#FF6B67`. Potrditev nadomešča
+prejšnjo navedbo, da natančne barve še niso izbrane; način uporabe posameznih
+barv ostaja predmet konkretnih oblikovalskih pravil.
+
+V aktivno skupino je vključen Svit kot skrbnik javne spletne prisotnosti
+`MikroFix`, gostovanja in nadzorovanega postopka objave. Njegova operativna meja
+je zapisana v `docs/local_agents/SVIT.md`; vključitev ne daje samodejnega
+dovoljenja za produkcijske ali varnostno občutljive posege.
