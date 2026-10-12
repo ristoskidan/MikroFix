@@ -275,6 +275,24 @@ preizkusili in popravka skripte nismo izvedli.
 
 ## Dogovorjene smernice, pomembne za nastavitve
 
+### Enotno okolje za lokalne coderje, 12. 10. 2026
+
+Po ponavljajočem se zastoju pri strežniških testih je lastnik določil eno
+okolje: `/home/mikrofix/MikroFIX_Service_v30_R9_LINUX_DEV/.venv-server`.
+Vanj sem namestila `pytest==9.1.1`; preverjen popis v tem okolju je
+`pytest 9.1.1`, `SQLAlchemy 2.0.52`, `alembic 1.19.2` in `psycopg 3.3.5`.
+`CODER.md` zdaj vsem lokalnim coderjem naroča, naj najprej preverijo to
+okolje ter z njegovim interpreterjem izvajajo strežniško kodo in teste,
+z njegovim Alembicom pa migracije. `requirements-test.txt` zapisuje
+reproducibilni seznam odvisnosti za to okolje. Drugi `.venv` ni več pot za
+preverjanje strežniških nalog.
+
+Testov nisem zagnala. Trenutni necommitani `test_v32_tax_profiles.py` vsebuje
+trdo zapisano povezavo na `test_db` ter ukaza `DROP TABLE`; pred zagonom je
+treba potrditi izoliranost ciljne baze in varnost testa. `ast.parse` ali ročni
+pregled ne dokazujeta uspeha testov oziroma migracije. Obstoječe uporabnikove
+spremembe v kodi in dokumentih sem pustila nedotaknjene.
+
 - Kratki začetni pozivi brez starih ukazov `$task`/`$goal`; izvedbeni obseg je
   uporabnikov aktualni `/goal`, ne zagonski prompt. Model mora dobiti jasno
   vlogo coderja in počakati na prvi cilj. Vseh osem aktivnih zaganjalnikov ima
@@ -287,10 +305,10 @@ preizkusili in popravka skripte nismo izvedli.
 - Pri implementaciji: pokaži resnično obstoječo kodo in namen pred posegom;
   pripravljeni patch preveri na trenutni podlagi in pred `apply_patch` preveri
   sintakso *celotne predvidene nastale izvorne datoteke* v začasni kopiji ali
-  pomnilniku. Po posegu preveri dejanski diff in zahtevana vrata. Uporabi
-  obstoječi `.venv` za Python, `.venv-server` za Alembic in pred migracijo
-  potrdi izolirano ciljno bazo. To je zapisano v projektnem `AGENTS.md` in
-  kratkih profilih Gemme/Mistrala.
+  pomnilniku. Po posegu preveri dejanski diff in zahtevana vrata. Za
+  strežniške naloge uporabljaj enotno `.venv-server` okolje in pred migracijo
+  ali testom potrdi izolirano ciljno bazo. Predhodno preverjanje patcha je
+  zapisano v projektnem `AGENTS.md`, pot do okolja pa v `CODER.md`.
 - Ne izmišljaj si poti, rezultata testa ali poslovnega pravila. Ohrani tuje
   spremembe. Pri izrecnem implementacijskem cilju coder samostojno izvede varna
   relevantna preverjanja do vrat, ne sprašuje znova za dovoljenje za vsak korak.

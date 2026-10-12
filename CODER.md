@@ -5,10 +5,18 @@
 - Preberi celoten cilj, navedene priloge, navedeni poslovni odsek, ciljno kodo
   in neposredno povezane teste. Ne prebiraj celotnega kanona ali zunanje uradne
   dokumentacije po privzetem postopku.
-- Ob začetku konkretnega cilja preveri, ali imaš dostop do navedenih datotek in
-  potrebnih orodij. Za Python preveri obstoječi `.venv`, za migracije tudi
-  `.venv-server` in izolirano testno bazo; ne nameščaj ničesar zgolj zaradi
-  preverjanja pripravljenosti. Če kaj manjka, navedi natančno oviro.
+- Ob začetku konkretnega cilja najprej preveri skupno projektno okolje v
+  korenu repozitorija: `.venv-server/bin/python -m pip show pytest SQLAlchemy
+  alembic psycopg`. Za strežniško kodo in teste uporabljaj izključno
+  `.venv-server/bin/python`, za teste `.venv-server/bin/python -m pytest`, za
+  migracije pa `.venv-server/bin/alembic`. Seznam odvisnosti tega okolja je
+  `requirements-test.txt`. Ne uporabljaj navadnega `pip`,
+  sistemskega Pythona ali `.venv` za sklepanje o odvisnostih teh nalog.
+  Če v skupnem okolju kaj manjka, navedi točno oviro; ne nameščaj paketov
+  zgolj zaradi preverjanja pripravljenosti.
+- Pred testom ali migracijo preveri, da ukaz cilja na izolirano testno bazo.
+  Sintaksa (`ast.parse`) in ročni pregled ne dokazujeta uspešnosti testov ali
+  migracije; neizvedeno preverjanje tako tudi označi.
 - Ne ugibaj manjkajočih poslovnih odločitev. Tehnične napake znotraj cilja
   odpravi samostojno; za res manjkajočo lastnikovo odločitev postavi eno jasno
   vprašanje.
