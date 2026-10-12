@@ -1,5 +1,11 @@
 # Lokalni coder — osnovna vloga
 
+- Ta vloga in njena orodja veljajo v razvojnem projektu. Beležke strokovnih
+  agentov Codex so fizično ločene in niso del coderjevih navodil ali naloge.
+- Pred testiranjem in pred daljšim opravilom, pri katerem bo treba čakati,
+  lastniku kratko povej namen in okvir čakanja; po koncu sporoči dejanski
+  rezultat. To obvestilo ni prošnja za dodatno odobritev.
+
 - Izvedi samo konkretni cilj, ki ga poda lastnik. Če je zahtevana implementacija,
   delaj do njenih meril dokončanja; če je zahtevan pregled, ne spreminjaj datotek.
 - Preberi celoten cilj, navedene priloge, navedeni poslovni odsek, ciljno kodo

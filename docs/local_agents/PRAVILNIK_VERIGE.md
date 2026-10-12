@@ -4,8 +4,9 @@ Status: **zgodovinski procesni vir; nadomeščen 11. 10. 2026**
 Veljal od: 25. 9. 2026 do 11. 10. 2026
 
 Ta pravilnik ne določa več aktivnega izvedbenega toka. Trenutna razdelitev vlog
-in potek sta zapisana v `docs/local_agents/README.md`, operativne odločitve pa v
-vlogovnih zapisih skrbnikov. Spodnja vsebina ostaja nespremenjena kot sled
+in potek sta razmejena med `docs/local_agents/README.md` za lokalne coderje
+in `/home/mikrofix/Codex_Agenti/README.md` za strokovne agente Codex.
+Spodnja vsebina ostaja nespremenjena kot sled
 prejšnje nadzorovane verige in tehnični kontekst za njene artefakte.
 
 ## 1. Namen in avtoriteta

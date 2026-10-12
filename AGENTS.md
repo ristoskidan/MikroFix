@@ -10,9 +10,10 @@ uporabnikovo zahtevo ali tem dokumentom.
 
 - Poslovna pravila določa `docs/kanon/00_KAZALO.md` in aktivni dokumenti, na
   katere kaže. Koda in zgodovinski zapisi niso samostojen vir poslovnih pravil.
-- Aktivno razdelitev lokalnih vlog in izvedbeni tok določa
-  `docs/local_agents/README.md`, trajne operativne odločitve pa vodijo skrbniki
-  v svojih vlogovnih zapisih. `docs/local_agents/PRAVILNIK_VERIGE.md` je
+- Aktivne strokovne vloge Codex in njihove operativne zapise določa ločen
+  repozitorij `/home/mikrofix/Codex_Agenti/`. Navodila lokalnih coderjev in
+  projektna orodja so v `docs/local_agents/README.md` ter `CODER.md`.
+  `docs/local_agents/PRAVILNIK_VERIGE.md` je
   zgodovinski opis prejšnje nadzorovane verige in ni več vzporedni aktivni
   postopek.
 - Lastnik odloča o poslovnih pravilih in obsegu. Ob manjkajočem ali nasprotujočem

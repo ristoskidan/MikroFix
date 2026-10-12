@@ -175,7 +175,8 @@ Potrjeno je tudi skupno pikselizirano oblikovno načelo s poudarkom na delu
 imena `FIX`. Načelo povezuje obe identitetni poti, vendar ne določa enakega
 logotipa ali enake uporabe vseh elementov. Končni logotipi, pisave, motiv
 razbitega stekla in stopnja vizualne sorodnosti ostajajo odprte oblikovalske
-odločitve. Operativni zemljevid vodi Piksi v `docs/local_agents/PIKSI.md`.
+odločitve. Operativni zemljevid vodi Piksi v
+`/home/mikrofix/Codex_Agenti/PIKSI.md`.
 
 ## 9. Barvna paleta in spletna vloga 12. 10. 2026
 
@@ -186,5 +187,5 @@ barv ostaja predmet konkretnih oblikovalskih pravil.
 
 V aktivno skupino je vključen Svit kot skrbnik javne spletne prisotnosti
 `MikroFix`, gostovanja in nadzorovanega postopka objave. Njegova operativna meja
-je zapisana v `docs/local_agents/SVIT.md`; vključitev ne daje samodejnega
+je zapisana v `/home/mikrofix/Codex_Agenti/SVIT.md`; vključitev ne daje samodejnega
 dovoljenja za produkcijske ali varnostno občutljive posege.

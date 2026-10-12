@@ -1,7 +1,8 @@
 # MikroFIX local supervisor
 
 Status: historical tooling for the superseded supervised chain. It is not the
-active MikroFIX agent workflow; see `docs/local_agents/README.md`.
+active MikroFIX agent workflow; see `docs/local_agents/README.md` for local
+coders and `/home/mikrofix/Codex_Agenti/README.md` for Codex specialists.
 
 Supervisor is the fail-closed coordinator above the local executor bridge. It
 turns an owner-approved JSON plan into bounded implementation attempts, local
